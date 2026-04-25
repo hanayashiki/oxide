@@ -399,17 +399,35 @@ impl Checker {
 
     // ---------- walk ----------
 
-    /// Block typing is grammar-driven: the *last* item with
-    /// `has_semi == false` produces the block's value type; otherwise the
-    /// block has type `()`. Mid-block items without `;` are post-checked
-    /// against `()` via `unify` — `()` and `!` (via the Never arm) pass
-    /// silently; anything else fires E0250 ("expected `()`, found <T>")
-    /// pointing at the missing-`;` expression.
+    /// Block typing — two pieces:
     ///
-    /// Deliberately does **not** do divergence-flag bookkeeping
-    /// (`FnCtxt::diverges` in rustc). One observable consequence:
-    /// `fn f() -> i32 { return 1; }` errors here (block_ty = unit);
-    /// workaround is to drop the trailing `;`. See spec discussion.
+    /// 1. **Mid-block `;`-enforcement.** A non-last item with
+    ///    `has_semi == false` must coerce to `()`. Unify against unit:
+    ///    `()` matches, `!` is absorbed by the Never arm, anything else
+    ///    fires E0250 on the missing-`;` expression.
+    ///
+    /// 2. **Block's value type.** The last item's expression type *wins*
+    ///    when either:
+    ///    - the user wrote it as a tail (`has_semi == false`), OR
+    ///    - the expression itself is divergent (`!`). A trailing `;`
+    ///      cannot "discard" a divergent expression — there's no
+    ///      implicit unit to reach.
+    ///
+    ///    Otherwise the block's value type is `()` (the implicit unit
+    ///    after the trailing `;`).
+    ///
+    /// The fn-return check (`check_fn`) coerces this value type against
+    /// the declared return type. The Never arm of `unify` makes
+    /// divergent bodies vacuously match any declared return — no CFG,
+    /// no diverges flag, no propagation from sub-blocks. Concretely:
+    ///
+    /// - `{ return 1; }` → last expr `return 1` is `!`, value = `!`,
+    ///   coerce vacuous. ✓
+    /// - `{ g(); }` where `g(): !` → same shape, value = `!`. ✓
+    /// - `{ 1; }` → last expr `1` is `i32` (not `!`), value = `()`,
+    ///   coerce(`()`, declared) errors for non-unit returns.
+    /// - `{ { return 1 } "a" }` → last expr `"a"` is `*const u8`,
+    ///   value = `*const u8`, coerce against `i32` errors. ✓
     fn infer_block(&mut self, hir: &HirModule, bid: HBlockId) -> TyId {
         let block = hir.blocks[bid].clone();
         let last_idx = block.items.len().checked_sub(1);
@@ -422,8 +440,17 @@ impl Checker {
             }
         }
         match block.items.last() {
-            Some(it) if !it.has_semi => self.expr_tys[it.expr],
-            _ => self.tys.unit,
+            Some(it) => {
+                let expr_ty = self.expr_tys[it.expr];
+                let is_never =
+                    matches!(self.tys.kind(self.resolve(expr_ty)), TyKind::Never);
+                if !it.has_semi || is_never {
+                    expr_ty
+                } else {
+                    self.tys.unit
+                }
+            }
+            None => self.tys.unit,
         }
     }
 
@@ -632,14 +659,29 @@ impl Checker {
                 let else_ty = self.infer_block(hir, bid);
                 let span = hir.blocks[bid].span.clone();
                 self.unify(then_ty, else_ty, span);
-                then_ty
+                self.join_never(then_ty, else_ty)
             }
             Some(HElseArm::If(eid)) => {
                 let else_ty = self.infer_expr(hir, eid);
                 let span = hir.exprs[eid].span.clone();
                 self.unify(then_ty, else_ty, span);
-                then_ty
+                self.join_never(then_ty, else_ty)
             }
+        }
+    }
+
+    /// After unifying two arm types, pick the one that *isn't* `!`.
+    /// `unify`'s Never arm is a no-op, so the two TyIds remain distinct
+    /// when one side is `!`. The if-expr's actual type is the
+    /// non-divergent arm's type (Never absorbs). Without this, an
+    /// `if c { return 1 } else { 0 }` would be typed `!` if the then
+    /// arm came first, instead of `i32`.
+    fn join_never(&self, a: TyId, b: TyId) -> TyId {
+        let ar = self.resolve(a);
+        if matches!(self.tys.kind(ar), TyKind::Never) {
+            self.resolve(b)
+        } else {
+            a
         }
     }
 

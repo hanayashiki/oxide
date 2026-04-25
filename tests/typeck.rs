@@ -361,6 +361,107 @@ fn if_with_returns_in_both_arms_typechecks() {
 }
 
 #[test]
+fn return_with_trailing_semi_typechecks() {
+    // `{ return 1; }` — last expr is `return 1` (type `!`). Even with
+    // has_semi=true, a `!`-typed expression keeps its type as the
+    // block's value (a `;` can't "discard" a divergent expression —
+    // there's no implicit unit to reach). coerce(!, i32) ✓.
+    let (_, errs) = typeck("fn f() -> i32 { return 1; }");
+    assert!(errs.is_empty(), "{errs:#?}");
+}
+
+#[test]
+fn never_returning_call_with_semi_makes_block_divergent() {
+    // `g()` returns `never`. `{ g(); }` — last expr type `!`, so block
+    // value = `!`, coerces to any declared return.
+    let (_, errs) = typeck(
+        "fn g() -> never { return 1 } fn f() -> i32 { g(); }",
+    );
+    assert!(errs.is_empty(), "{errs:#?}");
+}
+
+#[test]
+fn never_returning_call_as_tail_typechecks() {
+    // `{ g() }` — last expr (no `;`) is `!`-typed call. Block = `!`.
+    let (_, errs) = typeck(
+        "fn g() -> never { return 1 } fn f() -> i32 { g() }",
+    );
+    assert!(errs.is_empty(), "{errs:#?}");
+}
+
+#[test]
+fn return_then_trailing_string_errors() {
+    // `{ return 1; "a" }` — last item is `"a"` (has_semi=false), so
+    // block value = its type = `*const u8`. The earlier `return 1;`
+    // does NOT propagate divergence (no CFG). coerce(*const u8, i32)
+    // fires E0250.
+    let (_, errs) = typeck(r#"fn f() -> i32 { return 1; "a" }"#);
+    assert!(
+        errs.iter().any(|e| matches!(e, TypeError::TypeMismatch { .. })),
+        "{errs:#?}"
+    );
+}
+
+#[test]
+fn unit_returning_call_with_semi_is_unit() {
+    // `g()` returns `()`. `{ g(); }` — last expr type `()`, has_semi=
+    // true, NOT divergent → block value = `()`. fn `-> ()` accepts.
+    let (_, errs) = typeck("fn g() {} fn f() { g(); }");
+    assert!(errs.is_empty(), "{errs:#?}");
+}
+
+#[test]
+fn non_unit_call_with_semi_at_end_errors_for_unit_fn() {
+    // `g()` returns `i32`. `{ g(); }` — last expr type `i32`, has_semi=
+    // true, NOT divergent → block value = `()`. coerce((), i32) fails
+    // for `-> i32`; coerce((), ()) ✓ for `-> ()`.
+    let (_, errs) = typeck("fn g() -> i32 { 0 } fn f() -> i32 { g(); }");
+    assert!(
+        errs.iter().any(|e| matches!(e, TypeError::TypeMismatch { .. })),
+        "{errs:#?}"
+    );
+}
+
+#[test]
+fn if_with_one_divergent_arm_takes_other_arms_type() {
+    // `if c { return 1; } else { 0 }` — then-arm has type `!`, else-arm
+    // has type i32. The if-expr's type must be i32 (Never absorbs into
+    // the concrete side), not `!`. Without this the if-expr would be
+    // `!`-typed and codegen wouldn't allocate a result slot for the
+    // else-arm's value.
+    let (_, errs) = typeck(
+        "fn f(c: bool) -> i32 { if c { return 1; } else { 0 } }",
+    );
+    assert!(errs.is_empty(), "{errs:#?}");
+}
+
+#[test]
+fn fib_with_semi_after_return_typechecks() {
+    // Real-world regression: fib's then-arm uses `return 1;` (with `;`).
+    // Combined infer_block + infer_if rules: then-arm `{ return 1; }`
+    // is `!`, else-arm produces `u32`, if-expr type = `u32` (after
+    // join_never), body value = `u32`. ✓
+    let (_, errs) = typeck(
+        "fn fib(n: u32) -> u32 { \
+             if n <= 1 { return 1; } else { fib(n-1) + fib(n-2) } \
+         }",
+    );
+    assert!(errs.is_empty(), "{errs:#?}");
+}
+
+#[test]
+fn nested_block_divergence_does_not_propagate_to_outer() {
+    // The "shit" case redux: inner block `{ return 1 }` is `!`-typed
+    // but it's the second-to-last item with has_semi=false. The
+    // trailing `0` is the value-producing item — coerces against fn
+    // ret. Here `0` matches i32 ✓.
+    let (_, errs) = typeck("fn f() -> i32 { { return 1 } 0 }");
+    // The mid-block `{ return 1 }` enforce: unify(!, ()) ok via Never.
+    // Last `0` → i32. ✓
+    assert!(errs.is_empty(), "{errs:#?}");
+}
+
+#[test]
 fn bare_semicolons_are_no_ops() {
     // `;;` and stray `;` between/around items must not break parsing
     // or typechecking — they parse to zero block-items.

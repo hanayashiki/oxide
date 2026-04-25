@@ -16,8 +16,7 @@ body:                                             ; preds = %allocas
   br i1 %le, label %if.then, label %if.else
 
 if.then:                                          ; preds = %body
-  store i32 1, ptr %if.slot, align 4
-  br label %if.end
+  ret i32 1
 
 if.else:                                          ; preds = %body
   %load1 = load i32, ptr %n.1.slot, align 4
@@ -30,7 +29,7 @@ if.else:                                          ; preds = %body
   store i32 %add, ptr %if.slot, align 4
   br label %if.end
 
-if.end:                                           ; preds = %if.else, %if.then
+if.end:                                           ; preds = %if.else
   %if.val = load i32, ptr %if.slot, align 4
   ret i32 %if.val
 }
@@ -40,7 +39,7 @@ allocas:
   br label %body
 
 body:                                             ; preds = %allocas
-  %call = call i32 @fib(i32 10)
+  %call = call i32 @fib(i32 12)
   %call1 = call i32 @print_int(i32 %call)
   ret i32 0
 }

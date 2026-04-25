@@ -14,9 +14,7 @@ use clap::Parser;
 use oxide::hir::lower;
 use oxide::lexer::lex;
 use oxide::parser::parse;
-use oxide::reporter::{
-    SourceMap, emit, from_hir_error, from_parse_error, from_typeck_error,
-};
+use oxide::reporter::{SourceMap, emit, from_hir_error, from_parse_error, from_typeck_error};
 use oxide::typeck::check;
 
 #[derive(Parser, Debug)]
@@ -93,11 +91,7 @@ fn main() -> ExitCode {
             // Only show exprs that belong to this fn's body — we don't track
             // ownership precisely, so just dump everything once after all fns.
             if fid.raw() == 0 {
-                println!(
-                    "  HExprId({}) : {}",
-                    eid.raw(),
-                    results.tys.render(ty)
-                );
+                println!("  HExprId({}) : {}", eid.raw(), results.tys.render(ty));
             }
         }
     }
