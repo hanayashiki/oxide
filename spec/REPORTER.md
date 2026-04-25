@@ -27,7 +27,8 @@ Compiler stages do **not** call `ariadne` directly. They emit a structured
 pub enum Severity { Error, Warning, Note, Help }
 
 pub struct Label {
-    pub span: Span,        // from spec/LEXER.md — has byte + LSP positions
+    pub file: FileId,      // which source file this label points into
+    pub span: Span,        // from spec/LEXER.md — byte + LSP positions
     pub message: String,   // shown next to the underline; "" hides it
     pub primary: bool,     // exactly one primary label per diagnostic
 }
@@ -41,6 +42,8 @@ pub struct Diagnostic {
     pub helps: Vec<String>,           // suggestions ("help: try ...")
 }
 ```
+
+`FileId` lives on `Label`, **not** on `Span`. This keeps the lexer pure — it has no knowledge of files or `SourceMap` — and lets a single diagnostic point at multiple files (the natural shape of cross-file errors). When a stage produces a diagnostic it pairs each span with the `FileId` it came from at the call site.
 
 Conventions:
 
