@@ -1,0 +1,188 @@
+// AST with ID-based arenas. No `Stmt` type: a block is a list of expressions
+// (`items`) plus an optional tail expression. `let`, `if`, `{block}`, and
+// `return` are all expression kinds. The grammar restricts `let` to
+// block-item position; everything else is unrestricted.
+
+use crate::lexer::Span;
+use index_vec::IndexVec;
+
+index_vec::define_index_type! { pub struct ItemId  = u32; }
+index_vec::define_index_type! { pub struct ExprId  = u32; }
+index_vec::define_index_type! { pub struct BlockId = u32; }
+index_vec::define_index_type! { pub struct TypeId  = u32; }
+
+#[derive(Clone, Debug)]
+pub struct Module {
+    pub items: IndexVec<ItemId, Item>,
+    pub exprs: IndexVec<ExprId, Expr>,
+    pub blocks: IndexVec<BlockId, Block>,
+    pub types: IndexVec<TypeId, Type>,
+    pub root_items: Vec<ItemId>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct Item {
+    pub kind: ItemKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum ItemKind {
+    Fn(FnDecl),
+}
+
+#[derive(Clone, Debug)]
+pub struct FnDecl {
+    pub name: Ident,
+    pub params: Vec<Param>,
+    pub ret_ty: Option<TypeId>,
+    pub body: BlockId,
+}
+
+#[derive(Clone, Debug)]
+pub struct Param {
+    pub name: Ident,
+    pub ty: TypeId,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct Ident {
+    pub name: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct Block {
+    /// Expressions evaluated in order; their values are discarded.
+    pub items: Vec<ExprId>,
+    /// Optional value-producing expression at the end of the block.
+    pub tail: Option<ExprId>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct Expr {
+    pub kind: ExprKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum ExprKind {
+    IntLit(u64),
+    BoolLit(bool),
+    CharLit(char),
+    StrLit(String),
+    Ident(Ident),
+    Paren(ExprId),
+    Unary {
+        op: UnOp,
+        expr: ExprId,
+    },
+    Binary {
+        op: BinOp,
+        lhs: ExprId,
+        rhs: ExprId,
+    },
+    Assign {
+        op: AssignOp,
+        lhs: ExprId,
+        rhs: ExprId,
+    },
+    Call {
+        callee: ExprId,
+        args: Vec<ExprId>,
+    },
+    Index {
+        base: ExprId,
+        index: ExprId,
+    },
+    Field {
+        base: ExprId,
+        name: Ident,
+    },
+    Cast {
+        expr: ExprId,
+        ty: TypeId,
+    },
+    If {
+        cond: ExprId,
+        then_block: BlockId,
+        else_arm: Option<ElseArm>,
+    },
+    Block(BlockId),
+    /// `return e?` — type `!`. Always parses as an expression so it can
+    /// appear in any expression position (`let b: i32 = return 1;`).
+    Return(Option<ExprId>),
+    /// `let [mut] name [: ty] [= init]` — type `()`. The grammar restricts
+    /// this to block-item position; the AST does not.
+    Let {
+        mutable: bool,
+        name: Ident,
+        ty: Option<TypeId>,
+        init: Option<ExprId>,
+    },
+    Poison,
+}
+
+#[derive(Clone, Debug)]
+pub enum ElseArm {
+    Block(BlockId),
+    If(ExprId),
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum UnOp {
+    Neg,
+    Not,
+    BitNot,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AssignOp {
+    Eq,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+}
+
+#[derive(Clone, Debug)]
+pub struct Type {
+    pub kind: TypeKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum TypeKind {
+    Named(Ident),
+}

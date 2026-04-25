@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 ariadne = "0.6.0"
+chumsky = { version = "0.12.0", features = ["pratt"] }
+index_vec = "0.1.4"
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
