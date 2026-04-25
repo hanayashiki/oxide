@@ -311,52 +311,134 @@ where
     })
 }
 
-fn fn_item_parser<'a, I>() -> impl Parser<'a, I, ItemId, Extra<'a>> + Clone
+fn param_parser<'a, I>() -> impl Parser<'a, I, Param, Extra<'a>> + Clone
 where
     I: OValueInput<'a>,
 {
-    let expr = expr_parser();
-    let block = block_parser_inner(expr.clone());
-
-    let param = ident_parser()
+    ident_parser()
         .then_ignore(just(TokenKind::Colon))
         .then(type_parser())
         .map_with(|(name, ty), e| Param {
             name,
             ty,
             span: e.lex_span(),
-        });
+        })
+}
 
-    let params = param
+fn params_parser<'a, I>() -> impl Parser<'a, I, Vec<Param>, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+{
+    param_parser()
         .separated_by(just(TokenKind::Comma))
         .allow_trailing()
         .collect::<Vec<_>>()
-        .delimited_by(just(TokenKind::LParen), just(TokenKind::RParen));
+        .delimited_by(just(TokenKind::LParen), just(TokenKind::RParen))
+}
 
-    let ret_ty = just(TokenKind::Arrow).ignore_then(type_parser()).or_not();
+fn ret_ty_parser<'a, I>() -> impl Parser<'a, I, Option<TypeId>, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+{
+    just(TokenKind::Arrow).ignore_then(type_parser()).or_not()
+}
+
+/// Parse a fn signature plus either `{ block }` or `;`. The grammar is
+/// the same in both top-level and `extern "C"`-block positions; each call
+/// site validates the body's presence/absence and emits a clear error if
+/// the wrong shape was used.
+fn fn_decl_parser<'a, I>() -> impl Parser<'a, I, FnDecl, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+{
+    let expr = expr_parser();
+    let block = block_parser_inner(expr.clone());
+    let body = choice((block.map(Some), just(TokenKind::Semi).to(None)));
 
     just(TokenKind::KwFn)
         .ignore_then(ident_parser())
-        .then(params)
-        .then(ret_ty)
-        .then(block)
-        .map_with(|(((name, params), ret_ty), body), e| {
-            e.push_item(ItemKind::Fn(FnDecl {
-                name,
-                params,
-                ret_ty,
-                body,
-            }))
+        .then(params_parser())
+        .then(ret_ty_parser())
+        .then(body)
+        .map(|(((name, params), ret_ty), body)| FnDecl {
+            name,
+            params,
+            ret_ty,
+            body,
         })
+}
+
+fn fn_item_parser<'a, I>() -> impl Parser<'a, I, ItemId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+{
+    fn_decl_parser()
+        .validate(|fn_decl, e: &mut OMapExtra<'_, '_, I>, emitter| {
+            if fn_decl.body.is_none() {
+                emitter.emit(Rich::custom(
+                    e.span(),
+                    format!(
+                        "bodyless `fn {}` must be inside an `extern \"C\" {{ ... }}` block",
+                        fn_decl.name.name
+                    ),
+                ));
+            }
+            fn_decl
+        })
+        .map_with(|fn_decl, e| e.push_item(ItemKind::Fn(fn_decl)))
         .labelled("function")
+}
+
+/// `extern "C" { fn name(args) -> ret; ... }`. Only `"C"` is a valid
+/// ABI string in v0. Each child fn is validated to be bodyless.
+fn extern_block_parser<'a, I>() -> impl Parser<'a, I, ItemId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+{
+    let abi = any().try_map(|tok: TokenKind, span: SimpleSpan| match tok {
+        TokenKind::Str(s) if s == "C" => Ok(s),
+        TokenKind::Str(s) => Err(Rich::custom(
+            span,
+            format!("only \"C\" ABI is supported, got \"{s}\""),
+        )),
+        other => Err(Rich::custom(
+            span,
+            format!("expected ABI string \"C\", got {other:?}"),
+        )),
+    });
+
+    let items = fn_decl_parser()
+        .validate(|mut fn_decl, e: &mut OMapExtra<'_, '_, I>, emitter| {
+            if fn_decl.body.is_some() {
+                emitter.emit(Rich::custom(
+                    e.span(),
+                    format!(
+                        "extern \"C\" fn `{}` must not have a body",
+                        fn_decl.name.name
+                    ),
+                ));
+                fn_decl.body = None;
+            }
+            fn_decl
+        })
+        .repeated()
+        .collect::<Vec<_>>()
+        .delimited_by(just(TokenKind::LBrace), just(TokenKind::RBrace));
+
+    just(TokenKind::KwExtern)
+        .ignore_then(abi)
+        .then(items)
+        .map_with(|(abi, items), e| {
+            let span = e.lex_span();
+            e.push_item(ItemKind::ExternBlock(ExternBlock { abi, items, span }))
+        })
+        .labelled("extern block")
 }
 
 pub(super) fn module_parser<'a, I>() -> impl Parser<'a, I, Vec<ItemId>, Extra<'a>>
 where
     I: OValueInput<'a>,
 {
-    fn_item_parser()
-        .repeated()
-        .collect::<Vec<_>>()
-        .then_ignore(end())
+    let item = choice((extern_block_parser(), fn_item_parser()));
+    item.repeated().collect::<Vec<_>>().then_ignore(end())
 }

@@ -124,10 +124,13 @@ impl Checker {
 
     /// Phase 2. Each fn body gets a fresh Inferer; finalize replaces any
     /// Infer vars left in this fn's contributions to expr_tys/local_tys.
+    /// Foreign fns (`body == None`) have nothing to infer — we skip them.
     fn check_fn(&mut self, hir: &HirModule, fid: FnId) {
+        let Some(body_id) = hir.fns[fid].body else {
+            return;
+        };
         self.inferer = Some(Inferer::default());
         self.cur_ret = self.fn_sigs[fid].ret;
-        let body_id = hir.fns[fid].body;
         let body_ty = self.infer_block(hir, body_id);
         let body_span = hir.blocks[body_id].span.clone();
         self.unify(body_ty, self.cur_ret, body_span);

@@ -58,9 +58,13 @@ pub fn codegen<'ctx>(
     };
 
     // Pass 2 — define. Each fn body gets a fresh FnCodegenContext on
-    // the stack inside `lower_fn`.
-    for (fid, _) in cg.hir.fns.iter_enumerated() {
-        cg.lower_fn(fid);
+    // the stack inside `lower_fn`. Foreign fns (`body == None`) skip this
+    // pass entirely; the FunctionValue from pass 1 stays as a `declare`
+    // line in the IR with no basic blocks.
+    for (fid, hir_fn) in cg.hir.fns.iter_enumerated() {
+        if hir_fn.body.is_some() {
+            cg.lower_fn(fid);
+        }
     }
 
     if let Err(msg) = cg.module.verify() {
@@ -175,7 +179,10 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             fx.locals.insert(lid, slot);
         }
 
-        let body_id = hir_fn.body;
+        // `lower_fn` is only called for body-having fns, so unwrap is sound.
+        let body_id = hir_fn
+            .body
+            .expect("lower_fn called on foreign fn — codegen should have skipped");
         let body_val = self.emit_block(&mut fx, body_id);
 
         if !self.is_terminated() {

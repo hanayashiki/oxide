@@ -41,7 +41,10 @@ pub(super) fn rich_to_parse_error(
                 ParseError::UnexpectedEof { expected, span }
             }
         }
-        RichReason::Custom(_) => ParseError::BadStatement { span },
+        RichReason::Custom(msg) => ParseError::Custom {
+            message: msg.clone(),
+            span,
+        },
     }
 }
 

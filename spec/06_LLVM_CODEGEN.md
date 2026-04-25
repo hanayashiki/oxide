@@ -321,6 +321,32 @@ Output IR matches the acceptance block above (modulo names assigned
 by inkwell's auto-numbering — tests assert structurally, not on
 exact register names).
 
+## Foreign functions (`extern "C"` blocks)
+
+`extern "C" { fn name(...) -> ret; ... }` declares functions whose
+definitions live outside Oxide source — typically a linked C runtime.
+Each declaration is bodyless (HIR `body: None`, `is_extern: true`).
+
+Pass 1 declares every foreign fn via `module.add_function(...)` —
+identical to local fns. Pass 2 skips the foreign-fn loop entirely
+(`if hir_fn.body.is_some()`), so the `FunctionValue` keeps an empty
+basic-block list. LLVM prints that as a `declare` line:
+
+```llvm
+declare i32 @print_int(i32)
+```
+
+Calls against extern fns flow through the same `emit_call` path as
+local-fn calls — the `Fn(fid)` callee resolves to `fn_decls[fid]`,
+and the resulting `call` instruction emits a relocation entry that
+the linker resolves against an external object file.
+
+No special-casing for ABI in v0: every `FunctionValue` defaults to
+LLVM's C calling convention, which is what `extern "C"` already
+guarantees. Adding other ABIs (`"system"`, `"win64"`) would mean
+calling `fnv.set_call_conventions(...)` after `add_function` — that
+work waits until typeck distinguishes more than one ABI string.
+
 ## Out of scope (v0)
 
 - Object code / bitcode emission. v0 stops at the in-memory `Module`;

@@ -244,9 +244,68 @@ fn second_function_still_parses_after_error_in_first() {
     let names: Vec<&str> = module
         .root_items
         .iter()
-        .map(|id| match &module.items[*id].kind {
-            oxide::parser::ItemKind::Fn(f) => f.name.name.as_str(),
+        .filter_map(|id| match &module.items[*id].kind {
+            oxide::parser::ItemKind::Fn(f) => Some(f.name.name.as_str()),
+            oxide::parser::ItemKind::ExternBlock(_) => None,
         })
         .collect();
     assert!(names.contains(&"good"), "expected `good` to parse, got {names:?}");
+}
+
+#[test]
+fn extern_block_with_one_fn() {
+    check(
+        r#"extern "C" { fn print_int(x: i32) -> i32; }"#,
+        expect![[r#"
+            Module
+              ExternBlock "C"
+                Fn print_int(x: i32) -> i32;
+        "#]],
+    );
+}
+
+#[test]
+fn extern_block_with_multiple_fns() {
+    check(
+        r#"extern "C" { fn a(x: i32) -> i32; fn b() -> i32; fn c(); }"#,
+        expect![[r#"
+            Module
+              ExternBlock "C"
+                Fn a(x: i32) -> i32;
+                Fn b() -> i32;
+                Fn c();
+        "#]],
+    );
+}
+
+#[test]
+fn extern_block_alongside_local_fn() {
+    check(
+        r#"extern "C" { fn print_int(x: i32) -> i32; } fn main() -> i32 { 0 }"#,
+        expect![[r#"
+            Module
+              ExternBlock "C"
+                Fn print_int(x: i32) -> i32;
+              Fn main() -> i32
+                Block
+                  tail: Int(0)
+        "#]],
+    );
+}
+
+#[test]
+fn non_c_abi_is_a_parse_error() {
+    let tokens = lex(r#"extern "Rust" { fn f(); }"#);
+    let (_, errors) = parse(&tokens);
+    assert!(!errors.is_empty(), "expected parse error for non-C ABI");
+}
+
+#[test]
+fn bodyless_fn_outside_extern_block_is_a_parse_error() {
+    let tokens = lex("fn f();");
+    let (_, errors) = parse(&tokens);
+    assert!(
+        !errors.is_empty(),
+        "bodyless fn outside extern block must not parse"
+    );
 }

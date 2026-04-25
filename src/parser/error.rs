@@ -14,6 +14,13 @@ pub enum ParseError {
     BadStatement {
         span: Span,
     },
+    /// A custom semantic-shape error emitted from inside a parser combinator
+    /// via `Rich::custom` — e.g. "bodyless `fn` outside an extern block".
+    /// The `message` is the human-readable text the combinator chose.
+    Custom {
+        message: String,
+        span: Span,
+    },
     ReservedKeyword {
         kw: &'static str,
         span: Span,
@@ -33,6 +40,7 @@ impl ParseError {
             Self::UnexpectedToken { span, .. }
             | Self::UnexpectedEof { span, .. }
             | Self::BadStatement { span }
+            | Self::Custom { span, .. }
             | Self::ReservedKeyword { span, .. }
             | Self::LexErrorToken { span, .. }
             | Self::InvalidAssignTarget { span } => span,

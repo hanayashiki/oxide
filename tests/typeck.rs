@@ -152,3 +152,46 @@ fn if_no_else_must_be_unit() {
         "{errs:#?}"
     );
 }
+
+#[test]
+fn extern_fn_signature_resolves() {
+    let (r, errs) = typeck(r#"extern "C" { fn print_int(x: i32) -> i32; }"#);
+    assert!(errs.is_empty(), "{errs:#?}");
+    let sig = r.fn_sig(oxide::hir::FnId::from_raw(0));
+    assert_eq!(sig.params.len(), 1);
+    assert_eq!(sig.params[0], r.tys.i32);
+    assert_eq!(sig.ret, r.tys.i32);
+}
+
+#[test]
+fn calling_extern_fn_typechecks() {
+    let (_, errs) = typeck(
+        r#"extern "C" { fn print_int(x: i32) -> i32; }
+           fn main() -> i32 { print_int(42); 0 }"#,
+    );
+    assert!(errs.is_empty(), "{errs:#?}");
+}
+
+#[test]
+fn extern_fn_arity_mismatch_emits_e0253() {
+    let (_, errs) = typeck(
+        r#"extern "C" { fn print_int(x: i32) -> i32; }
+           fn main() -> i32 { print_int(); 0 }"#,
+    );
+    assert!(
+        errs.iter().any(|e| matches!(e, TypeError::WrongArgCount { expected: 1, found: 0, .. })),
+        "{errs:#?}"
+    );
+}
+
+#[test]
+fn extern_fn_arg_type_mismatch_emits_e0250() {
+    let (_, errs) = typeck(
+        r#"extern "C" { fn print_int(x: i32) -> i32; }
+           fn main() -> i32 { print_int(true); 0 }"#,
+    );
+    assert!(
+        errs.iter().any(|e| matches!(e, TypeError::TypeMismatch { .. })),
+        "{errs:#?}"
+    );
+}

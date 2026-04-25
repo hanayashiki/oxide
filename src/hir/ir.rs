@@ -28,7 +28,15 @@ pub struct HirFn {
     pub params: Vec<LocalId>,
     /// `None` when source omits `-> T` — typeck defaults to unit.
     pub ret_ty: Option<HirTy>,
-    pub body: HBlockId,
+    /// `Some(_)` for defined fns; `None` for foreign fns declared in an
+    /// `extern "C"` block. The two correlate today (`body.is_none()` iff
+    /// `is_extern`), but they're distinct fields so future cases that
+    /// have no body for non-extern reasons (trait methods, etc.) don't
+    /// require a refactor.
+    pub body: Option<HBlockId>,
+    /// `true` if this fn was declared inside an `extern "C"` block —
+    /// linker resolves the symbol against an external object file.
+    pub is_extern: bool,
     pub span: Span,
 }
 

@@ -33,6 +33,10 @@ pub fn from_parse_error(err: &ParseError, file: FileId) -> Diagnostic {
             Diagnostic::error("E0103", "could not parse this statement")
                 .with_label(Label::primary(file, span.clone(), "starting here"))
         }
+        ParseError::Custom { message, span } => {
+            Diagnostic::error("E0107", message.clone())
+                .with_label(Label::primary(file, span.clone(), "here"))
+        }
         ParseError::ReservedKeyword { kw, span } => {
             Diagnostic::error("E0104", format!("reserved keyword `{kw}` is not yet supported"))
                 .with_label(Label::primary(file, span.clone(), "reserved for future use"))

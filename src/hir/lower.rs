@@ -18,11 +18,9 @@ use super::ir::*;
 
 pub fn lower(ast_module: &ast::Module) -> (HirModule, Vec<HirError>) {
     let mut lowerer = Lowerer::new(ast_module);
-    let item_to_fid = lowerer.prescan_fns();
-    for (i, &iid) in ast_module.root_items.iter().enumerate() {
-        if let Some(fid) = item_to_fid[i] {
-            lowerer.lower_fn(iid, fid);
-        }
+    let to_lower = lowerer.prescan_fns();
+    for (fid, fn_decl) in to_lower {
+        lowerer.lower_fn(fid, &fn_decl);
     }
     lowerer.finish()
 }
@@ -56,53 +54,69 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Pass 1: allocate a `FnId` for each module-level fn item, push a stub
-    /// `HirFn` into the arena (body filled in pass 2), and register the
-    /// name in `module_scope`. Duplicate names emit `DuplicateFn` but both
-    /// items still get FnIds — only the first wins name resolution.
-    fn prescan_fns(&mut self) -> Vec<Option<FnId>> {
-        let mut out = Vec::with_capacity(self.ast.root_items.len());
+    /// Pass 1: allocate a `FnId` per fn item (and per fn inside any
+    /// `extern "C"` block), push stub `HirFn`s, register names in
+    /// `module_scope`. Returns `(FnId, FnDecl)` pairs for pass 2 to
+    /// finish off. FnDecls are cloned because extern-block items are
+    /// stored inline and don't have stable ItemIds.
+    fn prescan_fns(&mut self) -> Vec<(FnId, ast::FnDecl)> {
+        let mut out = Vec::new();
         for &iid in &self.ast.root_items {
             let item = &self.ast.items[iid];
             match &item.kind {
                 ast::ItemKind::Fn(fn_decl) => {
-                    let fid = self.fns.push(HirFn {
-                        name: fn_decl.name.name.clone(),
-                        params: Vec::new(),
-                        ret_ty: None,
-                        body: HBlockId::from_raw(u32::MAX), // sentinel; replaced in pass 2
-                        span: item.span.clone(),
-                    });
-                    self.root_fns.push(fid);
-                    match self.module_scope.entry(fn_decl.name.name.clone()) {
-                        Entry::Vacant(e) => {
-                            e.insert(fid);
-                        }
-                        Entry::Occupied(e) => {
-                            let first_fid = *e.get();
-                            self.errors.push(HirError::DuplicateFn {
-                                name: fn_decl.name.name.clone(),
-                                first: self.fns[first_fid].span.clone(),
-                                dup: item.span.clone(),
-                            });
-                        }
+                    let fid = self.register_fn_stub(fn_decl, &item.span, false);
+                    out.push((fid, fn_decl.clone()));
+                }
+                ast::ItemKind::ExternBlock(block) => {
+                    for fn_decl in &block.items {
+                        let fid = self.register_fn_stub(fn_decl, &block.span, true);
+                        out.push((fid, fn_decl.clone()));
                     }
-                    out.push(Some(fid));
                 }
             }
         }
         out
     }
 
-    /// Pass 2: lower a function body. Pushes a scope for params, lowers
-    /// each, lowers the body block, and writes back into the stub `HirFn`.
-    fn lower_fn(&mut self, iid: ast::ItemId, fid: FnId) {
-        let item = &self.ast.items[iid];
-        let ast::ItemKind::Fn(fn_decl) = &item.kind;
-        // ^ infallible: prescan only allocated FnIds for fn items.
+    /// Allocate an `HirFn` stub, append to `root_fns`, and register the
+    /// name in `module_scope` (emitting `DuplicateFn` on collision).
+    fn register_fn_stub(
+        &mut self,
+        fn_decl: &ast::FnDecl,
+        span: &Span,
+        is_extern: bool,
+    ) -> FnId {
+        let fid = self.fns.push(HirFn {
+            name: fn_decl.name.name.clone(),
+            params: Vec::new(),
+            ret_ty: None,
+            body: None,
+            is_extern,
+            span: span.clone(),
+        });
+        self.root_fns.push(fid);
+        match self.module_scope.entry(fn_decl.name.name.clone()) {
+            Entry::Vacant(e) => {
+                e.insert(fid);
+            }
+            Entry::Occupied(e) => {
+                let first_fid = *e.get();
+                self.errors.push(HirError::DuplicateFn {
+                    name: fn_decl.name.name.clone(),
+                    first: self.fns[first_fid].span.clone(),
+                    dup: span.clone(),
+                });
+            }
+        }
+        fid
+    }
 
-        // Outer scope holds parameters; the body block pushes its own
-        // sub-scope on top.
+    /// Pass 2: lower a function. Lowers params + ret_ty for every fn;
+    /// lowers the body block only when present (foreign fns skip).
+    fn lower_fn(&mut self, fid: FnId, fn_decl: &ast::FnDecl) {
+        // Outer scope holds parameters; the body block (if any) pushes its
+        // own sub-scope on top.
         self.scopes.push(HashMap::new());
 
         let param_specs: Vec<_> = fn_decl
@@ -125,8 +139,7 @@ impl<'a> Lowerer<'a> {
         }
 
         let ret_ty = fn_decl.ret_ty.map(|t| self.lower_ty(t));
-        let body_ast_id = fn_decl.body;
-        let body = self.lower_block(body_ast_id);
+        let body = fn_decl.body.map(|bid| self.lower_block(bid));
 
         self.scopes.pop();
 

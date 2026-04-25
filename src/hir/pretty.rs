@@ -35,7 +35,8 @@ impl<'a> Printer<'a> {
 
     fn print_fn(&mut self, fid: FnId) {
         let f = &self.m.fns[fid];
-        let mut header = format!("Fn[{}] {}(", fid.raw(), f.name);
+        let prefix = if f.is_extern { "ExternFn" } else { "Fn" };
+        let mut header = format!("{}[{}] {}(", prefix, fid.raw(), f.name);
         for (i, &lid) in f.params.iter().enumerate() {
             if i > 0 {
                 header.push_str(", ");
@@ -51,9 +52,11 @@ impl<'a> Printer<'a> {
             write!(header, " -> {}", ty_str(rt)).unwrap();
         }
         self.write_line(&header);
-        self.indent += 1;
-        self.print_block(f.body);
-        self.indent -= 1;
+        if let Some(bid) = f.body {
+            self.indent += 1;
+            self.print_block(bid);
+            self.indent -= 1;
+        }
     }
 
     fn print_block(&mut self, bid: HBlockId) {

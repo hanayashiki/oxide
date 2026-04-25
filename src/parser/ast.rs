@@ -29,7 +29,12 @@ pub struct Item {
 
 #[derive(Clone, Debug)]
 pub enum ItemKind {
+    /// Defined function. Body is required by the grammar at item position
+    /// (`body` is always `Some` here in well-formed AST).
     Fn(FnDecl),
+    /// `extern "C" { ... }` — group of foreign function declarations.
+    /// Each child `FnDecl` has `body: None` (no block in the grammar).
+    ExternBlock(ExternBlock),
 }
 
 #[derive(Clone, Debug)]
@@ -37,7 +42,16 @@ pub struct FnDecl {
     pub name: Ident,
     pub params: Vec<Param>,
     pub ret_ty: Option<TypeId>,
-    pub body: BlockId,
+    /// `Some(_)` for defined fns; `None` for fns inside an `extern` block.
+    pub body: Option<BlockId>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExternBlock {
+    /// ABI string, e.g. `"C"`. Only `"C"` is accepted at parse time in v0.
+    pub abi: String,
+    pub items: Vec<FnDecl>,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug)]

@@ -201,7 +201,7 @@ fn if_else_resolves_in_each_branch() {
     let (ast, _) = parse(&tokens);
     let (hir, _) = lower(&ast);
     let f = &hir.fns[hir.root_fns[0]];
-    let body = &hir.blocks[f.body];
+    let body = &hir.blocks[f.body.expect("local fn has body")];
     let if_id = *body.items.first().expect("if as item");
     let HirExprKind::If { cond, then_block, else_arm } = &hir.exprs[if_id].kind else {
         panic!("first item should be If");
@@ -216,4 +216,46 @@ fn if_else_resolves_in_each_branch() {
     let else_b = &hir.blocks[*else_bid];
     let else_tail = else_b.tail.expect("else-tail expected");
     assert!(matches!(&hir.exprs[else_tail].kind, HirExprKind::Local(lid) if lid.raw() == 2));
+}
+
+#[test]
+fn extern_block_lowers_to_bodyless_hir_fn() {
+    let (hir, errs) = lower_src(r#"extern "C" { fn print_int(x: i32) -> i32; }"#);
+    assert!(errs.is_empty(), "{errs:#?}");
+    assert_eq!(hir.fns.len(), 1);
+    let f = &hir.fns[hir.root_fns[0]];
+    assert_eq!(f.name, "print_int");
+    assert!(f.is_extern, "extern block child must have is_extern = true");
+    assert!(f.body.is_none(), "extern fn must have no body");
+    assert_eq!(f.params.len(), 1);
+    assert!(matches!(&f.ret_ty.as_ref().unwrap().kind, HirTyKind::Named(s) if s == "i32"));
+}
+
+#[test]
+fn extern_fn_call_resolves_to_fn() {
+    let (hir, errs) = lower_src(
+        r#"extern "C" { fn print_int(x: i32) -> i32; }
+           fn main() -> i32 { print_int(42); 0 }"#,
+    );
+    assert!(errs.is_empty(), "{errs:#?}");
+    let main_fid = hir.root_fns.iter().find(|&&fid| hir.fns[fid].name == "main").copied().expect("main fn");
+    let main = &hir.fns[main_fid];
+    let body_id = main.body.expect("main has body");
+    let body = &hir.blocks[body_id];
+    let call_eid = *body.items.first().expect("call as first item");
+    let HirExprKind::Call { callee, .. } = &hir.exprs[call_eid].kind else {
+        panic!("first item should be a Call");
+    };
+    let HirExprKind::Fn(callee_fid) = &hir.exprs[*callee].kind else {
+        panic!("callee should resolve to Fn");
+    };
+    assert!(hir.fns[*callee_fid].is_extern, "callee should be extern fn");
+}
+
+#[test]
+fn local_fn_marks_is_extern_false() {
+    let (hir, _) = lower_src("fn add(a: i32, b: i32) -> i32 { a + b }");
+    let f = &hir.fns[hir.root_fns[0]];
+    assert!(!f.is_extern);
+    assert!(f.body.is_some());
 }

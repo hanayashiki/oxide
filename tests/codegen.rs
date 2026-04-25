@@ -212,3 +212,30 @@ fn logical_not_emits_xor_i1() {
     let ir = compile_to_ir("fn f(c: bool) -> bool { !c }");
     assert_contains(&ir, "xor i1");
 }
+
+#[test]
+fn extern_fn_emits_declare_only() {
+    let ir = compile_to_ir(r#"extern "C" { fn print_int(x: i32) -> i32; }"#);
+    assert_contains(&ir, "declare i32 @print_int(i32)");
+    assert!(
+        !ir.contains("define i32 @print_int"),
+        "extern fn should not have a define:\n{ir}"
+    );
+}
+
+#[test]
+fn extern_fn_call_site_emits_call_inst() {
+    let ir = compile_to_ir(
+        r#"extern "C" { fn print_int(x: i32) -> i32; }
+           fn main() -> i32 { print_int(42); 0 }"#,
+    );
+    assert_contains(&ir, "declare i32 @print_int(i32)");
+    assert_contains(&ir, "define i32 @main()");
+    assert_contains(&ir, "call i32 @print_int(i32 42)");
+}
+
+#[test]
+fn extern_fn_with_unit_return_emits_void_declare() {
+    let ir = compile_to_ir(r#"extern "C" { fn flush(); }"#);
+    assert_contains(&ir, "declare void @flush()");
+}

@@ -35,22 +35,40 @@ impl<'a> Printer<'a> {
     fn print_item(&mut self, iid: ItemId) {
         let item = &self.m.items[iid];
         match &item.kind {
-            ItemKind::Fn(f) => {
-                let mut header = format!("Fn {}(", f.name.name);
-                for (i, p) in f.params.iter().enumerate() {
-                    if i > 0 {
-                        header.push_str(", ");
-                    }
-                    write!(header, "{}: {}", p.name.name, type_str(self.m, p.ty)).unwrap();
+            ItemKind::Fn(f) => self.print_fn(f),
+            ItemKind::ExternBlock(b) => {
+                self.write_line(&format!("ExternBlock {:?}", b.abi));
+                self.indent += 1;
+                for f in &b.items {
+                    self.print_fn(f);
                 }
-                header.push(')');
-                if let Some(rt) = f.ret_ty {
-                    write!(header, " -> {}", type_str(self.m, rt)).unwrap();
-                }
+                self.indent -= 1;
+            }
+        }
+    }
+
+    fn print_fn(&mut self, f: &FnDecl) {
+        let mut header = format!("Fn {}(", f.name.name);
+        for (i, p) in f.params.iter().enumerate() {
+            if i > 0 {
+                header.push_str(", ");
+            }
+            write!(header, "{}: {}", p.name.name, type_str(self.m, p.ty)).unwrap();
+        }
+        header.push(')');
+        if let Some(rt) = f.ret_ty {
+            write!(header, " -> {}", type_str(self.m, rt)).unwrap();
+        }
+        match f.body {
+            Some(bid) => {
                 self.write_line(&header);
                 self.indent += 1;
-                self.print_block(f.body);
+                self.print_block(bid);
                 self.indent -= 1;
+            }
+            None => {
+                header.push_str(";");
+                self.write_line(&header);
             }
         }
     }
