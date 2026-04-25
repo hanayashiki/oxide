@@ -1,0 +1,14 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `i32`, found `()`
+   ╭─[ error_non_unit_call_with_semi_at_end_for_unit_fn.ox:1:35 ]
+   │
+ 1 │ fn g() -> i32 { 0 } fn f() -> i32 { g(); }
+   │                                   ────┬───  
+   │                                       ╰───── type mismatch here
+───╯
+== types ==
+Fn[0] g() -> i32
+  HExprId(0) : i32
+  HExprId(1) : fn() -> i32
+  HExprId(2) : i32
+Fn[1] f() -> i32

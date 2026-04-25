@@ -1,0 +1,17 @@
+== diagnostics ==
+[E0257] Error: pointer mutability mismatch: expected `*mut u8`, found `*const u8`
+   ╭─[ error_const_ptr_to_mut_param_e0257.ox:2:42 ]
+   │
+ 2 │ fn main(p: *const u8) -> i32 { takes_mut(p) }
+   │                                          ┬  
+   │                                          ╰── incompatible pointer
+   │ 
+   │ Help: only `*mut T` → `*const T` is allowed at the outer layer; inner positions must match exactly
+───╯
+== types ==
+Fn[0] takes_mut(s[Local(0)]: *mut u8) -> i32
+  HExprId(0) : i32
+  HExprId(1) : fn(*mut u8) -> i32
+  HExprId(2) : *const u8
+  HExprId(3) : i32
+Fn[1] main(p[Local(1)]: *const u8) -> i32

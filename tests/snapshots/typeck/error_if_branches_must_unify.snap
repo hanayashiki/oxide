@@ -1,0 +1,14 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `bool`, found `?T0`
+   ╭─[ error_if_branches_must_unify.ox:1:36 ]
+   │
+ 1 │ fn f() -> i32 { if true { 1 } else { false } }
+   │                                    ────┬────  
+   │                                        ╰────── type mismatch here
+───╯
+== types ==
+Fn[0] f() -> i32
+  HExprId(0) : bool
+  HExprId(1) : {error}
+  HExprId(2) : bool
+  HExprId(3) : {error}

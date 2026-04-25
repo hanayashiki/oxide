@@ -1,0 +1,8 @@
+== diagnostics ==
+== types ==
+Fn[0] print_int(x[Local(0)]: i32) -> i32
+  HExprId(0) : fn(i32) -> i32
+  HExprId(1) : i32
+  HExprId(2) : i32
+  HExprId(3) : i32
+Fn[1] main() -> i32

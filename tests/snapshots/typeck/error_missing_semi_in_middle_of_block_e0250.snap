@@ -1,0 +1,14 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `()`, found `?T1`
+   ╭─[ error_missing_semi_in_middle_of_block_e0250.ox:1:17 ]
+   │
+ 1 │ fn f() -> i32 { 1 + 2  3 }
+   │                 ──┬──  
+   │                   ╰──── type mismatch here
+───╯
+== types ==
+Fn[0] f() -> i32
+  HExprId(0) : {error}
+  HExprId(1) : {error}
+  HExprId(2) : {error}
+  HExprId(3) : i32

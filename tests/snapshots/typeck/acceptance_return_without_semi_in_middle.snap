@@ -1,0 +1,6 @@
+== diagnostics ==
+== types ==
+Fn[0] f() -> i32
+  HExprId(0) : i32
+  HExprId(1) : !
+  HExprId(2) : i32

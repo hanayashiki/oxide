@@ -1,0 +1,7 @@
+== diagnostics ==
+== types ==
+Fn[0] a() -> i32
+  HExprId(0) : fn() -> i32
+  HExprId(1) : i32
+  HExprId(2) : i32
+Fn[1] b() -> i32

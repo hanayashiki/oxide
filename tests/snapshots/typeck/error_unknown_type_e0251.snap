@@ -1,0 +1,12 @@
+== diagnostics ==
+[E0251] Error: unknown type `blarg`
+   ╭─[ error_unknown_type_e0251.ox:1:9 ]
+   │
+ 1 │ fn f(x: blarg) {}
+   │         ──┬──  
+   │           ╰──── not a known type
+   │ 
+   │ Help: v0 supports only primitive types: i8..i64, u8..u64, bool, void, never
+───╯
+== types ==
+Fn[0] f(x[Local(0)]: {error}) -> ()

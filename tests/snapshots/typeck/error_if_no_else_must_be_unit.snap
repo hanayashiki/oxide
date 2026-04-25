@@ -1,0 +1,13 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `()`, found `?T0`
+   ╭─[ error_if_no_else_must_be_unit.ox:1:18 ]
+   │
+ 1 │ fn f() { if true { 1 } }
+   │                  ──┬──  
+   │                    ╰──── type mismatch here
+───╯
+== types ==
+Fn[0] f() -> ()
+  HExprId(0) : bool
+  HExprId(1) : {error}
+  HExprId(2) : ()

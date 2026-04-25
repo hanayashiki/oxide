@@ -1,0 +1,14 @@
+== diagnostics ==
+[E0253] Error: wrong number of arguments: expected 0, found 1
+   ╭─[ error_wrong_arg_count_e0253.ox:1:20 ]
+   │
+ 1 │ fn g() {} fn f() { g(1) }
+   │                    ──┬─  
+   │                      ╰─── called here
+───╯
+== types ==
+Fn[0] g() -> ()
+  HExprId(0) : fn()
+  HExprId(1) : i32
+  HExprId(2) : ()
+Fn[1] f() -> ()

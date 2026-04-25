@@ -1,0 +1,15 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `i32`, found `bool`
+   ╭─[ error_extern_fn_arg_type_mismatch_e0250.ox:2:30 ]
+   │
+ 2 │ fn main() -> i32 { print_int(true); 0 }
+   │                              ──┬─  
+   │                                ╰─── type mismatch here
+───╯
+== types ==
+Fn[0] print_int(x[Local(0)]: i32) -> i32
+  HExprId(0) : fn(i32) -> i32
+  HExprId(1) : bool
+  HExprId(2) : i32
+  HExprId(3) : i32
+Fn[1] main() -> i32

@@ -1,0 +1,6 @@
+== diagnostics ==
+== types ==
+Fn[0] g() -> ()
+  HExprId(0) : fn()
+  HExprId(1) : ()
+Fn[1] f() -> ()

@@ -1,0 +1,14 @@
+== diagnostics ==
+[E0253] Error: wrong number of arguments: expected 1, found 0
+   ╭─[ error_extern_fn_arity_mismatch_e0253.ox:2:20 ]
+   │
+ 2 │ fn main() -> i32 { print_int(); 0 }
+   │                    ─────┬─────  
+   │                         ╰─────── called here
+───╯
+== types ==
+Fn[0] print_int(x[Local(0)]: i32) -> i32
+  HExprId(0) : fn(i32) -> i32
+  HExprId(1) : i32
+  HExprId(2) : i32
+Fn[1] main() -> i32

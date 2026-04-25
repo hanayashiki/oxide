@@ -1,0 +1,8 @@
+== diagnostics ==
+== types ==
+Fn[0] takes_const(s[Local(0)]: *const u8) -> i32
+  HExprId(0) : i32
+  HExprId(1) : fn(*const u8) -> i32
+  HExprId(2) : *mut u8
+  HExprId(3) : i32
+Fn[1] main(p[Local(1)]: *mut u8) -> i32

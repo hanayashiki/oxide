@@ -1,0 +1,11 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `u32`, found `()`
+   ╭─[ error_semicolon_after_expr_discards_value.ox:1:15 ]
+   │
+ 1 │ fn f() -> u32 { 1; }
+   │               ───┬──  
+   │                  ╰──── type mismatch here
+───╯
+== types ==
+Fn[0] f() -> u32
+  HExprId(0) : i32

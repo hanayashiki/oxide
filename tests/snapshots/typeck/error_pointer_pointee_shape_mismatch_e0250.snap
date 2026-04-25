@@ -1,0 +1,15 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `u8`, found `i32`
+   ╭─[ error_pointer_pointee_shape_mismatch_e0250.ox:2:35 ]
+   │
+ 2 │ fn main(p: *const i32) -> i32 { f(p) }
+   │                                   ┬  
+   │                                   ╰── type mismatch here
+───╯
+== types ==
+Fn[0] f(s[Local(0)]: *const u8) -> i32
+  HExprId(0) : i32
+  HExprId(1) : fn(*const u8) -> i32
+  HExprId(2) : *const i32
+  HExprId(3) : i32
+Fn[1] main(p[Local(1)]: *const i32) -> i32
