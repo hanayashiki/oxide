@@ -259,3 +259,54 @@ fn local_fn_marks_is_extern_false() {
     assert!(!f.is_extern);
     assert!(f.body.is_some());
 }
+
+#[test]
+fn pointer_type_lowers_with_mutability() {
+    use oxide::parser::ast::Mutability;
+    let (hir, errs) = lower_src(r#"extern "C" { fn puts(s: *const u8) -> i32; }"#);
+    assert!(errs.is_empty(), "{errs:#?}");
+    let f = &hir.fns[hir.root_fns[0]];
+    let param = &hir.locals[f.params[0]];
+    let HirTyKind::Ptr { mutability, pointee } = &param.ty.as_ref().unwrap().kind else {
+        panic!("expected Ptr type");
+    };
+    assert_eq!(*mutability, Mutability::Const);
+    assert!(matches!(&pointee.kind, HirTyKind::Named(s) if s == "u8"));
+}
+
+#[test]
+fn nested_pointer_type_preserves_each_layer() {
+    use oxide::parser::ast::Mutability;
+    let (hir, errs) = lower_src(r#"extern "C" { fn f(s: *const *mut u8); }"#);
+    assert!(errs.is_empty(), "{errs:#?}");
+    let f = &hir.fns[hir.root_fns[0]];
+    let param = &hir.locals[f.params[0]];
+    let HirTyKind::Ptr { mutability, pointee } = &param.ty.as_ref().unwrap().kind else {
+        panic!("expected Ptr at outer layer");
+    };
+    assert_eq!(*mutability, Mutability::Const);
+    let HirTyKind::Ptr { mutability: inner_mut, pointee: inner_pointee } = &pointee.kind else {
+        panic!("expected Ptr at inner layer");
+    };
+    assert_eq!(*inner_mut, Mutability::Mut);
+    assert!(matches!(&inner_pointee.kind, HirTyKind::Named(s) if s == "u8"));
+}
+
+#[test]
+fn string_literal_lowers_through() {
+    // The HIR keeps the source string verbatim — the `\0` terminator is
+    // appended only at codegen time (spec/07_POINTER.md, point 4).
+    let (hir, errs) = lower_src(r#"fn f() { let s = "hello"; }"#);
+    assert!(errs.is_empty(), "{errs:#?}");
+    let f = &hir.fns[hir.root_fns[0]];
+    let body = &hir.blocks[f.body.unwrap()];
+    let let_id = body.items[0];
+    let HirExprKind::Let { init: Some(init), .. } = &hir.exprs[let_id].kind else {
+        panic!("expected Let with init");
+    };
+    let HirExprKind::StrLit(s) = &hir.exprs[*init].kind else {
+        panic!("expected StrLit");
+    };
+    assert_eq!(s, "hello");
+    assert_eq!(s.len(), 5, "HIR payload must be source length, no \\0");
+}

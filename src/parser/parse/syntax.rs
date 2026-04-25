@@ -61,9 +61,23 @@ pub(super) fn type_parser<'a, I>() -> impl Parser<'a, I, TypeId, Extra<'a>> + Cl
 where
     I: OValueInput<'a>,
 {
-    ident_parser()
-        .map_with(|name, e| e.push_type(TypeKind::Named(name)))
-        .labelled("type")
+    recursive(|ty| {
+        let named = ident_parser().map_with(|name, e| e.push_type(TypeKind::Named(name)));
+
+        // `*const T` / `*mut T`. Right-recursive on `ty` for nesting.
+        let mutability = choice((
+            just(TokenKind::KwConst).to(Mutability::Const),
+            just(TokenKind::KwMut).to(Mutability::Mut),
+        ));
+        let ptr = just(TokenKind::Star)
+            .ignore_then(mutability)
+            .then(ty)
+            .map_with(|(mutability, pointee), e| {
+                e.push_type(TypeKind::Ptr { mutability, pointee })
+            });
+
+        choice((ptr, named)).labelled("type")
+    })
 }
 
 pub(super) fn expr_parser<'a, I>() -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone

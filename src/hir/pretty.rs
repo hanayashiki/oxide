@@ -225,6 +225,9 @@ impl<'a> Printer<'a> {
 fn ty_str(ty: &HirTy) -> String {
     match &ty.kind {
         HirTyKind::Named(name) => name.clone(),
+        HirTyKind::Ptr { mutability, pointee } => {
+            format!("*{} {}", mutability.as_str(), ty_str(pointee))
+        }
         HirTyKind::Error => "<err>".to_string(),
     }
 }

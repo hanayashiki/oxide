@@ -35,6 +35,7 @@ pub enum TokenKind {
     KwNull,
     KwSizeof,
     KwExtern,
+    KwConst,
 
     // Reserved
     KwMatch,
@@ -117,6 +118,7 @@ pub fn keyword_lookup(s: &str) -> Option<TokenKind> {
         "null" => TokenKind::KwNull,
         "sizeof" => TokenKind::KwSizeof,
         "extern" => TokenKind::KwExtern,
+        "const" => TokenKind::KwConst,
         "match" => TokenKind::KwMatch,
         "impl" => TokenKind::KwImpl,
         "trait" => TokenKind::KwTrait,

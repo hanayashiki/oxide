@@ -12,7 +12,7 @@ use crate::typeck::{FnSig, PrimTy, TyArena, TyId, TyKind};
 pub fn lower_ty<'ctx>(ctx: &'ctx Context, tcx: &TyArena, ty: TyId) -> BasicTypeEnum<'ctx> {
     match tcx.kind(ty) {
         TyKind::Prim(p) => lower_prim(ctx, *p).into(),
-        TyKind::Ptr(_) => ctx.ptr_type(inkwell::AddressSpace::default()).into(),
+        TyKind::Ptr(..) => ctx.ptr_type(inkwell::AddressSpace::default()).into(),
         TyKind::Unit | TyKind::Never => {
             panic!("lower_ty called on non-value type {}", tcx.render(ty))
         }

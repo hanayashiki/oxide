@@ -309,3 +309,62 @@ fn bodyless_fn_outside_extern_block_is_a_parse_error() {
         "bodyless fn outside extern block must not parse"
     );
 }
+
+#[test]
+fn pointer_type_const() {
+    check(
+        "fn f(s: *const u8) {}",
+        expect![[r#"
+            Module
+              Fn f(s: *const u8)
+                Block
+        "#]],
+    );
+}
+
+#[test]
+fn pointer_type_mut() {
+    check(
+        "fn f(p: *mut i32) {}",
+        expect![[r#"
+            Module
+              Fn f(p: *mut i32)
+                Block
+        "#]],
+    );
+}
+
+#[test]
+fn pointer_type_nested() {
+    check(
+        "fn f(s: *const *const *mut u8) {}",
+        expect![[r#"
+            Module
+              Fn f(s: *const *const *mut u8)
+                Block
+        "#]],
+    );
+}
+
+#[test]
+fn string_literal_in_call_position() {
+    check(
+        r#"fn f() { puts("hi"); }"#,
+        expect![[r#"
+            Module
+              Fn f()
+                Block
+                  ExprStmt Ident("puts")(Str("hi"))
+        "#]],
+    );
+}
+
+#[test]
+fn pointer_without_mutability_is_parse_error() {
+    let tokens = lex("fn f(s: *u8) {}");
+    let (_, errors) = parse(&tokens);
+    assert!(
+        !errors.is_empty(),
+        "`*u8` without const/mut must not parse"
+    );
+}

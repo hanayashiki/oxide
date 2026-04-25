@@ -199,4 +199,22 @@ pub struct Type {
 #[derive(Clone, Debug)]
 pub enum TypeKind {
     Named(Ident),
+    /// `*const T` or `*mut T`. Pointee is recursive — `*const *mut u8`
+    /// nests another `Ptr` inside.
+    Ptr { mutability: Mutability, pointee: TypeId },
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum Mutability {
+    Const,
+    Mut,
+}
+
+impl Mutability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mutability::Const => "const",
+            Mutability::Mut => "mut",
+        }
+    }
 }

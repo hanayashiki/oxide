@@ -239,3 +239,44 @@ fn extern_fn_with_unit_return_emits_void_declare() {
     let ir = compile_to_ir(r#"extern "C" { fn flush(); }"#);
     assert_contains(&ir, "declare void @flush()");
 }
+
+#[test]
+fn string_literal_emits_private_constant_global() {
+    let ir = compile_to_ir(
+        r#"extern "C" { fn puts(s: *const u8) -> i32; }
+           fn main() -> i32 { puts("hello world"); 0 }"#,
+    );
+    // 12 bytes: 11 source chars + trailing \0.
+    assert_contains(
+        &ir,
+        r#"@.str.0 = private unnamed_addr constant [12 x i8] c"hello world\00""#,
+    );
+    assert_contains(&ir, "declare i32 @puts(ptr)");
+    assert_contains(&ir, "call i32 @puts(ptr @.str.0)");
+}
+
+#[test]
+fn pointer_param_lowers_to_opaque_ptr() {
+    let ir = compile_to_ir(r#"extern "C" { fn takes(s: *const u8) -> i32; }"#);
+    assert_contains(&ir, "declare i32 @takes(ptr)");
+}
+
+#[test]
+fn nested_pointer_param_still_lowers_to_single_ptr() {
+    let ir = compile_to_ir(r#"extern "C" { fn deep(s: *const *const *mut u8) -> i32; }"#);
+    // LLVM has only one pointer type — depth doesn't appear in IR.
+    assert_contains(&ir, "declare i32 @deep(ptr)");
+}
+
+#[test]
+fn each_string_literal_gets_its_own_global() {
+    let ir = compile_to_ir(
+        r#"extern "C" { fn puts(s: *const u8) -> i32; }
+           fn main() -> i32 { puts("a"); puts("bc"); 0 }"#,
+    );
+    assert_contains(&ir, "@.str.0");
+    assert_contains(&ir, "@.str.1");
+    // 1+1=2, 2+1=3.
+    assert_contains(&ir, "[2 x i8]");
+    assert_contains(&ir, "[3 x i8]");
+}

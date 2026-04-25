@@ -37,12 +37,6 @@ pub fn from_typeck_error(err: &TypeError, file: FileId, tys: &TyArena) -> Diagno
         )
         .with_label(Label::primary(file, span.clone(), "called here")),
 
-        TypeError::UnsupportedStrLit { span } => {
-            Diagnostic::error("E0254", "string literals are not supported in v0")
-                .with_label(Label::primary(file, span.clone(), "string literal"))
-                .with_help("strings need pointer/array support; not yet implemented")
-        }
-
         TypeError::UnsupportedFeature { feature, span } => {
             Diagnostic::error("E0255", format!("unsupported in v0: {feature}"))
                 .with_label(Label::primary(file, span.clone(), "not yet supported"))
@@ -51,5 +45,19 @@ pub fn from_typeck_error(err: &TypeError, file: FileId, tys: &TyArena) -> Diagno
         TypeError::CannotInfer { span } => Diagnostic::error("E0256", "could not infer a type")
             .with_label(Label::primary(file, span.clone(), "ambiguous type"))
             .with_help("add a type annotation to disambiguate"),
+
+        TypeError::PointerMutabilityMismatch { expected, actual, span } => Diagnostic::error(
+            "E0257",
+            format!(
+                "pointer mutability mismatch: expected `{}`, found `{}`",
+                tys.render(*expected),
+                tys.render(*actual)
+            ),
+        )
+        .with_label(Label::primary(file, span.clone(), "incompatible pointer"))
+        .with_help(
+            "only `*mut T` → `*const T` is allowed at the outer layer; \
+             inner positions must match exactly",
+        ),
     }
 }

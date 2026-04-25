@@ -8,6 +8,8 @@ use std::collections::HashMap;
 
 use index_vec::IndexVec;
 
+use crate::parser::ast::Mutability;
+
 index_vec::define_index_type! { pub struct TyId    = u32; }
 index_vec::define_index_type! { pub struct InferId = u32; }
 
@@ -20,8 +22,11 @@ pub enum TyKind {
     Never,
     /// Function signature.
     Fn(Vec<TyId>, TyId),
-    /// `*T` — reserved for future pointer support; no v0 syntax produces this.
-    Ptr(TyId),
+    /// `*const T` / `*mut T`. Mutability is interned alongside the pointee
+    /// so the arena distinguishes the two variants. Unify treats them
+    /// equivalently (shape only); the coercion check at use sites enforces
+    /// the actual `mut → const` direction rule. See `spec/07_POINTER.md`.
+    Ptr(TyId, Mutability),
     /// Unification variable; resolved via the per-fn `Inferer`.
     Infer(InferId),
     /// Poison; absorbs without further errors.
@@ -189,7 +194,7 @@ impl TyArena {
                 }
                 s
             }
-            TyKind::Ptr(inner) => format!("*{}", self.render(*inner)),
+            TyKind::Ptr(inner, m) => format!("*{} {}", m.as_str(), self.render(*inner)),
             TyKind::Infer(id) => format!("?T{}", id.raw()),
             TyKind::Error => "{error}".to_string(),
         }

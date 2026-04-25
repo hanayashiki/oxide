@@ -23,12 +23,19 @@ pub enum TypeError {
         found: usize,
         span: Span,
     },
-    /// String literal in v0 has no type to assign. E0254.
-    UnsupportedStrLit { span: Span },
     /// Indexing or field access — no array/struct support in v0. E0255.
     UnsupportedFeature { feature: &'static str, span: Span },
     /// Couldn't infer a type — escaped finalization without resolution. E0256.
     CannotInfer { span: Span },
+    /// Pointer mutability subtype rule violated. The shapes match
+    /// (caught earlier by unify) but a mutability tag would be silently
+    /// upgraded — `*const T → *mut T`, or any inner-position mismatch.
+    /// E0257.
+    PointerMutabilityMismatch {
+        expected: TyId,
+        actual: TyId,
+        span: Span,
+    },
 }
 
 impl TypeError {
@@ -38,9 +45,9 @@ impl TypeError {
             | Self::UnknownType { span, .. }
             | Self::NotCallable { span, .. }
             | Self::WrongArgCount { span, .. }
-            | Self::UnsupportedStrLit { span, .. }
             | Self::UnsupportedFeature { span, .. }
-            | Self::CannotInfer { span } => span,
+            | Self::CannotInfer { span }
+            | Self::PointerMutabilityMismatch { span, .. } => span,
         }
     }
 }

@@ -5,7 +5,7 @@
 use index_vec::IndexVec;
 
 use crate::lexer::Span;
-use crate::parser::ast::{AssignOp, BinOp, UnOp};
+use crate::parser::ast::{AssignOp, BinOp, Mutability, UnOp};
 
 index_vec::define_index_type! { pub struct FnId     = u32; }
 index_vec::define_index_type! { pub struct LocalId  = u32; }
@@ -149,6 +149,11 @@ pub enum HirTyKind {
     /// Typeck does the primitive-name lookup and resolves to its
     /// internal `Ty`.
     Named(String),
+    /// `*const T` / `*mut T`. Pointee is `Box`ed for recursion.
+    Ptr {
+        mutability: Mutability,
+        pointee: Box<HirTy>, // FIXME: should intern HirTy.
+    },
     /// Recovery placeholder for malformed type positions.
     Error,
 }

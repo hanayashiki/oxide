@@ -12,7 +12,7 @@ use crate::hir::{
     HirTy, HirTyKind, LocalId,
 };
 use crate::lexer::Span;
-use crate::parser::ast::{AssignOp, BinOp, UnOp};
+use crate::parser::ast::{AssignOp, BinOp, Mutability, UnOp};
 
 use super::error::TypeError;
 use super::ty::{FnSig, InferId, TyArena, TyId, TyKind};
@@ -133,7 +133,7 @@ impl Checker {
         self.cur_ret = self.fn_sigs[fid].ret;
         let body_ty = self.infer_block(hir, body_id);
         let body_span = hir.blocks[body_id].span.clone();
-        self.unify(body_ty, self.cur_ret, body_span);
+        self.coerce(body_ty, self.cur_ret, body_span);
         self.finalize_fn();
     }
 
@@ -193,6 +193,10 @@ impl Checker {
                     self.tys.error
                 }
             },
+            HirTyKind::Ptr { mutability, pointee } => {
+                let pointee = self.resolve_named_ty(pointee);
+                self.tys.intern(TyKind::Ptr(pointee, *mutability))
+            }
             HirTyKind::Error => self.tys.error,
         }
     }
@@ -244,9 +248,9 @@ impl Checker {
                 let ret = self.resolve_fully(ret);
                 self.tys.intern(TyKind::Fn(params, ret))
             }
-            TyKind::Ptr(inner) => {
+            TyKind::Ptr(inner, m) => {
                 let inner = self.resolve_fully(inner);
-                self.tys.intern(TyKind::Ptr(inner))
+                self.tys.intern(TyKind::Ptr(inner, m))
             }
             _ => resolved,
         }
@@ -288,7 +292,10 @@ impl Checker {
                 }
                 self.unify(ret_f, ret_e, span);
             }
-            (TyKind::Ptr(fi), TyKind::Ptr(ei)) => self.unify(fi, ei, span),
+            // Loose on mutability — unify is shape-only (per spec/07_POINTER.md).
+            // The mutability subtype rule (`*mut → *const` OK at the outer
+            // layer, exact match below) is enforced by `coerce` at use sites.
+            (TyKind::Ptr(fi, _), TyKind::Ptr(ei, _)) => self.unify(fi, ei, span),
             _ => {
                 self.errors.push(TypeError::TypeMismatch {
                     expected,
@@ -296,6 +303,60 @@ impl Checker {
                     span,
                 });
             }
+        }
+    }
+
+    /// Use-site coercion check. Runs `unify` (shape + inference), then
+    /// validates pointer mutability per the subtype rule:
+    ///   - outermost: `mut → const` allowed; `const → mut` rejected.
+    ///   - every inner position: exact mutability match.
+    /// All non-pointer types fall through to plain unify.
+    fn coerce(&mut self, actual: TyId, expected: TyId, span: Span) {
+        self.unify(actual, expected, span.clone());
+        self.check_ptr_outer_compat(actual, expected, span);
+    }
+
+    /// Outer-layer coercion check. If both sides are pointers, verify
+    /// `actual_mut ≤ expected_mut`, then recurse into the pointee with
+    /// **strict** mutability equality (`check_ptr_inner_eq`).
+    fn check_ptr_outer_compat(&mut self, actual: TyId, expected: TyId, span: Span) {
+        let actual = self.resolve(actual);
+        let expected = self.resolve(expected);
+        let (a_pt, a_mut, e_pt, e_mut) =
+            match (self.tys.kind(actual).clone(), self.tys.kind(expected).clone()) {
+                (TyKind::Ptr(ap, am), TyKind::Ptr(ep, em)) => (ap, am, ep, em),
+                _ => return,
+            };
+        if !mut_le(a_mut, e_mut) {
+            self.errors.push(TypeError::PointerMutabilityMismatch {
+                expected,
+                actual,
+                span: span.clone(),
+            });
+            return;
+        }
+        self.check_ptr_inner_eq(a_pt, e_pt, span);
+    }
+
+    /// Inner positions must match mutability exactly. Used by coerce after
+    /// the outer layer has been checked. Shape mismatches under here are
+    /// already caught by `unify`, so this method only emits errors for
+    /// mutability divergence.
+    fn check_ptr_inner_eq(&mut self, a: TyId, b: TyId, span: Span) {
+        let a = self.resolve(a);
+        let b = self.resolve(b);
+        if let (TyKind::Ptr(a_pt, a_mut), TyKind::Ptr(b_pt, b_mut)) =
+            (self.tys.kind(a).clone(), self.tys.kind(b).clone())
+        {
+            if a_mut != b_mut {
+                self.errors.push(TypeError::PointerMutabilityMismatch {
+                    expected: b,
+                    actual: a,
+                    span: span.clone(),
+                });
+                return;
+            }
+            self.check_ptr_inner_eq(a_pt, b_pt, span);
         }
     }
 
@@ -359,8 +420,10 @@ impl Checker {
             HirExprKind::BoolLit(_) => self.tys.bool,
             HirExprKind::CharLit(_) => self.tys.u8,
             HirExprKind::StrLit(_) => {
-                self.errors.push(TypeError::UnsupportedStrLit { span: span.clone() });
-                self.tys.error
+                // String literals are C-style: `*const u8`, NUL-terminator
+                // appended at codegen. See spec/07_POINTER.md.
+                let u8_ty = self.tys.u8;
+                self.tys.intern(TyKind::Ptr(u8_ty, Mutability::Const))
             }
             HirExprKind::Local(lid) => self.local_tys[lid],
             HirExprKind::Fn(fid) => {
@@ -404,10 +467,10 @@ impl Checker {
                     let v_ty = self.infer_expr(hir, v);
                     let cur_ret = self.cur_ret;
                     let v_span = hir.exprs[v].span.clone();
-                    self.unify(v_ty, cur_ret, v_span);
+                    self.coerce(v_ty, cur_ret, v_span);
                 } else {
                     let cur_ret = self.cur_ret;
-                    self.unify(self.tys.unit, cur_ret, span.clone());
+                    self.coerce(self.tys.unit, cur_ret, span.clone());
                 }
                 self.tys.never
             }
@@ -487,7 +550,9 @@ impl Checker {
     ) -> TyId {
         let t = self.infer_expr(hir, target);
         let r = self.infer_expr(hir, rhs);
-        self.unify(t, r, span.clone());
+        // RHS coerces *to* the LHS slot — direction matters for pointer
+        // mutability (`*mut → *const` OK, reverse is not).
+        self.coerce(r, t, span.clone());
         self.tys.unit
     }
 
@@ -513,7 +578,7 @@ impl Checker {
                 }
                 for ((&aid, &pty), &aty) in args.iter().zip(&param_tys).zip(&arg_tys) {
                     let arg_span = hir.exprs[aid].span.clone();
-                    self.unify(aty, pty, arg_span);
+                    self.coerce(aty, pty, arg_span);
                 }
                 ret_ty
             }
@@ -579,10 +644,18 @@ impl Checker {
         if let Some(init_id) = init {
             let init_ty = self.infer_expr(hir, init_id);
             let init_span = hir.exprs[init_id].span.clone();
-            self.unify(init_ty, local_ty, init_span);
+            self.coerce(init_ty, local_ty, init_span);
         }
         self.tys.unit
     }
+}
+
+/// Pointer mutability subtype: `mut ≤ const`, `mut ≤ mut`, `const ≤ const`,
+/// `const ≰ mut`. Dropping write permission (`mut → const`) is safe; gaining
+/// it (`const → mut`) is not.
+fn mut_le(actual: Mutability, expected: Mutability) -> bool {
+    use Mutability::*;
+    matches!((actual, expected), (Mut, _) | (Const, Const))
 }
 
 // Suppress dead-code warnings for currently-unused helpers/fields that

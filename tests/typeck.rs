@@ -41,7 +41,10 @@ fn type_interning_makes_equal_types_share_id() {
 fn return_type_mismatch_emits_e0250() {
     let (_, errs) = typeck("fn f() -> i32 { true }");
     assert_eq!(errs.len(), 1);
-    let TypeError::TypeMismatch { expected, found, .. } = &errs[0] else {
+    let TypeError::TypeMismatch {
+        expected, found, ..
+    } = &errs[0]
+    else {
         panic!("expected TypeMismatch, got {:?}", errs[0]);
     };
     let r = check(&lower(&parse(&lex("fn f() -> i32 { true }")).0).0).0;
@@ -52,14 +55,24 @@ fn return_type_mismatch_emits_e0250() {
 #[test]
 fn unknown_type_emits_e0251() {
     let (_, errs) = typeck("fn f(x: blarg) {}");
-    assert!(errs.iter().any(|e| matches!(e, TypeError::UnknownType { name, .. } if name == "blarg")));
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e, TypeError::UnknownType { name, .. } if name == "blarg"))
+    );
 }
 
 #[test]
 fn wrong_arg_count_emits_e0253() {
     let (_, errs) = typeck("fn g() {} fn f() { g(1) }");
     assert!(
-        errs.iter().any(|e| matches!(e, TypeError::WrongArgCount { expected: 0, found: 1, .. })),
+        errs.iter().any(|e| matches!(
+            e,
+            TypeError::WrongArgCount {
+                expected: 0,
+                found: 1,
+                ..
+            }
+        )),
         "{errs:#?}"
     );
 }
@@ -68,7 +81,8 @@ fn wrong_arg_count_emits_e0253() {
 fn not_callable_emits_e0252() {
     let (_, errs) = typeck("fn f() { let x: i32 = 1; x() }");
     assert!(
-        errs.iter().any(|e| matches!(e, TypeError::NotCallable { .. })),
+        errs.iter()
+            .any(|e| matches!(e, TypeError::NotCallable { .. })),
         "{errs:#?}"
     );
 }
@@ -97,12 +111,11 @@ fn never_unifies_with_anything() {
 }
 
 #[test]
-fn string_literal_emits_e0254() {
-    let (_, errs) = typeck("fn f() { let s = \"hi\"; }");
-    assert!(
-        errs.iter().any(|e| matches!(e, TypeError::UnsupportedStrLit { .. })),
-        "{errs:#?}"
-    );
+fn string_literal_infers_to_const_u8_ptr() {
+    // String literals are C-style: `*const u8` (NUL-terminated by codegen).
+    // See spec/07_POINTER.md. No errors expected for the inferred binding.
+    let (_, errs) = typeck("fn f() { let s: *const u8 = \"hi\"; }");
+    assert!(errs.is_empty(), "{errs:#?}");
 }
 
 #[test]
@@ -136,7 +149,8 @@ fn comparison_returns_bool() {
 fn if_branches_must_unify() {
     let (_, errs) = typeck("fn f() -> i32 { if true { 1 } else { false } }");
     assert!(
-        errs.iter().any(|e| matches!(e, TypeError::TypeMismatch { .. })),
+        errs.iter()
+            .any(|e| matches!(e, TypeError::TypeMismatch { .. })),
         "{errs:#?}"
     );
 }
@@ -148,7 +162,8 @@ fn if_no_else_must_be_unit() {
     // because the then-branch tail is `1`. With no `else`, then must unify
     // with unit → mismatch.
     assert!(
-        errs.iter().any(|e| matches!(e, TypeError::TypeMismatch { .. })),
+        errs.iter()
+            .any(|e| matches!(e, TypeError::TypeMismatch { .. })),
         "{errs:#?}"
     );
 }
@@ -179,7 +194,14 @@ fn extern_fn_arity_mismatch_emits_e0253() {
            fn main() -> i32 { print_int(); 0 }"#,
     );
     assert!(
-        errs.iter().any(|e| matches!(e, TypeError::WrongArgCount { expected: 1, found: 0, .. })),
+        errs.iter().any(|e| matches!(
+            e,
+            TypeError::WrongArgCount {
+                expected: 1,
+                found: 0,
+                ..
+            }
+        )),
         "{errs:#?}"
     );
 }
@@ -191,7 +213,99 @@ fn extern_fn_arg_type_mismatch_emits_e0250() {
            fn main() -> i32 { print_int(true); 0 }"#,
     );
     assert!(
-        errs.iter().any(|e| matches!(e, TypeError::TypeMismatch { .. })),
+        errs.iter()
+            .any(|e| matches!(e, TypeError::TypeMismatch { .. })),
         "{errs:#?}"
     );
+}
+
+#[test]
+fn passing_string_literal_to_const_u8_ptr_typechecks() {
+    let (_, errs) = typeck(
+        r#"
+            fn puts(s: *const u8) -> i32 { 0 }
+            fn main() -> i32 { puts("hi"); 0 }
+        "#,
+    );
+    assert!(errs.is_empty(), "{errs:#?}");
+}
+
+#[test]
+fn mut_ptr_can_drop_to_const_at_outer_layer() {
+    // *mut u8 → *const u8 is allowed (drop write permission).
+    let (_, errs) = typeck(
+        r#"
+            fn takes_const(s: *const u8) -> i32 { 0 }
+            fn main(p: *mut u8) -> i32 { takes_const(p) }
+        "#,
+    );
+    assert!(errs.is_empty(), "{errs:#?}");
+}
+
+#[test]
+fn const_ptr_to_mut_param_emits_e0257() {
+    // *const u8 → *mut u8 must fail (would forge write access).
+    let (_, errs) = typeck(
+        r#"
+            fn takes_mut(s: *mut u8) -> i32 { 0 }
+            fn main(p: *const u8) -> i32 { takes_mut(p) }
+        "#,
+    );
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e, TypeError::PointerMutabilityMismatch { .. })),
+        "{errs:#?}"
+    );
+}
+
+#[test]
+fn inner_mutability_mismatch_emits_e0257() {
+    // Outer: const → const ✓. Inner: mut vs const — must fail (inner
+    // positions require exact match per spec/07_POINTER.md).
+    let (_, errs) = typeck(
+        r#"
+            fn f(s: *const *const u8) -> i32 { 0 }
+            fn main(p: *const *mut u8) -> i32 { f(p) }
+        "#,
+    );
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e, TypeError::PointerMutabilityMismatch { .. })),
+        "{errs:#?}"
+    );
+}
+
+#[test]
+fn pointer_pointee_shape_mismatch_emits_e0250() {
+    // *const u8 vs *const i32 — the pointee shape itself disagrees, so
+    // unify catches it as an ordinary type mismatch.
+    let (_, errs) = typeck(
+        r#"
+            fn f(s: *const u8) -> i32 { 0 }
+            fn main(p: *const i32) -> i32 { f(p) }
+        "#,
+    );
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e, TypeError::TypeMismatch { .. })),
+        "{errs:#?}"
+    );
+}
+
+#[test]
+fn string_literal_infers_to_const_u8_ptr_via_type() {
+    use oxide::parser::ast::Mutability;
+    let (r, errs) = typeck(r#"fn f() { let s = "hi"; }"#);
+    assert!(errs.is_empty(), "{errs:#?}");
+    // Find the StrLit's expr and confirm it's interned as Ptr(u8, Const).
+    let mut found = false;
+    for ty in &r.expr_tys {
+        if let TyKind::Ptr(pointee, m) = r.tys.kind(*ty) {
+            if *pointee == r.tys.u8 && *m == Mutability::Const {
+                found = true;
+                break;
+            }
+        }
+    }
+    assert!(found, "expected at least one *const u8 type, got: {r:#?}");
 }

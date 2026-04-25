@@ -2,6 +2,7 @@
 //! then define each body. Each fn body uses alloca + load/store for
 //! locals (mem2reg-friendly canonical form).
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
 use index_vec::IndexVec;
@@ -9,10 +10,10 @@ use inkwell::IntPredicate;
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
-use inkwell::module::Module;
+use inkwell::module::{Linkage, Module};
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue,
+    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue, UnnamedAddress,
 };
 
 use crate::hir::{FnId, HBlockId, HElseArm, HExprId, HirExprKind, HirModule, LocalId};
@@ -55,6 +56,7 @@ pub fn codegen<'ctx>(
         hir,
         typeck_results,
         fn_decls,
+        str_counter: Cell::new(0),
     };
 
     // Pass 2 — define. Each fn body gets a fresh FnCodegenContext on
@@ -83,6 +85,10 @@ struct Codegen<'a, 'ctx> {
     hir: &'a HirModule,
     typeck_results: &'a TypeckResults,
     fn_decls: IndexVec<FnId, FunctionValue<'ctx>>,
+    /// Suffix counter for emitted string-literal globals (`@.str.0`,
+    /// `@.str.1`, …). Inkwell uses interior mutability everywhere so the
+    /// rest of `Codegen` lives behind `&self`; we do the same here.
+    str_counter: Cell<u32>,
 }
 
 /// Per-fn transient state. Lives on the stack for the duration of one fn
@@ -258,9 +264,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             HirExprKind::Fn(_) => {
                 panic!("v0 codegen: fn references are only valid as call targets")
             }
-            HirExprKind::StrLit(_) => {
-                panic!("v0 codegen: string literals should have been rejected at typeck")
-            }
+            HirExprKind::StrLit(s) => Some(self.emit_str_lit(&s)),
             HirExprKind::Index { .. } | HirExprKind::Field { .. } => {
                 panic!("v0 codegen: index/field should have been rejected at typeck")
             }
@@ -268,6 +272,35 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 panic!("v0 codegen: poisoned expr reached codegen")
             }
         }
+    }
+
+    /// Emit a private constant global holding `s` followed by a `\0`
+    /// terminator and return a pointer to its first byte. The value's
+    /// type is opaque `ptr` (LLVM 15+); no GEP needed since the global
+    /// itself is already a pointer.
+    fn emit_str_lit(&self, s: &str) -> BasicValueEnum<'ctx> {
+        let mut bytes: Vec<u8> = s.as_bytes().to_vec();
+        bytes.push(0); // C-style NUL terminator (see spec/07_POINTER.md).
+        let i8_ty = self.ctx.i8_type();
+        let const_arr = i8_ty.const_array(
+            &bytes
+                .iter()
+                .map(|&b| i8_ty.const_int(b as u64, false))
+                .collect::<Vec<_>>(),
+        );
+        let arr_ty = i8_ty.array_type(bytes.len() as u32);
+
+        let idx = self.str_counter.get();
+        self.str_counter.set(idx + 1);
+        let name = format!(".str.{idx}");
+
+        let global = self.module.add_global(arr_ty, None, &name);
+        global.set_linkage(Linkage::Private);
+        global.set_constant(true);
+        global.set_unnamed_address(UnnamedAddress::Global);
+        global.set_initializer(&const_arr);
+
+        global.as_pointer_value().into()
     }
 
     fn emit_int_lit(&self, eid: HExprId, n: u64) -> BasicValueEnum<'ctx> {

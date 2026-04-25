@@ -261,10 +261,15 @@ impl<'a> Lowerer<'a> {
     /// likely living in typeck rather than here.
     fn lower_ty(&mut self, tid: ast::TypeId) -> HirTy {
         let ty = &self.ast.types[tid];
+        let span = ty.span.clone();
         let kind = match &ty.kind {
             ast::TypeKind::Named(id) => HirTyKind::Named(id.name.clone()),
+            ast::TypeKind::Ptr { mutability, pointee } => {
+                let pointee = Box::new(self.lower_ty(*pointee));
+                HirTyKind::Ptr { mutability: *mutability, pointee }
+            }
         };
-        HirTy { kind, span: ty.span.clone() }
+        HirTy { kind, span }
     }
 
     fn lower_char_lit(&mut self, c: char, span: &Span) -> HirExprKind {

@@ -234,5 +234,8 @@ fn type_str(m: &Module, tid: TypeId) -> String {
     let t = &m.types[tid];
     match &t.kind {
         TypeKind::Named(id) => id.name.clone(),
+        TypeKind::Ptr { mutability, pointee } => {
+            format!("*{} {}", mutability.as_str(), type_str(m, *pointee))
+        }
     }
 }
