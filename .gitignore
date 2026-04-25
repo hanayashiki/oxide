@@ -1,0 +1,16 @@
+/target
+.DS_Store
+.idea
+.vscode
+.env
+*.log
+*.tmp
+node_modules
+dist
+build
+coverage
+*.bak
+*.swp
+*.swo
+*.zip
+playground/
