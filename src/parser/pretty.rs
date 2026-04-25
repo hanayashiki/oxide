@@ -77,32 +77,49 @@ impl<'a> Printer<'a> {
         let block = &self.m.blocks[bid];
         self.write_line("Block");
         self.indent += 1;
-        for &eid in &block.items {
-            self.print_block_item(eid);
-        }
-        if let Some(eid) = block.tail {
-            let mut buf = String::from("tail: ");
-            self.append_expr(&mut buf, eid);
-            self.write_line(&buf);
+        let last_idx = block.items.len().checked_sub(1);
+        for (i, item) in block.items.iter().enumerate() {
+            let is_last = Some(i) == last_idx;
+            self.print_block_item(item.expr, item.has_semi, is_last);
         }
         self.indent -= 1;
     }
 
-    /// Render an expression that's used in block-item position. Multi-line
-    /// forms (`if`, bare block) dispatch to `print_expr`; the rest get the
-    /// `ExprStmt …` one-liner. `Let` and `Return` are rendered through
-    /// `print_expr` too — they have distinctive single-line forms there.
-    fn print_block_item(&mut self, eid: ExprId) {
+    /// Render one block item. The last item with `has_semi == false`
+    /// produces the block's value, so we mark it with `tail:`. Earlier
+    /// items either ran with `;` (ordinary statement) or without (mid-
+    /// block discarded — typeck rejects most of these unless they're
+    /// `()`/`!`-typed). Multi-line shapes (`If`, `Block`) print in full
+    /// regardless of position; one-liners use the `tail:`/`ExprStmt …`
+    /// convention.
+    fn print_block_item(&mut self, eid: ExprId, has_semi: bool, is_last: bool) {
         let kind = &self.m.exprs[eid].kind;
+        let is_value_producing = is_last && !has_semi;
         match kind {
-            ExprKind::If { .. } | ExprKind::Block(_) => self.print_expr(eid),
+            ExprKind::If { .. } | ExprKind::Block(_) => {
+                if is_value_producing {
+                    self.write_line("tail:");
+                    self.indent += 1;
+                    self.print_expr(eid);
+                    self.indent -= 1;
+                } else {
+                    self.print_expr(eid);
+                }
+            }
             ExprKind::Let { .. } | ExprKind::Return(_) => {
                 let mut buf = String::new();
                 self.append_expr(&mut buf, eid);
                 self.write_line(&buf);
             }
             _ => {
-                let mut buf = String::from("ExprStmt ");
+                let prefix = if is_value_producing {
+                    "tail: "
+                } else if !has_semi {
+                    "Discarded "
+                } else {
+                    "ExprStmt "
+                };
+                let mut buf = String::from(prefix);
                 self.append_expr(&mut buf, eid);
                 self.write_line(&buf);
             }

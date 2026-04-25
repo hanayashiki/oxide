@@ -152,15 +152,19 @@ impl<'a> Lowerer<'a> {
     fn lower_block(&mut self, bid: ast::BlockId) -> HBlockId {
         let block = &self.ast.blocks[bid];
         let span = block.span.clone();
-        let item_ids: Vec<_> = block.items.clone();
-        let tail_id = block.tail;
+        let raw_items: Vec<_> = block.items.clone();
 
         self.scopes.push(HashMap::new());
-        let items: Vec<_> = item_ids.into_iter().map(|e| self.lower_expr(e)).collect();
-        let tail = tail_id.map(|e| self.lower_expr(e));
+        let items: Vec<HBlockItem> = raw_items
+            .into_iter()
+            .map(|it| HBlockItem {
+                expr: self.lower_expr(it.expr),
+                has_semi: it.has_semi,
+            })
+            .collect();
         self.scopes.pop();
 
-        self.blocks.push(HirBlock { items, tail, span })
+        self.blocks.push(HirBlock { items, span })
     }
 
     fn lower_expr(&mut self, eid: ast::ExprId) -> HExprId {

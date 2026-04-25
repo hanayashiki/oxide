@@ -77,11 +77,10 @@ impl ModuleBuilder {
     pub(super) fn push_block(
         &mut self,
         ss: SimpleSpan,
-        items: Vec<ExprId>,
-        tail: Option<ExprId>,
+        items: Vec<BlockItem>,
     ) -> BlockId {
         let span = self.span(ss);
-        self.blocks.push(Block { items, tail, span })
+        self.blocks.push(Block { items, span })
     }
 
     pub(super) fn push_type(&mut self, ss: SimpleSpan, kind: TypeKind) -> TypeId {

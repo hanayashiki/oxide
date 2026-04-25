@@ -27,8 +27,12 @@ pub fn parse(tokens: &[Token]) -> (Module, Vec<ParseError>) {
     // Build the byte → LSP lookup so AST node spans can be reconstructed
     // from chumsky's byte-only `SimpleSpan`.
     for t in tokens {
-        builder.byte_to_lsp.insert(t.span.start.offset, t.span.lsp_start);
-        builder.byte_to_lsp.insert(t.span.end.offset, t.span.lsp_end);
+        builder
+            .byte_to_lsp
+            .insert(t.span.start.offset, t.span.lsp_start);
+        builder
+            .byte_to_lsp
+            .insert(t.span.end.offset, t.span.lsp_end);
     }
 
     let module_span: Span = match (tokens.first(), tokens.last()) {
@@ -41,8 +45,14 @@ pub fn parse(tokens: &[Token]) -> (Module, Vec<ParseError>) {
         _ => Span {
             start: BytePos { offset: 0 },
             end: BytePos { offset: 0 },
-            lsp_start: LspPos { line: 0, character: 0 },
-            lsp_end: LspPos { line: 0, character: 0 },
+            lsp_start: LspPos {
+                line: 0,
+                character: 0,
+            },
+            lsp_end: LspPos {
+                line: 0,
+                character: 0,
+            },
         },
     };
 
@@ -68,8 +78,7 @@ pub fn parse(tokens: &[Token]) -> (Module, Vec<ParseError>) {
     }
 
     let eoi: SimpleSpan = (eoi_byte..eoi_byte).into();
-    let stream = Stream::from_iter(chumsky_tokens.into_iter())
-        .map(eoi, |(t, s): (_, _)| (t, s));
+    let stream = Stream::from_iter(chumsky_tokens.into_iter()).map(eoi, |(t, s): (_, _)| (t, s));
 
     let mut state = SimpleState::from(builder);
     let result = syntax::module_parser().parse_with_state(stream, &mut state);

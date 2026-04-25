@@ -293,6 +293,82 @@ fn pointer_pointee_shape_mismatch_emits_e0250() {
 }
 
 #[test]
+fn if_as_block_value_typechecks() {
+    // Regression test for the fib bug: a tail-position `if/else` whose
+    // arms are tail expressions should give the block its value type.
+    let (_, errs) = typeck(
+        "fn fib(n: u32) -> u32 { if n <= 1 { 1 } else { fib(n-1) + fib(n-2) } }",
+    );
+    assert!(errs.is_empty(), "{errs:#?}");
+}
+
+#[test]
+fn semicolon_after_expr_discards_value() {
+    // With `;` the block's value is `()`, so this mismatches `-> u32`.
+    let (_, errs) = typeck("fn f() -> u32 { 1; }");
+    assert!(
+        errs.iter().any(|e| matches!(e, TypeError::TypeMismatch { .. })),
+        "{errs:#?}"
+    );
+}
+
+#[test]
+fn missing_semi_in_middle_of_block_emits_e0250() {
+    // `1 + 2` is non-unit, non-divergent, mid-block, no `;` → error.
+    let (_, errs) = typeck("fn f() -> i32 { 1 + 2  3 }");
+    assert!(
+        errs.iter().any(|e| matches!(e, TypeError::TypeMismatch { .. })),
+        "expected `;`-enforcement error, got {errs:#?}"
+    );
+}
+
+#[test]
+fn unit_call_without_semi_in_middle_is_allowed() {
+    // `g()` returns `()`, so it's fine without `;` mid-block.
+    let (_, errs) = typeck("fn g() {} fn f() -> i32 { g() 0 }");
+    assert!(errs.is_empty(), "{errs:#?}");
+}
+
+#[test]
+fn return_without_semi_in_middle_is_allowed() {
+    // `return e` has type `!`, mid-block enforce becomes `unify(!, unit)`
+    // which is absorbed by the Never arm. Trailing `0` is the value.
+    let (_, errs) = typeck("fn f() -> i32 { return 1 0 }");
+    assert!(errs.is_empty(), "{errs:#?}");
+}
+
+#[test]
+fn divergent_subblock_does_not_silence_trailing_mismatch() {
+    // The "shit" case: inner block diverges (its tail is `return 1`,
+    // type `!`), but the outer block's value comes from the trailing
+    // `"a"` — coerce against `-> i32` must still fail. Confirms we are
+    // NOT doing saw-never propagation / divergence-flag bookkeeping.
+    let (_, errs) = typeck(r#"fn shit() -> i32 { { return 1 } "a" }"#);
+    assert!(
+        errs.iter().any(|e| matches!(e, TypeError::TypeMismatch { .. })),
+        "expected outer block to error on `\"a\"` vs i32, got {errs:#?}"
+    );
+}
+
+#[test]
+fn if_with_returns_in_both_arms_typechecks() {
+    // Path-completeness handled by types alone: each arm is `!`,
+    // if-expr unifies to `!`, and `!` coerces to any return type.
+    let (_, errs) = typeck(
+        "fn f() -> i32 { if true { return 1 } else { return 2 } }",
+    );
+    assert!(errs.is_empty(), "{errs:#?}");
+}
+
+#[test]
+fn bare_semicolons_are_no_ops() {
+    // `;;` and stray `;` between/around items must not break parsing
+    // or typechecking — they parse to zero block-items.
+    let (_, errs) = typeck("fn f() -> i32 { ;; let x: i32 = 1; ;; x }");
+    assert!(errs.is_empty(), "{errs:#?}");
+}
+
+#[test]
 fn string_literal_infers_to_const_u8_ptr_via_type() {
     use oxide::parser::ast::Mutability;
     let (r, errs) = typeck(r#"fn f() { let s = "hi"; }"#);

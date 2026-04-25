@@ -209,18 +209,20 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         fx: &mut FnCodegenContext<'ctx>,
         bid: HBlockId,
     ) -> Option<BasicValueEnum<'ctx>> {
-        // Clone item ids so we don't borrow self.hir while emitting.
+        // Clone the items vec so we don't borrow self.hir while emitting.
         let block = self.hir.blocks[bid].clone();
-        for eid in block.items {
+        let last_idx = block.items.len().checked_sub(1);
+        let mut last_val: Option<BasicValueEnum<'ctx>> = None;
+        for (i, item) in block.items.iter().enumerate() {
             if self.is_terminated() {
                 return None;
             }
-            let _ = self.emit_expr(fx, eid);
+            let v = self.emit_expr(fx, item.expr);
+            if Some(i) == last_idx && !item.has_semi {
+                last_val = v;
+            }
         }
-        if self.is_terminated() {
-            return None;
-        }
-        block.tail.and_then(|eid| self.emit_expr(fx, eid))
+        last_val
     }
 
     // ---------- expressions ----------

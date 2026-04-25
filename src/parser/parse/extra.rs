@@ -57,13 +57,8 @@ where
 pub(super) trait MapExtraExt {
     fn push_expr(&mut self, kind: ExprKind) -> ExprId;
     fn push_expr_at(&mut self, ss: SimpleSpan, kind: ExprKind) -> ExprId;
-    fn push_block(&mut self, items: Vec<ExprId>, tail: Option<ExprId>) -> BlockId;
-    fn push_block_at(
-        &mut self,
-        ss: SimpleSpan,
-        items: Vec<ExprId>,
-        tail: Option<ExprId>,
-    ) -> BlockId;
+    fn push_block(&mut self, items: Vec<BlockItem>) -> BlockId;
+    fn push_block_at(&mut self, ss: SimpleSpan, items: Vec<BlockItem>) -> BlockId;
     fn push_type(&mut self, kind: TypeKind) -> TypeId;
     fn push_item(&mut self, kind: ItemKind) -> ItemId;
     /// The full `lexer::Span` (byte + LSP) covering this combinator's input.
@@ -82,18 +77,13 @@ where
         let st: &mut ModuleBuilder = &mut **self.state();
         st.push_expr(ss, kind)
     }
-    fn push_block(&mut self, items: Vec<ExprId>, tail: Option<ExprId>) -> BlockId {
+    fn push_block(&mut self, items: Vec<BlockItem>) -> BlockId {
         let (ss, st) = ss_then_state(self);
-        st.push_block(ss, items, tail)
+        st.push_block(ss, items)
     }
-    fn push_block_at(
-        &mut self,
-        ss: SimpleSpan,
-        items: Vec<ExprId>,
-        tail: Option<ExprId>,
-    ) -> BlockId {
+    fn push_block_at(&mut self, ss: SimpleSpan, items: Vec<BlockItem>) -> BlockId {
         let st: &mut ModuleBuilder = &mut **self.state();
-        st.push_block(ss, items, tail)
+        st.push_block(ss, items)
     }
     fn push_type(&mut self, kind: TypeKind) -> TypeId {
         let (ss, st) = ss_then_state(self);

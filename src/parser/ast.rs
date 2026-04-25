@@ -69,11 +69,21 @@ pub struct Ident {
 
 #[derive(Clone, Debug)]
 pub struct Block {
-    /// Expressions evaluated in order; their values are discarded.
-    pub items: Vec<ExprId>,
-    /// Optional value-producing expression at the end of the block.
-    pub tail: Option<ExprId>,
+    /// Items are evaluated in source order. The block's *value* comes from
+    /// the last item if it carries `has_semi == false`; otherwise the block
+    /// has type `()`. Mid-block items with `has_semi == false` are
+    /// validated by typeck (must coerce to `()` or `!`); the parser stays
+    /// uniform.
+    pub items: Vec<BlockItem>,
     pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct BlockItem {
+    pub expr: ExprId,
+    /// `true` iff the source had a `;` after this expression (or the
+    /// expression's grammar always carries one — `let …;`).
+    pub has_semi: bool,
 }
 
 #[derive(Clone, Debug)]

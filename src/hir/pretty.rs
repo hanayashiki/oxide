@@ -63,32 +63,46 @@ impl<'a> Printer<'a> {
         let block = &self.m.blocks[bid];
         self.write_line("Block");
         self.indent += 1;
-        for &eid in &block.items {
-            self.print_block_item(eid);
-        }
-        if let Some(eid) = block.tail {
-            let mut buf = String::from("tail: ");
-            self.append_expr(&mut buf, eid);
-            self.write_line(&buf);
+        let last_idx = block.items.len().checked_sub(1);
+        for (i, item) in block.items.iter().enumerate() {
+            let is_last = Some(i) == last_idx;
+            self.print_block_item(item.expr, item.has_semi, is_last);
         }
         self.indent -= 1;
     }
 
-    /// Block items dispatch on the contained expression's shape so
-    /// multi-line forms (`If`, bare `Block`) stay indented; the rest
-    /// render as one-liner `ExprStmt …` (or distinctive single-line
-    /// forms for `Let`/`Return`).
-    fn print_block_item(&mut self, eid: HExprId) {
+    /// Same convention as the parser pretty: the last item with
+    /// `has_semi == false` is rendered with a `tail:` prefix; earlier
+    /// items either ran with `;` (ordinary statement) or without
+    /// (`Discarded` — typeck-validated against `()` or `!`).
+    fn print_block_item(&mut self, eid: HExprId, has_semi: bool, is_last: bool) {
         let kind = &self.m.exprs[eid].kind;
+        let is_value_producing = is_last && !has_semi;
         match kind {
-            HirExprKind::If { .. } | HirExprKind::Block(_) => self.print_expr(eid),
+            HirExprKind::If { .. } | HirExprKind::Block(_) => {
+                if is_value_producing {
+                    self.write_line("tail:");
+                    self.indent += 1;
+                    self.print_expr(eid);
+                    self.indent -= 1;
+                } else {
+                    self.print_expr(eid);
+                }
+            }
             HirExprKind::Let { .. } | HirExprKind::Return(_) => {
                 let mut buf = String::new();
                 self.append_expr(&mut buf, eid);
                 self.write_line(&buf);
             }
             _ => {
-                let mut buf = String::from("ExprStmt ");
+                let prefix = if is_value_producing {
+                    "tail: "
+                } else if !has_semi {
+                    "Discarded "
+                } else {
+                    "ExprStmt "
+                };
+                let mut buf = String::from(prefix);
                 self.append_expr(&mut buf, eid);
                 self.write_line(&buf);
             }

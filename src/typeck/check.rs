@@ -399,16 +399,31 @@ impl Checker {
 
     // ---------- walk ----------
 
+    /// Block typing is grammar-driven: the *last* item with
+    /// `has_semi == false` produces the block's value type; otherwise the
+    /// block has type `()`. Mid-block items without `;` are post-checked
+    /// against `()` via `unify` — `()` and `!` (via the Never arm) pass
+    /// silently; anything else fires E0250 ("expected `()`, found <T>")
+    /// pointing at the missing-`;` expression.
+    ///
+    /// Deliberately does **not** do divergence-flag bookkeeping
+    /// (`FnCtxt::diverges` in rustc). One observable consequence:
+    /// `fn f() -> i32 { return 1; }` errors here (block_ty = unit);
+    /// workaround is to drop the trailing `;`. See spec discussion.
     fn infer_block(&mut self, hir: &HirModule, bid: HBlockId) -> TyId {
-        let block = &hir.blocks[bid];
-        let item_ids: Vec<HExprId> = block.items.clone();
-        let tail_id = block.tail;
-        for eid in item_ids {
-            let _ = self.infer_expr(hir, eid);
+        let block = hir.blocks[bid].clone();
+        let last_idx = block.items.len().checked_sub(1);
+        for (i, item) in block.items.iter().enumerate() {
+            let ty = self.infer_expr(hir, item.expr);
+            if Some(i) != last_idx && !item.has_semi {
+                let unit = self.tys.unit;
+                let span = hir.exprs[item.expr].span.clone();
+                self.unify(ty, unit, span);
+            }
         }
-        match tail_id {
-            Some(eid) => self.infer_expr(hir, eid),
-            None => self.tys.unit,
+        match block.items.last() {
+            Some(it) if !it.has_semi => self.expr_tys[it.expr],
+            _ => self.tys.unit,
         }
     }
 

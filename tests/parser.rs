@@ -132,13 +132,14 @@ fn if_else_as_statement_with_return() {
             Module
               Fn f() -> i32
                 Block
-                  If Binary(Gt, Ident("x"), Int(0))
-                    then:
-                      Block
-                        Return Ident("x")
-                    else:
-                      Block
-                        Return Int(0)
+                  tail:
+                    If Binary(Gt, Ident("x"), Int(0))
+                      then:
+                        Block
+                          Return Ident("x")
+                      else:
+                        Block
+                          Return Int(0)
         "#]],
     );
 }
@@ -151,18 +152,19 @@ fn else_if_chain_as_statement() {
             Module
               Fn f()
                 Block
-                  If Ident("a")
-                    then:
-                      Block
-                        tail: Int(1)
-                    else:
-                      If Ident("b")
-                        then:
-                          Block
-                            tail: Int(2)
-                        else:
-                          Block
-                            tail: Int(3)
+                  tail:
+                    If Ident("a")
+                      then:
+                        Block
+                          tail: Int(1)
+                      else:
+                        If Ident("b")
+                          then:
+                            Block
+                              tail: Int(2)
+                          else:
+                            Block
+                              tail: Int(3)
         "#]],
     );
 }
@@ -366,5 +368,53 @@ fn pointer_without_mutability_is_parse_error() {
     assert!(
         !errors.is_empty(),
         "`*u8` without const/mut must not parse"
+    );
+}
+
+#[test]
+fn last_expr_without_semi_is_block_value() {
+    check(
+        "fn f() -> i32 { 1 + 2 }",
+        expect![[r#"
+            Module
+              Fn f() -> i32
+                Block
+                  tail: Binary(Add, Int(1), Int(2))
+        "#]],
+    );
+}
+
+#[test]
+fn bare_semicolons_parse_to_no_block_items() {
+    check(
+        "fn f() { ;; let x: i32 = 1; ;; }",
+        expect![[r#"
+            Module
+              Fn f()
+                Block
+                  Let x: i32 = Int(1)
+        "#]],
+    );
+}
+
+#[test]
+fn if_as_tail_renders_with_full_structure() {
+    // Regression for the fib bug: tail-position if/else now carries the
+    // block's value type. Pretty printer should render it under `tail:`.
+    check(
+        "fn fib(n: u32) -> u32 { if n <= 1 { 1 } else { 0 } }",
+        expect![[r#"
+            Module
+              Fn fib(n: u32) -> u32
+                Block
+                  tail:
+                    If Binary(Le, Ident("n"), Int(1))
+                      then:
+                        Block
+                          tail: Int(1)
+                      else:
+                        Block
+                          tail: Int(0)
+        "#]],
     );
 }

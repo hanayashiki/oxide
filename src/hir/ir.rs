@@ -51,11 +51,18 @@ pub struct HirLocal {
 
 #[derive(Clone, Debug)]
 pub struct HirBlock {
-    /// Expressions evaluated in order; values discarded.
-    pub items: Vec<HExprId>,
-    /// Optional value-producing expression at the end of the block.
-    pub tail: Option<HExprId>,
+    /// Items in source order. The block's *value* comes from the last item
+    /// if `has_semi == false`; otherwise the block has type `()`. Mirror
+    /// of `ast::Block`. Mid-block items with `has_semi == false` are
+    /// validated by typeck (must coerce to `()` or `!`).
+    pub items: Vec<HBlockItem>,
     pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct HBlockItem {
+    pub expr: HExprId,
+    pub has_semi: bool,
 }
 
 #[derive(Clone, Debug)]

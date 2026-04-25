@@ -178,21 +178,22 @@ fn return_lowers_as_expression() {
 
 #[test]
 fn if_else_resolves_in_each_branch() {
-    // `if … {} else {}` parses greedily as a block item (no trailing `;`
-    // required), so it ends up in `block.items[0]` rather than `block.tail`.
+    // `if … {} else {}` is the only block item with `has_semi == false`,
+    // so it sits in `block.items[0]` and produces the block's value.
     check(
         "fn f(c: bool, a: i32, b: i32) -> i32 { if c { a } else { b } }",
         expect![[r#"
             HirModule
               Fn[0] f(c[Local(0)]: bool, a[Local(1)]: i32, b[Local(2)]: i32) -> i32
                 Block
-                  If Local(0, "c")
-                    then:
-                      Block
-                        tail: Local(1, "a")
-                    else:
-                      Block
-                        tail: Local(2, "b")
+                  tail:
+                    If Local(0, "c")
+                      then:
+                        Block
+                          tail: Local(1, "a")
+                      else:
+                        Block
+                          tail: Local(2, "b")
         "#]],
     );
 
@@ -202,20 +203,23 @@ fn if_else_resolves_in_each_branch() {
     let (hir, _) = lower(&ast);
     let f = &hir.fns[hir.root_fns[0]];
     let body = &hir.blocks[f.body.expect("local fn has body")];
-    let if_id = *body.items.first().expect("if as item");
-    let HirExprKind::If { cond, then_block, else_arm } = &hir.exprs[if_id].kind else {
+    let if_item = body.items.first().expect("if as item");
+    assert!(!if_item.has_semi, "if/else without `;` should be the value-producing item");
+    let HirExprKind::If { cond, then_block, else_arm } = &hir.exprs[if_item.expr].kind else {
         panic!("first item should be If");
     };
     assert!(matches!(&hir.exprs[*cond].kind, HirExprKind::Local(lid) if lid.raw() == 0));
     let then_b = &hir.blocks[*then_block];
-    let then_tail = then_b.tail.expect("then-tail expected");
-    assert!(matches!(&hir.exprs[then_tail].kind, HirExprKind::Local(lid) if lid.raw() == 1));
+    let then_last = then_b.items.last().expect("then-arm last item");
+    assert!(!then_last.has_semi);
+    assert!(matches!(&hir.exprs[then_last.expr].kind, HirExprKind::Local(lid) if lid.raw() == 1));
     let Some(oxide::hir::HElseArm::Block(else_bid)) = else_arm else {
         panic!("else should be a block");
     };
     let else_b = &hir.blocks[*else_bid];
-    let else_tail = else_b.tail.expect("else-tail expected");
-    assert!(matches!(&hir.exprs[else_tail].kind, HirExprKind::Local(lid) if lid.raw() == 2));
+    let else_last = else_b.items.last().expect("else-arm last item");
+    assert!(!else_last.has_semi);
+    assert!(matches!(&hir.exprs[else_last.expr].kind, HirExprKind::Local(lid) if lid.raw() == 2));
 }
 
 #[test]
@@ -242,8 +246,8 @@ fn extern_fn_call_resolves_to_fn() {
     let main = &hir.fns[main_fid];
     let body_id = main.body.expect("main has body");
     let body = &hir.blocks[body_id];
-    let call_eid = *body.items.first().expect("call as first item");
-    let HirExprKind::Call { callee, .. } = &hir.exprs[call_eid].kind else {
+    let call_item = body.items.first().expect("call as first item");
+    let HirExprKind::Call { callee, .. } = &hir.exprs[call_item.expr].kind else {
         panic!("first item should be a Call");
     };
     let HirExprKind::Fn(callee_fid) = &hir.exprs[*callee].kind else {
@@ -300,8 +304,9 @@ fn string_literal_lowers_through() {
     assert!(errs.is_empty(), "{errs:#?}");
     let f = &hir.fns[hir.root_fns[0]];
     let body = &hir.blocks[f.body.unwrap()];
-    let let_id = body.items[0];
-    let HirExprKind::Let { init: Some(init), .. } = &hir.exprs[let_id].kind else {
+    let let_item = &body.items[0];
+    assert!(let_item.has_semi, "let always carries `;`");
+    let HirExprKind::Let { init: Some(init), .. } = &hir.exprs[let_item.expr].kind else {
         panic!("expected Let with init");
     };
     let HirExprKind::StrLit(s) = &hir.exprs[*init].kind else {

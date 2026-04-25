@@ -31,7 +31,7 @@ fn main() -> ExitCode {
     let args = Args::parse();
     let tokens = lex(&args.parse);
     let (ast, parse_errors) = parse(&tokens);
-    
+
     let mut map = SourceMap::new();
     let file = map.add(PathBuf::from("<arg>"), args.parse.clone());
     let stderr = std::io::stderr();

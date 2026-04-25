@@ -231,13 +231,16 @@ where
     I: OValueInput<'a>,
     P: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
 {
-    recursive(move |block| {
-        let item = block_item_parser(expr.clone(), block.clone());
+    recursive(move |_block| {
+        let item = block_item_parser(expr.clone());
         item.repeated()
             .collect::<Vec<_>>()
-            .then(expr.clone().or_not())
             .delimited_by(just(TokenKind::LBrace), just(TokenKind::RBrace))
-            .map_with(|(items, tail), e| e.push_block(items, tail))
+            .map_with(|raw, e| {
+                // Bare `;` items parse to `None` and drop out here.
+                let items: Vec<BlockItem> = raw.into_iter().flatten().collect();
+                e.push_block(items)
+            })
             .recover_with(via_parser(
                 nested_delimiters::<I, _, _, _, 2>(
                     TokenKind::LBrace,
@@ -249,27 +252,28 @@ where
                     |span: SimpleSpan| span,
                 )
                 .map_with(|ss: SimpleSpan, e: &mut OMapExtra<'_, '_, I>| {
-                    e.push_block_at(ss, vec![], None)
+                    e.push_block_at(ss, vec![])
                 }),
             ))
             .labelled("block")
     })
 }
 
-/// Parses one item in a block — `let …;`, an `if/else` chain, a bare block,
-/// or `expr ;`. Always returns an `ExprId`; the block accumulates these as
-/// `Vec<ExprId>`.
+/// Parse one block item, returning `Option<BlockItem>`:
+///
+/// - `let_form` (always carries `;`) → `Some(BlockItem { has_semi: true })`
+/// - `expr_item` (any expression incl. `if`/`block`, with optional trailing
+///   `;`) → `Some(BlockItem { has_semi: <was `;` present?> })`
+/// - `bare_semi` (a `;` with no preceding expression) → `None`
 ///
 /// `let` is intentionally only parseable here, never inside `expr_parser`,
-/// so `1 + let x = 5` is a parse error.
-fn block_item_parser<'a, I, PE, PB>(
+/// so `1 + let x = 5` stays a parse error.
+fn block_item_parser<'a, I, PE>(
     expr: PE,
-    block: PB,
-) -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+) -> impl Parser<'a, I, Option<BlockItem>, Extra<'a>> + Clone
 where
     I: OValueInput<'a>,
     PE: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
-    PB: Parser<'a, I, BlockId, Extra<'a>> + Clone + 'a,
 {
     let let_form = just(TokenKind::KwLet)
         .ignore_then(just(TokenKind::KwMut).or_not().map(|m| m.is_some()))
@@ -278,23 +282,34 @@ where
         .then(just(TokenKind::Eq).ignore_then(expr.clone()).or_not())
         .then_ignore(just(TokenKind::Semi))
         .map_with(|(((mutable, name), ty), init), e| {
-            e.push_expr(ExprKind::Let {
+            let expr = e.push_expr(ExprKind::Let {
                 mutable,
                 name,
                 ty,
                 init,
+            });
+            Some(BlockItem { expr, has_semi: true })
+        });
+
+    // Any expression (incl. `if`/`block` via `expr_parser`'s atom alternation)
+    // followed by an optional `;`. The `has_semi` flag captures whether the
+    // user wrote one — typeck uses it to decide which item produces the
+    // block's value.
+    let expr_item = expr
+        .clone()
+        .then(just(TokenKind::Semi).or_not())
+        .map(|(eid, semi)| {
+            Some(BlockItem {
+                expr: eid,
+                has_semi: semi.is_some(),
             })
         });
 
-    // `if … {}` and `{block}` may appear as block items without a trailing `;`.
-    let if_form = if_parser_inner(expr.clone(), block.clone());
-    let block_form = block
-        .clone()
-        .map_with(|bid, e| e.push_expr(ExprKind::Block(bid)));
+    // Bare `;` — empty statement, produces no AST node. Rust permits
+    // `{ ;; let x = 1; ;; x }` and we mirror that.
+    let bare_semi = just(TokenKind::Semi).map(|_| None);
 
-    let expr_with_semi = expr.clone().then_ignore(just(TokenKind::Semi));
-
-    choice((let_form, if_form, block_form, expr_with_semi)).labelled("block item")
+    choice((let_form, expr_item, bare_semi)).labelled("block item")
 }
 
 fn if_parser_inner<'a, I, PE, PB>(
