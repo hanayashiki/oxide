@@ -22,5 +22,27 @@ pub fn from_hir_error(err: &HirError, file: FileId) -> Diagnostic {
         )
         .with_label(Label::primary(file, span.clone(), "value exceeds 0xFF"))
         .with_help("v0 char literals are bytes; multibyte characters aren't supported"),
+        HirError::DuplicateAdt { name, first, dup } => Diagnostic::error(
+            "E0204",
+            format!("the type `{name}` is defined multiple times"),
+        )
+        .with_label(Label::primary(file, dup.clone(), "duplicate definition"))
+        .with_label(Label::secondary(file, first.clone(), "first defined here")),
+        HirError::DuplicateField {
+            adt,
+            name,
+            first,
+            dup,
+        } => Diagnostic::error(
+            "E0205",
+            format!("field `{name}` is declared multiple times in `{adt}`"),
+        )
+        .with_label(Label::primary(file, dup.clone(), "duplicate field"))
+        .with_label(Label::secondary(file, first.clone(), "first declared here")),
+        HirError::UnresolvedAdt { name, span } => Diagnostic::error(
+            "E0206",
+            format!("cannot find type `{name}` in this scope"),
+        )
+        .with_label(Label::primary(file, span.clone(), "no struct with this name")),
     }
 }

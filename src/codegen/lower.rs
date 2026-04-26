@@ -270,6 +270,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             HirExprKind::Index { .. } | HirExprKind::Field { .. } => {
                 panic!("v0 codegen: index/field should have been rejected at typeck")
             }
+            HirExprKind::StructLit { .. } => {
+                panic!("v0 codegen: struct literals should have been rejected at typeck")
+            }
             HirExprKind::Unresolved(_) | HirExprKind::Poison => {
                 panic!("v0 codegen: poisoned expr reached codegen")
             }

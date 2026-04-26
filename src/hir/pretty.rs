@@ -2,14 +2,19 @@ use std::fmt::Write;
 
 use super::ir::*;
 
-/// Tree-shaped renderer of a `HirModule`. Walks from `root_fns`,
-/// resolving IDs inline. Local references show their `LocalId`,
-/// Fn references show their `FnId`, so the user can confirm name
-/// resolution at a glance.
+/// Tree-shaped renderer of a `HirModule`. Walks from `root_adts` then
+/// `root_fns`, resolving IDs inline. Local references show their
+/// `LocalId`, Fn references show their `FnId`, ADT references show
+/// their `HAdtId`, so the user can confirm name resolution at a glance.
 pub fn pretty_print(module: &HirModule) -> String {
     let mut out = String::new();
     let mut p = Printer { out: &mut out, m: module, indent: 0 };
     p.write_line("HirModule");
+    for &haid in &module.root_adts {
+        p.indent += 1;
+        p.print_adt(haid);
+        p.indent -= 1;
+    }
     for &fid in &module.root_fns {
         p.indent += 1;
         p.print_fn(fid);
@@ -31,6 +36,33 @@ impl<'a> Printer<'a> {
         }
         self.out.push_str(s);
         self.out.push('\n');
+    }
+
+    fn print_adt(&mut self, haid: HAdtId) {
+        let adt = &self.m.adts[haid];
+        let kind = match adt.kind {
+            AdtKind::Struct => "Struct",
+        };
+        self.write_line(&format!("{}[{}] {}", kind, haid.raw(), adt.name));
+        self.indent += 1;
+        for v in adt.variants.iter() {
+            // Structs use the implicit unnamed variant; for them, just
+            // dump fields directly. Named variants (future enums) get a
+            // wrapper line.
+            if let Some(name) = &v.name {
+                self.write_line(&format!("Variant {}", name));
+                self.indent += 1;
+                for f in v.fields.iter() {
+                    self.write_line(&format!("{}: {}", f.name, ty_str(&f.ty)));
+                }
+                self.indent -= 1;
+            } else {
+                for f in v.fields.iter() {
+                    self.write_line(&format!("{}: {}", f.name, ty_str(&f.ty)));
+                }
+            }
+        }
+        self.indent -= 1;
     }
 
     fn print_fn(&mut self, fid: FnId) {
@@ -203,6 +235,21 @@ impl<'a> Printer<'a> {
                 self.append_expr(buf, *base);
                 write!(buf, ".{}", name).unwrap();
             }
+            HirExprKind::StructLit { adt, fields } => {
+                let adt_name = &self.m.adts[*adt].name;
+                write!(buf, "StructLit Adt({}, \"{}\") {{", adt.raw(), adt_name).unwrap();
+                for (i, f) in fields.iter().enumerate() {
+                    if i > 0 {
+                        buf.push_str(", ");
+                    }
+                    write!(buf, " {}: ", f.name).unwrap();
+                    self.append_expr(buf, f.value);
+                }
+                if !fields.is_empty() {
+                    buf.push(' ');
+                }
+                buf.push('}');
+            }
             HirExprKind::Cast { expr, ty } => {
                 self.append_expr(buf, *expr);
                 write!(buf, " as {}", ty_str(ty)).unwrap();
@@ -239,6 +286,7 @@ impl<'a> Printer<'a> {
 fn ty_str(ty: &HirTy) -> String {
     match &ty.kind {
         HirTyKind::Named(name) => name.clone(),
+        HirTyKind::Adt(haid) => format!("Adt({})", haid.raw()),
         HirTyKind::Ptr { mutability, pointee } => {
             format!("*{} {}", mutability.as_str(), ty_str(pointee))
         }

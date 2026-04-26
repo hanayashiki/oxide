@@ -92,6 +92,33 @@ where
             .ignore_then(expr.clone().or_not())
             .map_with(|val, e| e.push_expr(ExprKind::Return(val)));
 
+        // `Ident { f: expr, ... }` — record struct literal. Tried before
+        // `ident_expr` so the bare-ident fallback only fires when the
+        // following tokens don't shape up to a field list.
+        //
+        // Known deviation from Rust: we allow struct literals in `if`/`while`
+        // cond positions (Rust forbids them there to keep the grammar
+        // unambiguous). The follow-on cleanup is to thread a "no-struct-lit-
+        // at-top" flag through the cond's expression parser; see TBD in
+        // spec/08_ADT.md.
+        let struct_lit_field = ident_parser()
+            .then_ignore(just(TokenKind::Colon))
+            .then(expr.clone())
+            .map_with(|(name, value), e| StructLitField {
+                name,
+                value,
+                span: e.lex_span(),
+            });
+        let struct_lit = ident_parser()
+            .then(
+                struct_lit_field
+                    .separated_by(just(TokenKind::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(TokenKind::LBrace), just(TokenKind::RBrace)),
+            )
+            .map_with(|(name, fields), e| e.push_expr(ExprKind::StructLit { name, fields }));
+
         let int_lit =
             select! { TokenKind::Int(n) => n }.map_with(|n, e| e.push_expr(ExprKind::IntLit(n)));
         let bool_lit =
@@ -129,7 +156,8 @@ where
         let if_expr = if_parser_inner(expr.clone(), block.clone());
 
         let atom = choice((
-            int_lit, bool_lit, char_lit, str_lit, if_expr, block_expr, paren, ident_expr,
+            int_lit, bool_lit, char_lit, str_lit, if_expr, block_expr, paren, struct_lit,
+            ident_expr,
         ));
 
         let call_args = expr
@@ -464,10 +492,42 @@ where
         .labelled("extern block")
 }
 
+/// `struct Name { f: T, ... }` — record struct declaration. Empty field
+/// list (`struct Foo {}`) is accepted; tuple/unit struct forms (`Foo(...)`,
+/// `Foo;`) are not.
+fn struct_item_parser<'a, I>() -> impl Parser<'a, I, ItemId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+{
+    let field_decl = ident_parser()
+        .then_ignore(just(TokenKind::Colon))
+        .then(type_parser())
+        .map_with(|(name, ty), e| FieldDecl {
+            name,
+            ty,
+            span: e.lex_span(),
+        });
+
+    just(TokenKind::KwStruct)
+        .ignore_then(ident_parser())
+        .then(
+            field_decl
+                .separated_by(just(TokenKind::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(TokenKind::LBrace), just(TokenKind::RBrace)),
+        )
+        .map_with(|(name, fields), e| {
+            let span = e.lex_span();
+            e.push_item(ItemKind::Struct(StructDecl { name, fields, span }))
+        })
+        .labelled("struct declaration")
+}
+
 pub(super) fn module_parser<'a, I>() -> impl Parser<'a, I, Vec<ItemId>, Extra<'a>>
 where
     I: OValueInput<'a>,
 {
-    let item = choice((extern_block_parser(), fn_item_parser()));
+    let item = choice((extern_block_parser(), struct_item_parser(), fn_item_parser()));
     item.repeated().collect::<Vec<_>>().then_ignore(end())
 }

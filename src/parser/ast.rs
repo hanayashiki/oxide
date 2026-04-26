@@ -35,6 +35,22 @@ pub enum ItemKind {
     /// `extern "C" { ... }` — group of foreign function declarations.
     /// Each child `FnDecl` has `body: None` (no block in the grammar).
     ExternBlock(ExternBlock),
+    /// `struct Name { f: T, ... }` — record struct declaration.
+    Struct(StructDecl),
+}
+
+#[derive(Clone, Debug)]
+pub struct StructDecl {
+    pub name: Ident,
+    pub fields: Vec<FieldDecl>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct FieldDecl {
+    pub name: Ident,
+    pub ty: TypeId,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -126,6 +142,13 @@ pub enum ExprKind {
         base: ExprId,
         name: Ident,
     },
+    /// `Name { f: expr, ... }` — record struct literal. The type-name is
+    /// resolved at HIR lowering against the type namespace; field names
+    /// stay as strings until typeck.
+    StructLit {
+        name: Ident,
+        fields: Vec<StructLitField>,
+    },
     Cast {
         expr: ExprId,
         ty: TypeId,
@@ -154,6 +177,13 @@ pub enum ExprKind {
 pub enum ElseArm {
     Block(BlockId),
     If(ExprId),
+}
+
+#[derive(Clone, Debug)]
+pub struct StructLitField {
+    pub name: Ident,
+    pub value: ExprId,
+    pub span: Span,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

@@ -44,7 +44,17 @@ impl<'a> Printer<'a> {
                 }
                 self.indent -= 1;
             }
+            ItemKind::Struct(s) => self.print_struct(s),
         }
+    }
+
+    fn print_struct(&mut self, s: &StructDecl) {
+        self.write_line(&format!("Struct {}", s.name.name));
+        self.indent += 1;
+        for f in &s.fields {
+            self.write_line(&format!("{}: {}", f.name.name, type_str(self.m, f.ty)));
+        }
+        self.indent -= 1;
     }
 
     fn print_fn(&mut self, f: &FnDecl) {
@@ -214,6 +224,20 @@ impl<'a> Printer<'a> {
             ExprKind::Field { base, name } => {
                 self.append_expr(buf, *base);
                 write!(buf, ".{}", name.name).unwrap();
+            }
+            ExprKind::StructLit { name, fields } => {
+                write!(buf, "StructLit {} {{", name.name).unwrap();
+                for (i, f) in fields.iter().enumerate() {
+                    if i > 0 {
+                        buf.push_str(", ");
+                    }
+                    write!(buf, " {}: ", f.name.name).unwrap();
+                    self.append_expr(buf, f.value);
+                }
+                if !fields.is_empty() {
+                    buf.push(' ');
+                }
+                buf.push('}');
             }
             ExprKind::Cast { expr, ty } => {
                 self.append_expr(buf, *expr);

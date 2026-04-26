@@ -7,18 +7,55 @@ use index_vec::IndexVec;
 use crate::lexer::Span;
 use crate::parser::ast::{AssignOp, BinOp, Mutability, UnOp};
 
-index_vec::define_index_type! { pub struct FnId     = u32; }
-index_vec::define_index_type! { pub struct LocalId  = u32; }
-index_vec::define_index_type! { pub struct HExprId  = u32; }
-index_vec::define_index_type! { pub struct HBlockId = u32; }
+index_vec::define_index_type! { pub struct FnId        = u32; }
+index_vec::define_index_type! { pub struct LocalId     = u32; }
+index_vec::define_index_type! { pub struct HExprId     = u32; }
+index_vec::define_index_type! { pub struct HBlockId    = u32; }
+index_vec::define_index_type! { pub struct HAdtId      = u32; }
+index_vec::define_index_type! { pub struct VariantIdx  = u32; }
+index_vec::define_index_type! { pub struct FieldIdx    = u32; }
 
 #[derive(Clone, Debug)]
 pub struct HirModule {
     pub fns: IndexVec<FnId, HirFn>,
+    pub adts: IndexVec<HAdtId, HirAdt>,
     pub locals: IndexVec<LocalId, HirLocal>,
     pub exprs: IndexVec<HExprId, HirExpr>,
     pub blocks: IndexVec<HBlockId, HirBlock>,
     pub root_fns: Vec<FnId>,
+    pub root_adts: Vec<HAdtId>,
+    pub span: Span,
+}
+
+/// Algebraic data type definition. v0 is record-struct only; the
+/// variants-list shape is the rustc-style umbrella so enums and unions
+/// fit by adding variants/AdtKind without reshaping.
+#[derive(Clone, Debug)]
+pub struct HirAdt {
+    pub name: String,
+    pub kind: AdtKind,
+    pub variants: IndexVec<VariantIdx, HirVariant>,
+    pub span: Span,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AdtKind {
+    Struct,
+    // Enum, Union — future
+}
+
+#[derive(Clone, Debug)]
+pub struct HirVariant {
+    /// `None` for the implicit unnamed variant of a struct.
+    pub name: Option<String>,
+    pub fields: IndexVec<FieldIdx, HirField>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct HirField {
+    pub name: String,
+    pub ty: HirTy,
     pub span: Span,
 }
 
@@ -109,10 +146,19 @@ pub enum HirExprKind {
         base: HExprId,
         index: HExprId,
     },
-    /// Field access — name unresolved in v0 (no struct support yet).
+    /// Field access — `name` is unresolved at HIR time; typeck looks it up
+    /// once `base`'s type is inferred.
     Field {
         base: HExprId,
         name: String,
+    },
+    /// `Name { f: expr, ... }` — record struct literal. The type-name has
+    /// been resolved (`adt`) but field names stay as strings; typeck
+    /// validates the field set and types each value expression against
+    /// the declared field type.
+    StructLit {
+        adt: HAdtId,
+        fields: Vec<HirStructLitField>,
     },
     Cast {
         expr: HExprId,
@@ -145,6 +191,13 @@ pub enum HElseArm {
 }
 
 #[derive(Clone, Debug)]
+pub struct HirStructLitField {
+    pub name: String,
+    pub value: HExprId,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
 pub struct HirTy {
     pub kind: HirTyKind,
     pub span: Span,
@@ -152,10 +205,13 @@ pub struct HirTy {
 
 #[derive(Clone, Debug)]
 pub enum HirTyKind {
-    /// A type-position name as written in source (e.g. "i32", "MyStruct").
-    /// Typeck does the primitive-name lookup and resolves to its
-    /// internal `Ty`.
+    /// A type-position name that didn't resolve to a user-defined ADT in
+    /// the type namespace. Typeck does the primitive-name lookup and
+    /// either resolves it to a primitive `Ty` or emits an unknown-type
+    /// error.
     Named(String),
+    /// Resolved use of a user-defined ADT (struct/enum/union).
+    Adt(HAdtId),
     /// `*const T` / `*mut T`. Pointee is `Box`ed for recursion.
     Ptr {
         mutability: Mutability,
@@ -177,13 +233,32 @@ pub enum HirError {
     },
     /// `'\xHH'` whose value exceeds `u8::MAX`, or a multibyte char literal.
     CharOutOfRange { ch: char, span: Span },
+    /// Two ADTs (struct/enum/union) in one module share a name.
+    DuplicateAdt {
+        name: String,
+        first: Span,
+        dup: Span,
+    },
+    /// Two fields in one ADT share a name.
+    DuplicateField {
+        adt: String,
+        name: String,
+        first: Span,
+        dup: Span,
+    },
+    /// Type-namespace lookup failed in a struct-literal position.
+    UnresolvedAdt { name: String, span: Span },
 }
 
 impl HirError {
     pub fn span(&self) -> &Span {
         match self {
-            Self::UnresolvedName { span, .. } | Self::CharOutOfRange { span, .. } => span,
-            Self::DuplicateFn { dup, .. } => dup,
+            Self::UnresolvedName { span, .. }
+            | Self::CharOutOfRange { span, .. }
+            | Self::UnresolvedAdt { span, .. } => span,
+            Self::DuplicateFn { dup, .. }
+            | Self::DuplicateAdt { dup, .. }
+            | Self::DuplicateField { dup, .. } => dup,
         }
     }
 }
