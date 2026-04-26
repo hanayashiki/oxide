@@ -19,8 +19,8 @@
 use index_vec::IndexVec;
 
 use crate::hir::{
-    FnId, HBlockId, HElseArm, HExprId, HirBlock, HirExpr, HirExprKind, HirFn, HirLocal, HirModule,
-    HirTy, HirTyKind, LocalId,
+    FnId, HBlockId, HElseArm, HExprId, HirExpr, HirExprKind, HirLocal, HirModule, HirTy, HirTyKind,
+    LocalId,
 };
 use crate::lexer::Span;
 use crate::parser::ast::{AssignOp, BinOp, Mutability, UnOp};
@@ -251,7 +251,6 @@ impl<'hir> Checker<'hir> {
     /// both phases — sig phase points `errors` at `Checker.errors`,
     /// body phase points it at the active `Inferer.errors`.
     fn resolve_named_ty(tys: &mut TyArena, errors: &mut Vec<TypeError>, ty: &HirTy) -> TyId {
-        // TODO: resolve custom types
         match &ty.kind {
             HirTyKind::Named(name) => match tys.from_prim_name(name) {
                 Some(id) => id,
@@ -263,6 +262,16 @@ impl<'hir> Checker<'hir> {
                     tys.error
                 }
             },
+            HirTyKind::Adt(_) => {
+                // ADT types are resolved at HIR; typeck still needs to
+                // intern them into its type vocabulary. See TBD-T4 in
+                // spec/08_ADT.md.
+                errors.push(TypeError::UnsupportedFeature {
+                    feature: "user-defined types in type position",
+                    span: ty.span.clone(),
+                });
+                tys.error
+            }
             HirTyKind::Ptr {
                 mutability,
                 pointee,
@@ -329,8 +338,17 @@ impl<'hir> Checker<'hir> {
         }
     }
 
-    /// Unifier. Convention: `unify(found, expected, span)` — diagnostic
-    /// reports `expected: <expected>, found: <found>`.
+    /// Symmetric Hindley-Milner unification. The two type arguments are
+    /// algebraically interchangeable — there is no subtyping. We retain
+    /// the parameter names `found` / `expected` only because the emitted
+    /// `TypeMismatch` diagnostic renders them with those labels; at most
+    /// call sites the labels are a presentation choice with no semantic
+    /// weight. For sites where direction *does* matter (Never absorbs,
+    /// pointer-mutability subtype `*mut → *const`), use `coerce` instead.
+    ///
+    /// Concretely: `Never` unifies only with `Never` here. Anything else
+    /// against `Never` is a mismatch. The "expression-of-type-`!`-can-flow-
+    /// anywhere" rule lives in `coerce`, not in `unify`.
     fn unify(&mut self, inf: &mut Inferer, found: TyId, expected: TyId, span: Span) {
         let found = self.resolve(inf, found);
         let expected = self.resolve(inf, expected);
@@ -341,7 +359,7 @@ impl<'hir> Checker<'hir> {
         let ke = self.tys.kind(expected).clone();
         match (kf, ke) {
             (TyKind::Error, _) | (_, TyKind::Error) => {}
-            (TyKind::Never, _) | (_, TyKind::Never) => {}
+            (TyKind::Never, TyKind::Never) => {}
             (TyKind::Infer(id), other) => self.bind_infer_checked(inf, id, expected, &other, span),
             (other, TyKind::Infer(id)) => self.bind_infer_checked(inf, id, found, &other, span),
             (TyKind::Prim(p), TyKind::Prim(q)) if p == q => {}
@@ -379,7 +397,20 @@ impl<'hir> Checker<'hir> {
     ///   - outermost: `mut → const` allowed; `const → mut` rejected.
     ///   - every inner position: exact mutability match.
     /// All non-pointer types fall through to plain unify.
+    /// Directional check: an expression of type `actual` is being placed
+    /// where the context demands `expected`. Two asymmetries live here
+    /// (and only here, by design — `unify` stays symmetric HM):
+    ///
+    /// 1. **Never absorbs.** If `actual` is `!`, it can flow into any
+    ///    `expected` — divergent expressions never produce a value, so
+    ///    the type they don't produce is irrelevant. The reverse is not
+    ///    true: a non-divergent value cannot satisfy a `Never` slot.
+    /// 2. **Pointer outer-mutability subtype.** `*mut T → *const T` is
+    ///    allowed at the outer layer (see `check_ptr_outer_compat`).
     fn coerce(&mut self, inf: &mut Inferer, actual: TyId, expected: TyId, span: Span) {
+        if matches!(self.tys.kind(self.resolve(inf, actual)), TyKind::Never) {
+            return;
+        }
         self.unify(inf, actual, expected, span.clone());
         self.check_ptr_outer_compat(inf, actual, expected, span);
     }
@@ -451,7 +482,7 @@ impl<'hir> Checker<'hir> {
         if int_flagged {
             let allowed = match target_kind {
                 TyKind::Prim(p) => p.is_integer(),
-                TyKind::Infer(_) | TyKind::Error | TyKind::Never => true,
+                TyKind::Infer(_) | TyKind::Error => true,
                 _ => false,
             };
             if !allowed {
@@ -601,6 +632,18 @@ impl<'hir> Checker<'hir> {
                 let _ = self.infer_expr(inf, base);
                 inf.errors.push(TypeError::UnsupportedFeature {
                     feature: "field access",
+                    span: span.clone(),
+                });
+                self.tys.error
+            }
+            HirExprKind::StructLit { adt: _, fields } => {
+                // Walk field expressions for side effects so any inner
+                // diagnostics still surface. See TBD-T6 in spec/08_ADT.md.
+                for f in &fields {
+                    let _ = self.infer_expr(inf, f.value);
+                }
+                inf.errors.push(TypeError::UnsupportedFeature {
+                    feature: "struct literals",
                     span: span.clone(),
                 });
                 self.tys.error
@@ -764,22 +807,40 @@ impl<'hir> Checker<'hir> {
             Some(HElseArm::Block(bid)) => {
                 let else_ty = self.infer_block(inf, bid);
                 let span = self.hir.blocks[bid].span.clone();
-                self.unify(inf, then_ty, else_ty, span);
+                self.unify_arms(inf, then_ty, else_ty, span);
                 self.join_never(inf, then_ty, else_ty)
             }
             Some(HElseArm::If(eid)) => {
                 let else_ty = self.infer_expr(inf, eid);
                 let span = self.hir.exprs[eid].span.clone();
-                self.unify(inf, then_ty, else_ty, span);
+                self.unify_arms(inf, then_ty, else_ty, span);
                 self.join_never(inf, then_ty, else_ty)
             }
         }
     }
 
+    /// Unify two `if`-arm types. Symmetric — neither arm is "the
+    /// expected." Special-case for `Never`: if either arm diverges,
+    /// skip unification entirely. The non-divergent arm decides the
+    /// if-expr's type via `join_never`; the divergent arm contributes
+    /// no usable type, so demanding equality with it would spuriously
+    /// reject `if c { return 1 } else { 0 }`. (The Never-absorbs rule
+    /// belongs in `coerce`, but this is the symmetric-join analogue.)
+    fn unify_arms(&mut self, inf: &mut Inferer, a: TyId, b: TyId, span: Span) {
+        let ar = self.resolve(inf, a);
+        let br = self.resolve(inf, b);
+        let a_never = matches!(self.tys.kind(ar), TyKind::Never);
+        let b_never = matches!(self.tys.kind(br), TyKind::Never);
+        if a_never || b_never {
+            return;
+        }
+        self.unify(inf, a, b, span);
+    }
+
     /// After unifying two arm types, pick the one that *isn't* `!`.
-    /// `unify`'s Never arm is a no-op, so the two TyIds remain distinct
-    /// when one side is `!`. The if-expr's actual type is the
-    /// non-divergent arm's type (Never absorbs). Without this, an
+    /// `unify_arms` skips Never sides, so they remain distinct from the
+    /// non-divergent arm. The if-expr's actual type is the non-divergent
+    /// arm's type (Never absorbs). Without this, an
     /// `if c { return 1 } else { 0 }` would be typed `!` if the then
     /// arm came first, instead of `i32`.
     fn join_never(&self, inf: &Inferer, a: TyId, b: TyId) -> TyId {
@@ -820,10 +881,3 @@ fn mut_le(actual: Mutability, expected: Mutability) -> bool {
     use Mutability::*;
     matches!((actual, expected), (Mut, _) | (Const, Const))
 }
-
-// Suppress dead-code warnings for currently-unused helpers/fields that
-// future passes (codegen) will pick up.
-#[allow(dead_code)]
-fn _force_use_hir_fn(_: &HirFn) {}
-#[allow(dead_code)]
-fn _force_use_hir_block(_: &HirBlock) {}

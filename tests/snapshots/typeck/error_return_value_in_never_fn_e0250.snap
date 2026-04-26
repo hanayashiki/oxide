@@ -1,0 +1,11 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `!`, found `i32`
+   ╭─[ error_return_value_in_never_fn_e0250.ox:1:26 ]
+   │
+ 1 │ fn impossible() -> never { 0 }
+   │                          ──┬──  
+   │                            ╰──── type mismatch here
+───╯
+== types ==
+Fn[0] impossible() -> !
+  HExprId(0) : i32

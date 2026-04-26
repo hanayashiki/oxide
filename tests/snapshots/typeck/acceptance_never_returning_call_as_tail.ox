@@ -1,1 +1,1 @@
-fn g() -> never { return 1 } fn f() -> i32 { g() }
+fn g() -> never { g() } fn f() -> i32 { g() }

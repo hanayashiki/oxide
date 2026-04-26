@@ -134,15 +134,20 @@ responsible for unifying with whatever they expected.
 
 ## Unification rules
 
-`unify(found, expected, span)` — argument convention is "found, then
-expected", and the diagnostic reports `expected: <expected>, found:
-<found>`.
+`unify` is **symmetric** Hindley-Milner unification — there is no
+subtyping in this layer. The two type arguments are algebraically
+interchangeable; we keep the parameter names `found` / `expected`
+only because the emitted diagnostic renders them with those labels,
+which is a presentation artifact (most call sites have no semantic
+notion of which side is "expected").
 
 After resolving both sides through any `Infer` chains:
 
 - `found == expected` → ok.
 - Either is `Error` → ok (poison absorbs).
-- Either is `Never` → ok (`!` is subtype of every type).
+- Both `Never` → ok. Anything else against `Never` is a mismatch
+  here. The "`!` flows into any context" rule lives in `coerce`,
+  not in `unify`.
 - One side is `Infer(α)` → bind `α := other` via `bind_infer_checked`,
   which rejects int-flagged vars being unified with non-integer
   concrete types.
@@ -151,6 +156,28 @@ After resolving both sides through any `Infer` chains:
 - Both `Fn` → arity match, recurse pairwise on args + on rets.
 - Both `Ptr` → recurse on inner.
 - Otherwise → `TypeMismatch { expected, found, span }` (E0250).
+
+## Coercion rules
+
+`coerce(actual, expected, span)` is the **directional** check used
+where the context dictates a slot type that an expression's value
+must fit (fn body vs declared return, `Return(val)`, call args, let
+init, assignment rhs). It runs in two steps:
+
+1. If `actual` is `Never`, accept unconditionally. A divergent
+   expression produces no value, so the type it doesn't produce
+   cannot conflict with the slot. The reverse (`expected` is
+   `Never`, `actual` is some concrete `T`) is *not* accepted —
+   that is exactly the case "this fn declared `-> never` but
+   returns a value", which must error.
+2. Otherwise, `unify(actual, expected)` plus the pointer outer-layer
+   subtype check (`*mut T` → `*const T` allowed; inner positions
+   must match exactly).
+
+Branch unification in `if` (then vs else) is symmetric, not a
+coercion — but it shares the Never-absorbs spirit. Implemented as
+`unify_arms`: if either arm is `Never`, skip unify entirely; the
+non-divergent arm decides the if-expr's type via `join_never`.
 
 ## Errors
 
