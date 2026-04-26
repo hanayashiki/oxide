@@ -106,6 +106,23 @@ pub struct HBlockItem {
 pub struct HirExpr {
     pub kind: HirExprKind,
     pub span: Span,
+    /// Whether this expression refers to a memory location ("place" in
+    /// rustc terminology, "lvalue" in C). Place-ness is purely syntactic —
+    /// derived from `kind` and the place-ness of children — so we cache
+    /// it at construction time in `lower` rather than re-deriving it on
+    /// each lookup.
+    ///
+    /// Rules (see spec/08_ADT.md "Place expressions"):
+    ///   - `Local(_)` → place.
+    ///   - `Field { base, .. }` → place iff `base` is place.
+    ///   - `Unresolved(_) | Poison` → place (suppress cascading errors;
+    ///     diagnostics already filed at HIR/typeck for the underlying issue).
+    ///   - everything else → not place.
+    ///
+    /// `Unary { Deref, .. }` and `Index { .. }` will gain producer/projection
+    /// arms when their feature specs land (07_POINTER §5 for deref;
+    /// future array spec for index). Today they're not place.
+    pub is_place: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -248,6 +265,9 @@ pub enum HirError {
     },
     /// Type-namespace lookup failed in a struct-literal position.
     UnresolvedAdt { name: String, span: Span },
+    /// Left-hand side of `=` (or compound assign) is not a place
+    /// expression. See spec/08_ADT.md "Place expressions and `is_place`".
+    InvalidAssignTarget { span: Span },
 }
 
 impl HirError {
@@ -255,7 +275,8 @@ impl HirError {
         match self {
             Self::UnresolvedName { span, .. }
             | Self::CharOutOfRange { span, .. }
-            | Self::UnresolvedAdt { span, .. } => span,
+            | Self::UnresolvedAdt { span, .. }
+            | Self::InvalidAssignTarget { span } => span,
             Self::DuplicateFn { dup, .. }
             | Self::DuplicateAdt { dup, .. }
             | Self::DuplicateField { dup, .. } => dup,

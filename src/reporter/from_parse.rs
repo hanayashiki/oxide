@@ -42,9 +42,5 @@ pub fn from_parse_error(err: &ParseError, file: FileId) -> Diagnostic {
                 .with_label(Label::primary(file, span.clone(), "reserved for future use"))
         }
         ParseError::LexErrorToken { err, span } => from_lex_error(err, file, span.clone()),
-        ParseError::InvalidAssignTarget { span } => {
-            Diagnostic::error("E0106", "invalid assignment target")
-                .with_label(Label::primary(file, span.clone(), "left-hand side is not assignable"))
-        }
     }
 }

@@ -21,6 +21,34 @@ use crate::parser::{Ident, StructLitField, ast};
 
 use super::ir::*;
 
+/// Compute the `is_place` bit for an expression at construction time.
+/// Children are already in `exprs` (children-first lowering), so the
+/// projection arms can read child bits directly without recursion.
+///
+/// Rules per spec/08_ADT.md "Place expressions":
+///   - `Local(_)` — direct producer.
+///   - `Field { base, .. }` — projection; inherits from base.
+///   - `Index { base, .. }` — projection; inherits from base. Indexing
+///     itself is `UnsupportedFeature` at typeck today, but the place
+///     rule lives at the structural HIR layer, so we wire it now and
+///     it stays correct when arrays land.
+///   - `Unresolved(_) | Poison` — recovery; treat as place to suppress
+///     cascading "InvalidAssignTarget"-style errors when the underlying
+///     issue (unresolved name, malformed expr) was already filed.
+///   - everything else — value expression.
+///
+/// `Unary { Deref, .. }` will be place-shaped under 07_POINTER §5, but
+/// deref isn't in scope today.
+fn compute_is_place(kind: &HirExprKind, exprs: &IndexVec<HExprId, HirExpr>) -> bool {
+    match kind {
+        HirExprKind::Local(_) => true,
+        HirExprKind::Field { base, .. } => exprs[*base].is_place,
+        HirExprKind::Index { base, .. } => exprs[*base].is_place,
+        HirExprKind::Unresolved(_) | HirExprKind::Poison => true,
+        _ => false,
+    }
+}
+
 pub fn lower(ast_module: &ast::Module) -> (HirModule, Vec<HirError>) {
     let mut lowerer = Lowerer::new(ast_module);
     let to_lower = lowerer.prescan_items();
@@ -284,6 +312,11 @@ impl<'a> Lowerer<'a> {
             ast::ExprKind::Assign { op, lhs, rhs } => {
                 let target = self.lower_expr(lhs);
                 let rhs = self.lower_expr(rhs);
+                if !self.exprs[target].is_place {
+                    self.errors.push(HirError::InvalidAssignTarget {
+                        span: self.exprs[target].span.clone(),
+                    });
+                }
                 HirExprKind::Assign { op, target, rhs }
             }
             ast::ExprKind::Call { callee, args } => {
@@ -353,7 +386,8 @@ impl<'a> Lowerer<'a> {
             ast::ExprKind::Poison => HirExprKind::Poison,
         };
 
-        self.exprs.push(HirExpr { kind, span })
+        let is_place = compute_is_place(&kind, &self.exprs);
+        self.exprs.push(HirExpr { kind, span, is_place })
     }
 
     fn lower_else_arm(&mut self, arm: ast::ElseArm) -> HElseArm {

@@ -228,10 +228,11 @@ one rung of the Pratt builder.
 addr-of (`&p`), or `&mut`. The reserved-keyword machinery (E0104) catches
 `&mut` if it appears.
 
-Place-expression check (for assignment LHS) is *not* enforced in the
-grammar; we parse any expression on the LHS and emit
-`InvalidAssignTarget` (E0106) post-parse if it isn't a place. This keeps
-the chumsky grammar small and produces better error messages.
+Place-expression check (for assignment LHS) is not enforced at parse
+time; the parser accepts any expression on the LHS, and HIR lower
+emits `InvalidAssignTarget` (E0207) when the lowered target's
+`is_place` bit is false. See spec/08_ADT.md "Place expressions and
+`is_place`".
 
 ## API
 
@@ -257,7 +258,6 @@ pub enum ParseError {
     BadStatement        { span: Span },                                                // E0103
     ReservedKeyword     { kw: &'static str, span: Span },                              // E0104
     LexErrorToken       { err: LexError, span: Span },                                 // E0105
-    InvalidAssignTarget { span: Span },                                                // E0106
 }
 ```
 

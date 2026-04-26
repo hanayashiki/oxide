@@ -44,5 +44,15 @@ pub fn from_hir_error(err: &HirError, file: FileId) -> Diagnostic {
             format!("cannot find type `{name}` in this scope"),
         )
         .with_label(Label::primary(file, span.clone(), "no struct with this name")),
+        HirError::InvalidAssignTarget { span } => Diagnostic::error(
+            "E0207",
+            "left-hand side of assignment is not a place expression",
+        )
+        .with_label(Label::primary(file, span.clone(), "cannot assign to this"))
+        .with_help(
+            "assignment targets must be a local, a field of a place, or a deref \
+             of a pointer; literals, calls, and struct literals produce values \
+             without a stable location",
+        ),
     }
 }

@@ -1,0 +1,14 @@
+HirModule
+  Fn[0] f()
+    Block
+      ExprStmt Assign(Eq, Int(1), Int(2))
+== diagnostics ==
+[E0207] Error: left-hand side of assignment is not a place expression
+   ╭─[ assign_to_literal_invalid.ox:2:5 ]
+   │
+ 2 │     1 = 2;
+   │     ┬  
+   │     ╰── cannot assign to this
+   │ 
+   │ Help: assignment targets must be a local, a field of a place, or a deref of a pointer; literals, calls, and struct literals produce values without a stable location
+───╯

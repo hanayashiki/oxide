@@ -1,0 +1,4 @@
+HirModule
+  Fn[0] f(x[Local(0)]: i32) -> i32
+    Block
+      tail: Binary(Add, Int(1), { Let(1, "y", Local(0, "x", place)); Local(1, "y", place) })

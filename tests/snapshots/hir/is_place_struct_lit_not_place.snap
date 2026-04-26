@@ -1,0 +1,7 @@
+HirModule
+  Struct[0] Point
+    x: i32
+    y: i32
+  Fn[0] f()
+    Block
+      ExprStmt StructLit(0, "Point", x: Int(1), y: Int(2))

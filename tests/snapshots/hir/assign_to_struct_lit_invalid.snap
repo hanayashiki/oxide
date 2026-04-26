@@ -1,0 +1,17 @@
+HirModule
+  Struct[0] Point
+    x: i32
+    y: i32
+  Fn[0] f()
+    Block
+      ExprStmt Assign(Eq, StructLit(0, "Point", x: Int(0), y: Int(0)), StructLit(0, "Point", x: Int(1), y: Int(2)))
+== diagnostics ==
+[E0207] Error: left-hand side of assignment is not a place expression
+   ╭─[ assign_to_struct_lit_invalid.ox:4:5 ]
+   │
+ 4 │     Point { x: 0, y: 0 } = Point { x: 1, y: 2 };
+   │     ──────────┬─────────  
+   │               ╰─────────── cannot assign to this
+   │ 
+   │ Help: assignment targets must be a local, a field of a place, or a deref of a pointer; literals, calls, and struct literals produce values without a stable location
+───╯

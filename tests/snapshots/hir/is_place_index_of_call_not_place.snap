@@ -1,0 +1,7 @@
+HirModule
+  Fn[0] make() -> i32
+    Block
+      tail: Int(0)
+  Fn[1] f()
+    Block
+      ExprStmt Index(Call(Fn(0, "make")), Int(0))

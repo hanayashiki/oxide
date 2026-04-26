@@ -4,4 +4,4 @@ HirModule
     y: i32
   Fn[0] make() -> Adt(0)
     Block
-      tail: StructLit Adt(0, "Point") { x: Int(0),  y: Int(0) }
+      tail: StructLit(0, "Point", x: Int(0), y: Int(0))

@@ -1,0 +1,8 @@
+HirModule
+  Struct[0] Inner
+    z: i32
+  Struct[1] Outer
+    inner: Adt(0)
+  Fn[0] f(o[Local(0)]: Adt(1))
+    Block
+      ExprStmt Field(Field(Local(0, "o", place), "inner", place), "z", place)

@@ -6,6 +6,12 @@ use super::ir::*;
 /// `root_fns`, resolving IDs inline. Local references show their
 /// `LocalId`, Fn references show their `FnId`, ADT references show
 /// their `HAdtId`, so the user can confirm name resolution at a glance.
+///
+/// Inline expression rendering uses a uniform `Name(arg1, arg2, …, place?)`
+/// form. The optional `place` arg appears as the last positional argument
+/// when `HirExpr::is_place == true`. Block-as-expression is the one
+/// exception: it renders as `{ item1; item2; tail }` (no `Name` prefix)
+/// since braces already disambiguate and blocks are never places.
 pub fn pretty_print(module: &HirModule) -> String {
     let mut out = String::new();
     let mut p = Printer { out: &mut out, m: module, indent: 0 };
@@ -177,109 +183,198 @@ impl<'a> Printer<'a> {
         }
     }
 
+    /// Render an expression inline.
+    ///
+    /// Uniform structure: `Name(arg1, arg2, …, place?)`, where the optional
+    /// `place` is the last positional arg when `expr.is_place == true`.
+    /// `Block` is the lone exception — renders as `{ items }` since braces
+    /// already delimit, and blocks are never places.
     fn append_expr(&self, buf: &mut String, eid: HExprId) {
         let expr = &self.m.exprs[eid];
+
+        // Block-as-expression: no Name prefix, just the inline brace form.
+        if let HirExprKind::Block(bid) = &expr.kind {
+            self.append_block_inline(buf, *bid);
+            return;
+        }
+
+        let args = self.expr_args(eid);
+        let name = expr_name(&expr.kind);
+
+        write!(buf, "{}(", name).unwrap();
+        let mut first = true;
+        for arg in &args {
+            if !first {
+                buf.push_str(", ");
+            }
+            buf.push_str(arg);
+            first = false;
+        }
+        if expr.is_place {
+            if !first {
+                buf.push_str(", ");
+            }
+            buf.push_str("place");
+        }
+        buf.push(')');
+    }
+
+    /// Build the positional-argument list for an expression (excluding the
+    /// optional `place` marker, which is appended uniformly by `append_expr`).
+    /// Sub-expressions are rendered recursively into strings; sub-blocks
+    /// render as `{ items }`.
+    fn expr_args(&self, eid: HExprId) -> Vec<String> {
+        let expr = &self.m.exprs[eid];
         match &expr.kind {
-            HirExprKind::IntLit(n) => write!(buf, "Int({n})").unwrap(),
-            HirExprKind::BoolLit(b) => write!(buf, "Bool({b})").unwrap(),
-            HirExprKind::CharLit(b) => write!(buf, "Char({b})").unwrap(),
-            HirExprKind::StrLit(s) => write!(buf, "Str({s:?})").unwrap(),
+            HirExprKind::IntLit(n) => vec![n.to_string()],
+            HirExprKind::BoolLit(b) => vec![b.to_string()],
+            HirExprKind::CharLit(c) => vec![c.to_string()],
+            HirExprKind::StrLit(s) => vec![format!("{s:?}")],
             HirExprKind::Local(lid) => {
                 let name = &self.m.locals[*lid].name;
-                write!(buf, "Local({}, \"{}\")", lid.raw(), name).unwrap();
+                vec![lid.raw().to_string(), format!("{name:?}")]
             }
             HirExprKind::Fn(fid) => {
                 let name = &self.m.fns[*fid].name;
-                write!(buf, "Fn({}, \"{}\")", fid.raw(), name).unwrap();
+                vec![fid.raw().to_string(), format!("{name:?}")]
             }
-            HirExprKind::Unresolved(name) => {
-                write!(buf, "Unresolved({:?})", name).unwrap();
+            HirExprKind::Unresolved(name) => vec![format!("{name:?}")],
+            HirExprKind::Unary { op, expr: sub } => {
+                vec![format!("{op:?}"), self.render_expr(*sub)]
             }
-            HirExprKind::Unary { op, expr } => {
-                write!(buf, "Unary({op:?}, ").unwrap();
-                self.append_expr(buf, *expr);
-                buf.push(')');
-            }
-            HirExprKind::Binary { op, lhs, rhs } => {
-                write!(buf, "Binary({op:?}, ").unwrap();
-                self.append_expr(buf, *lhs);
-                buf.push_str(", ");
-                self.append_expr(buf, *rhs);
-                buf.push(')');
-            }
-            HirExprKind::Assign { op, target, rhs } => {
-                write!(buf, "Assign({op:?}, ").unwrap();
-                self.append_expr(buf, *target);
-                buf.push_str(", ");
-                self.append_expr(buf, *rhs);
-                buf.push(')');
-            }
+            HirExprKind::Binary { op, lhs, rhs } => vec![
+                format!("{op:?}"),
+                self.render_expr(*lhs),
+                self.render_expr(*rhs),
+            ],
+            HirExprKind::Assign { op, target, rhs } => vec![
+                format!("{op:?}"),
+                self.render_expr(*target),
+                self.render_expr(*rhs),
+            ],
             HirExprKind::Call { callee, args } => {
-                self.append_expr(buf, *callee);
-                buf.push('(');
-                for (i, a) in args.iter().enumerate() {
-                    if i > 0 {
-                        buf.push_str(", ");
-                    }
-                    self.append_expr(buf, *a);
+                let mut out = Vec::with_capacity(1 + args.len());
+                out.push(self.render_expr(*callee));
+                for a in args {
+                    out.push(self.render_expr(*a));
                 }
-                buf.push(')');
+                out
             }
             HirExprKind::Index { base, index } => {
-                self.append_expr(buf, *base);
-                buf.push('[');
-                self.append_expr(buf, *index);
-                buf.push(']');
+                vec![self.render_expr(*base), self.render_expr(*index)]
             }
             HirExprKind::Field { base, name } => {
-                self.append_expr(buf, *base);
-                write!(buf, ".{}", name).unwrap();
+                vec![self.render_expr(*base), format!("{name:?}")]
             }
             HirExprKind::StructLit { adt, fields } => {
                 let adt_name = &self.m.adts[*adt].name;
-                write!(buf, "StructLit Adt({}, \"{}\") {{", adt.raw(), adt_name).unwrap();
-                for (i, f) in fields.iter().enumerate() {
-                    if i > 0 {
-                        buf.push_str(", ");
-                    }
-                    write!(buf, " {}: ", f.name).unwrap();
-                    self.append_expr(buf, f.value);
+                let mut out = Vec::with_capacity(2 + fields.len());
+                out.push(adt.raw().to_string());
+                out.push(format!("{adt_name:?}"));
+                for f in fields {
+                    out.push(format!("{}: {}", f.name, self.render_expr(f.value)));
                 }
-                if !fields.is_empty() {
-                    buf.push(' ');
+                out
+            }
+            HirExprKind::Cast { expr: sub, ty } => {
+                vec![self.render_expr(*sub), ty_str(ty)]
+            }
+            HirExprKind::If { cond, then_block, else_arm } => {
+                let mut out = vec![self.render_expr(*cond), self.render_block_inline(*then_block)];
+                if let Some(arm) = else_arm {
+                    out.push(match arm {
+                        HElseArm::Block(bid) => self.render_block_inline(*bid),
+                        HElseArm::If(eid) => self.render_expr(*eid),
+                    });
                 }
-                buf.push('}');
+                out
             }
-            HirExprKind::Cast { expr, ty } => {
-                self.append_expr(buf, *expr);
-                write!(buf, " as {}", ty_str(ty)).unwrap();
+            HirExprKind::Block(_) => {
+                // Block has its own brace-form rendering and is handled
+                // before `expr_args` is reached.
+                unreachable!("Block handled by append_expr's early return")
             }
+            HirExprKind::Return(val) => match val {
+                Some(eid) => vec![self.render_expr(*eid)],
+                None => vec![],
+            },
             HirExprKind::Let { local, init } => {
                 let l = &self.m.locals[*local];
-                buf.push_str("Let ");
+                let mut out = Vec::new();
+                out.push(local.raw().to_string());
+                out.push(format!("{:?}", l.name));
                 if l.mutable {
-                    buf.push_str("mut ");
+                    out.push("mut".to_string());
                 }
-                write!(buf, "{}[Local({})]", l.name, local.raw()).unwrap();
                 if let Some(ty) = &l.ty {
-                    write!(buf, ": {}", ty_str(ty)).unwrap();
+                    out.push(format!(":{}", ty_str(ty)));
                 }
                 if let Some(init) = init {
-                    buf.push_str(" = ");
-                    self.append_expr(buf, *init);
+                    out.push(self.render_expr(*init));
                 }
+                out
             }
-            HirExprKind::Return(val) => {
-                buf.push_str("Return");
-                if let Some(eid) = val {
-                    buf.push(' ');
-                    self.append_expr(buf, *eid);
-                }
-            }
-            HirExprKind::If { .. } => buf.push_str("If(…)"),
-            HirExprKind::Block(_) => buf.push_str("Block(…)"),
-            HirExprKind::Poison => buf.push_str("<poison>"),
+            HirExprKind::Poison => vec![],
         }
+    }
+
+    fn render_expr(&self, eid: HExprId) -> String {
+        let mut buf = String::new();
+        self.append_expr(&mut buf, eid);
+        buf
+    }
+
+    /// Inline `{ item1; item2; tail }` rendering for a block. The trailing
+    /// `;` matches the source-level `has_semi` of each item — the tail
+    /// (last item with `has_semi == false`) has no `;` after it.
+    fn append_block_inline(&self, buf: &mut String, bid: HBlockId) {
+        let block = &self.m.blocks[bid];
+        if block.items.is_empty() {
+            buf.push_str("{}");
+            return;
+        }
+        buf.push_str("{ ");
+        for (i, item) in block.items.iter().enumerate() {
+            if i > 0 {
+                buf.push(' ');
+            }
+            self.append_expr(buf, item.expr);
+            if item.has_semi {
+                buf.push(';');
+            }
+        }
+        buf.push_str(" }");
+    }
+
+    fn render_block_inline(&self, bid: HBlockId) -> String {
+        let mut buf = String::new();
+        self.append_block_inline(&mut buf, bid);
+        buf
+    }
+}
+
+fn expr_name(kind: &HirExprKind) -> &'static str {
+    match kind {
+        HirExprKind::IntLit(_) => "Int",
+        HirExprKind::BoolLit(_) => "Bool",
+        HirExprKind::CharLit(_) => "Char",
+        HirExprKind::StrLit(_) => "Str",
+        HirExprKind::Local(_) => "Local",
+        HirExprKind::Fn(_) => "Fn",
+        HirExprKind::Unresolved(_) => "Unresolved",
+        HirExprKind::Unary { .. } => "Unary",
+        HirExprKind::Binary { .. } => "Binary",
+        HirExprKind::Assign { .. } => "Assign",
+        HirExprKind::Call { .. } => "Call",
+        HirExprKind::Index { .. } => "Index",
+        HirExprKind::Field { .. } => "Field",
+        HirExprKind::StructLit { .. } => "StructLit",
+        HirExprKind::Cast { .. } => "Cast",
+        HirExprKind::If { .. } => "If",
+        HirExprKind::Block(_) => "Block",
+        HirExprKind::Return(_) => "Return",
+        HirExprKind::Let { .. } => "Let",
+        HirExprKind::Poison => "Poison",
     }
 }
 

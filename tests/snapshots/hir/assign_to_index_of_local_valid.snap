@@ -1,0 +1,4 @@
+HirModule
+  Fn[0] f(a[Local(0)]: i32)
+    Block
+      ExprStmt Assign(Eq, Index(Local(0, "a", place), Int(0), place), Int(1))

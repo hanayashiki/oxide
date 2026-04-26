@@ -29,9 +29,6 @@ pub enum ParseError {
         err: LexError,
         span: Span,
     },
-    InvalidAssignTarget {
-        span: Span,
-    },
 }
 
 impl ParseError {
@@ -42,8 +39,7 @@ impl ParseError {
             | Self::BadStatement { span }
             | Self::Custom { span, .. }
             | Self::ReservedKeyword { span, .. }
-            | Self::LexErrorToken { span, .. }
-            | Self::InvalidAssignTarget { span } => span,
+            | Self::LexErrorToken { span, .. } => span,
         }
     }
 }

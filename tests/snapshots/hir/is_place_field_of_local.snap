@@ -1,0 +1,7 @@
+HirModule
+  Struct[0] Point
+    x: i32
+    y: i32
+  Fn[0] f(p[Local(0)]: Adt(0))
+    Block
+      ExprStmt Field(Local(0, "p", place), "x", place)

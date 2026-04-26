@@ -29,7 +29,7 @@ diverge in semantics from Rust's interpretation of the syntax we do
 accept. Out-of-scope features (`pub`, shorthand, `..rest`, tuple
 structs, unit structs) are *omissions*, not deviations.
 
-## Acceptance (vocabulary round)
+## Acceptance
 
 ```rust
 struct Point { x: i32, y: i32 }
@@ -48,11 +48,11 @@ signature to `(Adt(0)) -> Adt(0)`, and phase 2 types the body's
 
 The fuller program — `fn make(a, b) -> Point { Point { x: a, y: b } }`
 exercising struct-literal construction and field access — is the
-acceptance for **TBD-T6** (operations on ADTs), not this round.
-Just like 07_POINTER's acceptance gets pointers passed through fn
-signatures without yet supporting deref, this round gets `Adt(_)`
-flowing through fn signatures and locals without supporting
-construction or field access.
+acceptance for **TBD-T6** (operations on ADTs). The vocabulary
+covered here passes `Adt(_)` through fn signatures and locals;
+construction and field access are deferred, mirroring how
+07_POINTER passes pointers through fn signatures without supporting
+deref.
 
 ## Position in the pipeline
 
@@ -264,6 +264,96 @@ already absorbs cleanly downstream.
 cannot resolve `name` because it doesn't know the type of `base`;
 typeck does the lookup once `base`'s type is inferred.
 
+### Place expressions and `is_place`
+
+Whether an expression refers to a memory location ("place" in rustc
+terminology, "lvalue" in C) is a purely syntactic property —
+derivable from `HirExprKind` and the place-ness of children. Because
+it never depends on type information, it lives at the HIR layer:
+
+```rust
+pub struct HirExpr {
+    pub kind: HirExprKind,
+    pub span: Span,
+    pub is_place: bool,
+}
+```
+
+`is_place` is cached on every `HirExpr`, populated once per node at
+lower time when the parent is constructed (children lower first, so
+child `is_place` bits are already available).
+
+#### Rules
+
+```text
+Local(_)                       → place
+Field { base, .. }             → exprs[base].is_place
+Index { base, .. }             → exprs[base].is_place
+Unresolved(_) | Poison         → place  (suppress cascading errors;
+                                          underlying issue already filed)
+everything else                → not place
+```
+
+The cache is computed by a small helper inside `lower.rs`:
+
+```rust
+fn compute_is_place(kind: &HirExprKind, exprs: &IndexVec<HExprId, HirExpr>) -> bool {
+    match kind {
+        HirExprKind::Local(_) => true,
+        HirExprKind::Field { base, .. } => exprs[*base].is_place,
+        HirExprKind::Index { base, .. } => exprs[*base].is_place,
+        HirExprKind::Unresolved(_) | HirExprKind::Poison => true,
+        _ => false,
+    }
+}
+```
+
+`Index` is included even though typeck still rejects all indexing
+as `UnsupportedFeature`: the place rule is purely structural (HIR-
+level), independent of typeck's array support, so wiring it now
+keeps the answer right when a future array spec lights up indexing.
+
+`Unary { Deref, .. }` will be place-shaped under 07_POINTER §5;
+its arm gets added when the deferred deref work lands.
+
+#### Validation: assignment-target check at lower time
+
+When `lower_expr` produces an `Assign { target, .. }`, it inspects
+the lowered target's `is_place` bit (already populated). If false,
+HIR emits `HirError::InvalidAssignTarget` (E0207). The `Assign`
+itself is still constructed — downstream `Error` propagation absorbs
+cleanly — but the diagnostic surfaces at the HIR layer, which is
+where the rule is structurally definable.
+
+#### Parser cleanup: `ParseError::InvalidAssignTarget` is removed
+
+`spec/03_PARSER.md` declared `ParseError::InvalidAssignTarget`
+(E0106) for "post-parse validation that the LHS is a place." The
+variant exists in `parser/error.rs` and is rendered in
+`reporter/from_parse.rs`, but is **never constructed** — dead code.
+Place validation belongs at HIR (where `is_place` is computed
+anyway), not at the parser layer. This round:
+
+- Remove the `ParseError::InvalidAssignTarget` variant.
+- Remove the `from_parse_error` arm.
+- Remove the E0106 description from `spec/03_PARSER.md`.
+
+#### What stays typeck's job (TBD)
+
+**Mutability of places.** Whether a place is *writable* (e.g.,
+`s.f = 1` requires `s` to be `mut`) needs typeck because the
+eventual `Unary { Deref, expr }` arm requires reading the pointer's
+type to decide `*mut T` (writable) vs `*const T` (not). For
+`Local`/`Field` only, the decision is also purely structural and
+could in principle live at HIR — but splitting `place_mutability`
+across layers would be uglier than keeping it together. We co-locate
+it with the future `Deref` work in typeck. Tracked as TBD-T6.
+
+**Plain-Local mutability gap.** `infer_assign` in typeck does not
+enforce that a non-`mut` `Local` rejects assignment — `let x = 1;
+x = 2;` typechecks. The typeck-side `place_mutability` work will
+close this at the same time.
+
 ## Lowering algorithm
 
 ```rust
@@ -340,16 +430,17 @@ Add to `HirError`:
 
 ```rust
 pub enum HirError {
-    UnresolvedName     { name: String, span: Span },                            // E0201 (existing)
-    DuplicateFn        { name: String, first: Span, dup: Span },                // E0202 (existing)
-    CharOutOfRange     { ch: char, span: Span },                                // E0203 (existing)
-    DuplicateAdt       { name: String, first: Span, dup: Span },                // E0204 (new)
-    DuplicateField     { adt: String, name: String, first: Span, dup: Span },   // E0205 (new)
-    UnresolvedAdt      { name: String, span: Span },                            // E0206 (new)
+    UnresolvedName       { name: String, span: Span },                            // E0201
+    DuplicateFn          { name: String, first: Span, dup: Span },                // E0202
+    CharOutOfRange       { ch: char, span: Span },                                // E0203
+    DuplicateAdt         { name: String, first: Span, dup: Span },                // E0204
+    DuplicateField       { adt: String, name: String, first: Span, dup: Span },   // E0205
+    UnresolvedAdt        { name: String, span: Span },                            // E0206
+    InvalidAssignTarget  { span: Span },                                          // E0207
 }
 ```
 
-Codes E0207–E0249 reserved for future HIR diagnostics.
+Codes E0208–E0249 reserved for future HIR diagnostics.
 
 `from_hir_error` in `src/reporter/from_hir.rs` grows arms for the
 new codes.
@@ -682,11 +773,17 @@ helper.
   rejected as infinite-size; `struct A { x: *const A }` accepted).
   Independent of the phase machinery above — runs after phase 0.5
   as a graph walk over field-type dependencies.
-- **TBD-T6**: typing rules for `StructLit` (field-set validation,
-  per-field unification) and `Field` (place-expression rule, field
-  name lookup, mutability for assignment-through-field). Rule for
-  `Field`-as-place-when-base-is-place; composes with the existing
-  `Local`-is-place rule and the (TBD) `Deref`-is-place rule.
+- **TBD-T6**: typeck rules for the operations on ADTs.
+  - `StructLit`: field-set validation (missing/duplicate/unknown),
+    per-field unification against declared field types, result
+    type `Adt(aid)`.
+  - `Field`: field-name lookup against the resolved Adt, result
+    type from the matched `FieldDef.ty`. Errors for unknown field,
+    field on non-Adt, field on still-Infer base.
+  - `place_mutability` recursing through `Local`/`Field` (and a
+    `Deref` arm when 07_POINTER's deferred section lands), plus a
+    new `AssignToImmutable` typeck error. Closes the existing
+    plain-`Local`-mutability gap at the same time.
 - **TBD-T7**: codegen for struct values (LLVM `struct_type`, GEP
   for field access, lvalue extension for `Field`, struct-by-value
   parameter/return for in-language calls only — `extern "C"` boundary

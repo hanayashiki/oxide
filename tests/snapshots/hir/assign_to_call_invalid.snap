@@ -1,0 +1,17 @@
+HirModule
+  Fn[0] make() -> i32
+    Block
+      tail: Int(0)
+  Fn[1] f()
+    Block
+      ExprStmt Assign(Eq, Call(Fn(0, "make")), Int(1))
+== diagnostics ==
+[E0207] Error: left-hand side of assignment is not a place expression
+   ╭─[ assign_to_call_invalid.ox:4:5 ]
+   │
+ 4 │     make() = 1;
+   │     ───┬──  
+   │        ╰──── cannot assign to this
+   │ 
+   │ Help: assignment targets must be a local, a field of a place, or a deref of a pointer; literals, calls, and struct literals produce values without a stable location
+───╯
