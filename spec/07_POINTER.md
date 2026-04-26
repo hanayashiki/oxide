@@ -81,6 +81,29 @@ Anatomy:
    string payload — so the source-level `.len()` of the literal stays
    honest if we ever expose it to user code.
 
+   **Note: the "`*const u8` is the literal's type" model is
+   scaffolding for the no-arrays-in-v0 era.** Both C (`char[6]`) and
+   Rust (`&'static str`) keep an array layer that makes string
+   literals places with a stable address. We collapsed that layer
+   purely because arrays weren't available; one consequence is
+   `&"hello"` is rejected today (see `10_ADDRESS_OF.md` "Subset
+   gap"). Once arrays land (future `09_ARRAY.md`), the model
+   transitions to:
+
+   - `"hello"` has type `[u8; 6]` (matching C's `char[6]`; `N`
+     counts the trailing `\0`).
+   - `StrLit` becomes a place expression — codegen's existing
+     private-global emission already gives it a stable address.
+   - Existing FFI use sites continue to work via array-to-pointer
+     decay (`[u8; N] → *const u8` at fn-arg / let-init position),
+     so no source-level breakage.
+   - `&"hello"` becomes legit and produces `*const [u8; N]`.
+
+   The current spec (string-literal-IS-`*const u8`) stays in force
+   until arrays land. Codegen needs no change at that point —
+   `emit_str_lit`'s `[LEN+1 x i8]` global *is* the array layer; we
+   just stop pretending it isn't.
+
 5. Pointer access (*ptr) read and write is deferred. `*(ptr + 1)` too.
 
 ## Codegen
