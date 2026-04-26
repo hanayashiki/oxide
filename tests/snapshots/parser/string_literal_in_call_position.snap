@@ -1,0 +1,4 @@
+Module
+  Fn f()
+    Block
+      ExprStmt Ident("puts")(Str("hi"))

@@ -1,0 +1,4 @@
+Module
+  Fn f()
+    Block
+      ExprStmt Binary(Add, Int(1), Binary(Mul, Int(2), Int(3)))

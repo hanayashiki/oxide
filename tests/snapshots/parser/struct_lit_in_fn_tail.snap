@@ -1,0 +1,7 @@
+Module
+  Struct Point
+    x: i32
+    y: i32
+  Fn make(a: i32, b: i32) -> Point
+    Block
+      tail: StructLit Point { x: Ident("a"),  y: Ident("b") }

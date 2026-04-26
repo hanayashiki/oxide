@@ -1,0 +1,5 @@
+Module
+  Struct Empty
+  Fn make() -> Empty
+    Block
+      tail: StructLit Empty {}

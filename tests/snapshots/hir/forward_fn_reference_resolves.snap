@@ -1,0 +1,6 @@
+HirModule
+  Fn[0] a()
+    Block
+      tail: Fn(1, "b")()
+  Fn[1] b()
+    Block

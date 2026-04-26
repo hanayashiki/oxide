@@ -1,0 +1,4 @@
+HirModule
+  Fn[0] add(a[Local(0)]: i32, b[Local(1)]: i32)
+    Block
+      tail: Binary(Add, Local(0, "a"), Local(1, "b"))

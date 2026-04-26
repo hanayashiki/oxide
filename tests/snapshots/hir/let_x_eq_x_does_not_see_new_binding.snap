@@ -1,0 +1,5 @@
+HirModule
+  Fn[0] f()
+    Block
+      Let x[Local(0)]: i32 = Int(1)
+      Let x[Local(1)] = Local(0, "x")

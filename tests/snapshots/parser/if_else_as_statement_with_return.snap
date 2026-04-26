@@ -1,0 +1,11 @@
+Module
+  Fn f() -> i32
+    Block
+      tail:
+        If Binary(Gt, Ident("x"), Int(0))
+          then:
+            Block
+              Return Ident("x")
+          else:
+            Block
+              Return Int(0)

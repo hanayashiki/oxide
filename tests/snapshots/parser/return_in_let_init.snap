@@ -1,0 +1,5 @@
+Module
+  Fn f() -> i32
+    Block
+      Let b: i32 = Return Int(1)
+      tail: Ident("b")

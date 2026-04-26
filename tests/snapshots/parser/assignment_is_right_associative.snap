@@ -1,0 +1,4 @@
+Module
+  Fn f()
+    Block
+      ExprStmt Assign(Eq, Ident("x"), Assign(Eq, Ident("y"), Int(1)))

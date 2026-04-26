@@ -1,0 +1,4 @@
+Module
+  Fn add(a: i32, b: i32)
+    Block
+      tail: Binary(Add, Ident("a"), Ident("b"))

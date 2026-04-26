@@ -1,0 +1,4 @@
+Module
+  Fn f()
+    Block
+      ExprStmt Unary(Neg, Unary(Not, Unary(BitNot, Ident("x"))))

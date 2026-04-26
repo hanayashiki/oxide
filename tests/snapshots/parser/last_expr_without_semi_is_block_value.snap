@@ -1,0 +1,4 @@
+Module
+  Fn f() -> i32
+    Block
+      tail: Binary(Add, Int(1), Int(2))

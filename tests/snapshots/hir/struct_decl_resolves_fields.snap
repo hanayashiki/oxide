@@ -1,0 +1,4 @@
+HirModule
+  Struct[0] Point
+    x: i32
+    y: i32

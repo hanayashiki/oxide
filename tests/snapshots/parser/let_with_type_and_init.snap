@@ -1,0 +1,4 @@
+Module
+  Fn f()
+    Block
+      Let mut x: i32 = Binary(Add, Int(1), Int(2))

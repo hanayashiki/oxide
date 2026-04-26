@@ -1,0 +1,3 @@
+Module
+  Struct Node
+    next: *const Node

@@ -1,0 +1,4 @@
+Module
+  Fn f()
+    Block
+      Let x: i32 = Int(1)

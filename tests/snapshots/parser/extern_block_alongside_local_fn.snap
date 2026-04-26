@@ -1,0 +1,6 @@
+Module
+  ExternBlock "C"
+    Fn print_int(x: i32) -> i32;
+  Fn main() -> i32
+    Block
+      tail: Int(0)

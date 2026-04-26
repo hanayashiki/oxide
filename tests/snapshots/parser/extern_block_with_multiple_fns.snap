@@ -1,0 +1,5 @@
+Module
+  ExternBlock "C"
+    Fn a(x: i32) -> i32;
+    Fn b() -> i32;
+    Fn c();

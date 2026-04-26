@@ -1,0 +1,16 @@
+Module
+  Fn f()
+    Block
+      tail:
+        If Ident("a")
+          then:
+            Block
+              tail: Int(1)
+          else:
+            If Ident("b")
+              then:
+                Block
+                  tail: Int(2)
+              else:
+                Block
+                  tail: Int(3)

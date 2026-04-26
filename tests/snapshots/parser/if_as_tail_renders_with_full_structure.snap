@@ -1,0 +1,11 @@
+Module
+  Fn fib(n: u32) -> u32
+    Block
+      tail:
+        If Binary(Le, Ident("n"), Int(1))
+          then:
+            Block
+              tail: Int(1)
+          else:
+            Block
+              tail: Int(0)

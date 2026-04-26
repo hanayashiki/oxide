@@ -1,0 +1,4 @@
+Module
+  Fn f()
+    Block
+      ExprStmt Ident("x") as i64 as i32

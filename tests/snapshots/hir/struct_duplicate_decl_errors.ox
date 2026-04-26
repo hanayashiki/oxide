@@ -1,0 +1,2 @@
+struct Foo { x: i32 }
+struct Foo { y: i32 }

@@ -1,0 +1,5 @@
+HirModule
+  Fn[0] f() -> i32
+    Block
+      Let b[Local(0)]: i32 = Return Int(1)
+      tail: Local(0, "b")

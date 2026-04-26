@@ -1,0 +1,5 @@
+HirModule
+  Struct[0] A
+    b: Adt(1)
+  Struct[1] B
+    x: i32

@@ -1,0 +1,7 @@
+HirModule
+  Struct[0] Point
+    x: i32
+    y: i32
+  Fn[0] make(a[Local(0)]: i32, b[Local(1)]: i32) -> Adt(0)
+    Block
+      tail: StructLit Adt(0, "Point") { x: Local(0, "a"),  y: Local(1, "b") }

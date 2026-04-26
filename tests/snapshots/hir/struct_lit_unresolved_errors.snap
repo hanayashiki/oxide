@@ -1,0 +1,12 @@
+HirModule
+  Fn[0] make()
+    Block
+      ExprStmt <poison>
+== diagnostics ==
+[E0206] Error: cannot find type `Nope` in this scope
+   ╭─[ struct_lit_unresolved_errors.ox:2:5 ]
+   │
+ 2 │     Nope { x: 1 };
+   │     ──┬─  
+   │       ╰─── no struct with this name
+───╯

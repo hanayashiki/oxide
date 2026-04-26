@@ -1,0 +1,4 @@
+Module
+  Fn f() -> bool
+    Block
+      tail: Bool(true)

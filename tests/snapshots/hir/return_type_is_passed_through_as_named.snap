@@ -1,0 +1,4 @@
+HirModule
+  Fn[0] f() -> i32
+    Block
+      tail: Int(0)
