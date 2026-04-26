@@ -474,32 +474,49 @@ emerges. One diagnostic from one layer.
 - `&place as *const U` cross-type pointer casts. `as` between
   pointer types remains TBD.
 
-### Known subset-of-Rust gap: `&` on string literals
+### Subset gap: `&` on string literals (until arrays land)
 
-In Rust, `"hello"` has type `&'static str` (a borrow that is also
-a place by virtue of static lifetime), so `&"hello"` is legal and
-produces `&&'static str`. Our model is different — per
-`07_POINTER.md`, `"hello"` *is* a `*const u8`, the pointer itself
-rather than a borrow of bytes. Treating `StrLit` as a place would
-make `&"hello"` produce `*const *const u8`, which is rarely useful
-and complicates the pointer model for a marginal case.
+Both C and Rust treat string literals as having an underlying
+array layer that makes them places:
 
-Consequence: `&"hello"` errors as `E0208 AddrOfNonPlace`. Workaround:
-bind to a local first, then take its address.
+| Language | `"hello"` type             | Place? | `&"hello"` |
+|---|---|---|---|
+| C        | `char[6]` (array)          | yes    | `char (*)[6]` |
+| Rust     | `&'static str`             | yes    | `&&'static str` |
+| Oxide    | `*const u8` (collapsed)    | **no** | rejected (E0208) |
+
+Our `07_POINTER.md` collapsed that array layer — `"hello"` *is*
+the `*const u8`, not a place holding a `[u8; 6]` we could address.
+The collapse was scaffolding for "no arrays in v0," not a model
+choice we want to keep.
+
+**Once arrays land** (future `09_ARRAY.md`), the model shifts:
+
+- `"hello"` becomes `[u8; 6]` (mirroring C — N counts the trailing
+  `\0` byte).
+- `StrLit` becomes a place expression (it has a stable address in
+  `.rodata`; codegen's `emit_str_lit` already emits a private
+  global there).
+- `&"hello"` becomes legit, producing `*const [u8; 6]`.
+- The existing `*const u8` use sites (FFI to `puts` etc.) keep
+  working through array-to-pointer decay (`[u8; N] → *const u8`
+  at function-arg / let-init position).
+
+At that point, `compute_is_place` gains a `StrLit` arm and this
+spec gap closes. The `&` operator's machinery here doesn't need
+to change — the place check is structural, and StrLit becoming a
+place is purely a HIR-side reclassification.
+
+Until then, workaround is bind-to-local:
 
 ```rust
 let s: *const u8 = "hello";
 let pp = &s;                   // *const *const u8
 ```
 
-This is the one non-trivial place where we accept *fewer* programs
-than Rust. The subset-of-Rust constraint is preserved (we don't
-accept anything Rust rejects), but the asymmetry is real.
-
-A future `static` item / `&raw const NAME` would naturally cover
-this case — codegen's existing `emit_str_lit` already creates a
-private global, so the storage is there; only the surface needs
-to materialize. Out of scope for this round.
+The subset-of-Rust constraint is preserved (we don't accept
+anything Rust rejects), but the asymmetry is real and explicitly
+temporary.
 
 ## Errors summary
 
