@@ -1,11 +1,15 @@
-//! The type checker. Two phases:
-//!   1. Resolve every fn's signature from source annotations (no inference).
-//!   2. Check each fn body in isolation with a fresh `Inferer`.
+//! The type checker. Three logical phases (the first three live in the
+//! child `decl` submodule):
+//!   0    — alloc `AdtDef` stubs (`partial: true`), pre-intern
+//!          `TyKind::Adt(aid)` for each HIR adt.
+//!   0.5  — backfill ADT field types now that every `AdtId` is known.
+//!   1    — resolve fn signatures from source annotations.
+//!   2    — check each fn body in isolation with a fresh `Inferer`.
 //!
 //! State split:
 //! - `Checker<'hir>` borrows the HIR for its whole lifetime and owns the
-//!   module-scope outputs (`tys`, `fn_sigs`, `local_tys`, `expr_tys`,
-//!   `errors`) that survive past any single fn.
+//!   module-scope outputs (`tys`, `adts`, `fn_sigs`, `local_tys`,
+//!   `expr_tys`, `errors`) that survive past any single fn.
 //! - `Inferer` is constructed fresh on the stack per fn body and owns
 //!   everything that's only meaningful while that body is being inferred:
 //!   the unification table, int-default flags, in-flight errors, and the
@@ -16,6 +20,9 @@
 //! those TyIds — once int-defaults have been applied — and flush them
 //! into `Checker.errors`. The renderer always sees concrete types,
 //! never raw `?Tn` placeholders.
+
+mod decl;
+
 use index_vec::IndexVec;
 
 use crate::hir::{
@@ -26,11 +33,12 @@ use crate::lexer::Span;
 use crate::parser::ast::{AssignOp, BinOp, Mutability, UnOp};
 
 use super::error::TypeError;
-use super::ty::{FnSig, InferId, TyArena, TyId, TyKind};
+use super::ty::{AdtDef, AdtId, FnSig, InferId, TyArena, TyId, TyKind};
 
 #[derive(Clone, Debug)]
 pub struct TypeckResults {
     pub tys: TyArena,
+    pub adts: IndexVec<AdtId, AdtDef>,
     pub fn_sigs: IndexVec<FnId, FnSig>,
     pub local_tys: IndexVec<LocalId, TyId>,
     pub expr_tys: IndexVec<HExprId, TyId>,
@@ -48,7 +56,14 @@ impl TypeckResults {
         self.local_tys[lid]
     }
     pub fn fn_sig(&self, fid: FnId) -> &FnSig {
-        &self.fn_sigs[fid]
+        let sig = &self.fn_sigs[fid];
+        debug_assert!(!sig.partial, "fn_sig({fid:?}) read while partial");
+        sig
+    }
+    pub fn adt_def(&self, aid: AdtId) -> &AdtDef {
+        let adt = &self.adts[aid];
+        debug_assert!(!adt.partial, "adt_def({aid:?}) read while partial");
+        adt
     }
     pub fn tys(&self) -> &TyArena {
         &self.tys
@@ -57,7 +72,7 @@ impl TypeckResults {
 
 pub fn check(hir: &HirModule) -> (TypeckResults, Vec<TypeError>) {
     let mut cx = Checker::new(hir);
-    cx.resolve_signatures();
+    decl::resolve_decls(&mut cx);
     for (fid, _) in hir.fns.iter_enumerated() {
         cx.check_fn(fid);
     }
@@ -67,6 +82,7 @@ pub fn check(hir: &HirModule) -> (TypeckResults, Vec<TypeError>) {
 struct Checker<'hir> {
     hir: &'hir HirModule,
     tys: TyArena,
+    adts: IndexVec<AdtId, AdtDef>,
     fn_sigs: IndexVec<FnId, FnSig>,
     local_tys: IndexVec<LocalId, TyId>,
     expr_tys: IndexVec<HExprId, TyId>,
@@ -116,39 +132,17 @@ impl<'hir> Checker<'hir> {
             .map(|_| FnSig {
                 params: Vec::new(),
                 ret: placeholder,
+                partial: true,
             })
             .collect();
         Self {
             hir,
             tys,
+            adts: IndexVec::new(),
             fn_sigs,
             local_tys,
             expr_tys,
             errors: Vec::new(),
-        }
-    }
-
-    /// Phase 1. Sigs are entirely source-driven — no inference, errors
-    /// land directly on `Checker.errors`.
-    fn resolve_signatures(&mut self) {
-        for (fid, hir_fn) in self.hir.fns.iter_enumerated() {
-            let mut params = Vec::with_capacity(hir_fn.params.len());
-            for &lid in &hir_fn.params {
-                let local = &self.hir.locals[lid];
-                let ty = Self::resolve_annotation(
-                    &mut self.tys,
-                    &mut self.errors,
-                    local.ty.as_ref(),
-                    &local.span,
-                );
-                self.local_tys[lid] = ty;
-                params.push(ty);
-            }
-            let ret = match &hir_fn.ret_ty {
-                Some(t) => Self::resolve_named_ty(&mut self.tys, &mut self.errors, t),
-                None => self.tys.unit, // Rust-style: implicit unit
-            };
-            self.fn_sigs[fid] = FnSig { params, ret };
         }
     }
 
@@ -233,9 +227,18 @@ impl<'hir> Checker<'hir> {
     }
 
     fn finish(self) -> (TypeckResults, Vec<TypeError>) {
+        debug_assert!(
+            self.fn_sigs.iter().all(|s| !s.partial),
+            "Checker::finish: at least one FnSig still partial"
+        );
+        debug_assert!(
+            self.adts.iter().all(|a| !a.partial),
+            "Checker::finish: at least one AdtDef still partial"
+        );
         (
             TypeckResults {
                 tys: self.tys,
+                adts: self.adts,
                 fn_sigs: self.fn_sigs,
                 local_tys: self.local_tys,
                 expr_tys: self.expr_tys,
@@ -262,15 +265,14 @@ impl<'hir> Checker<'hir> {
                     tys.error
                 }
             },
-            HirTyKind::Adt(_) => {
-                // ADT types are resolved at HIR; typeck still needs to
-                // intern them into its type vocabulary. See TBD-T4 in
-                // spec/08_ADT.md.
-                errors.push(TypeError::UnsupportedFeature {
-                    feature: "user-defined types in type position",
-                    span: ty.span.clone(),
-                });
-                tys.error
+            HirTyKind::Adt(haid) => {
+                // 1:1 HAdtId → AdtId today. Phase 0 in `decl::resolve_decls`
+                // pre-allocated the AdtDef stub and pre-interned this
+                // identity, so the intern is a hit; partial state of the
+                // AdtDef itself is irrelevant here — `TyKind::Adt(_)`
+                // only carries the identity.
+                let aid = AdtId::from_raw(haid.raw());
+                tys.intern(TyKind::Adt(aid))
             }
             HirTyKind::Ptr {
                 mutability,
@@ -334,6 +336,8 @@ impl<'hir> Checker<'hir> {
                 let inner = self.resolve_fully(inf, inner);
                 self.tys.intern(TyKind::Ptr(inner, m))
             }
+            // Adt is identity-only — nothing to substitute.
+            TyKind::Adt(_) => resolved,
             _ => resolved,
         }
     }
@@ -382,6 +386,17 @@ impl<'hir> Checker<'hir> {
             // The mutability subtype rule (`*mut → *const` OK at the outer
             // layer, exact match below) is enforced by `coerce` at use sites.
             (TyKind::Ptr(fi, _), TyKind::Ptr(ei, _)) => self.unify(inf, fi, ei, span),
+            // ADTs unify by pure nominal identity — no structural recursion
+            // into fields. The `found == expected` short-circuit above
+            // already covers a == b; reaching this arm means a != b.
+            // See spec/08_ADT.md "Unification".
+            (TyKind::Adt(_), TyKind::Adt(_)) => {
+                inf.errors.push(TypeError::TypeMismatch {
+                    expected,
+                    found,
+                    span,
+                });
+            }
             _ => {
                 inf.errors.push(TypeError::TypeMismatch {
                     expected,

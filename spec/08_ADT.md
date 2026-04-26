@@ -29,22 +29,30 @@ diverge in semantics from Rust's interpretation of the syntax we do
 accept. Out-of-scope features (`pub`, shorthand, `..rest`, tuple
 structs, unit structs) are *omissions*, not deviations.
 
-## Acceptance
+## Acceptance (vocabulary round)
 
 ```rust
 struct Point { x: i32, y: i32 }
 
-fn make(a: i32, b: i32) -> Point {
-    Point { x: a, y: b }
+fn id(p: Point) -> Point {
+    p
 }
 ```
 
-This program parses, lowers cleanly to HIR with `Point` resolved to
-`HirTyKind::Adt(HAdtId(0))` everywhere it appears in type position,
-and the literal `Point { x: a, y: b }` lowers to
-`HirExprKind::StructLit { adt: HAdtId(0), fields: [..] }`. Field
-access (`p.x`) lowers to the existing `HirExprKind::Field { base,
-name: String }` — typeck will resolve the field name later.
+This program parses, lowers cleanly to HIR (`Point` resolves to
+`HirTyKind::Adt(HAdtId(0))` everywhere it appears in type position)
+and typechecks: phase 0 allocates `AdtId(0)` for `Point`, phase 0.5
+resolves both fields' `i32` types, phase 1 resolves `id`'s
+signature to `(Adt(0)) -> Adt(0)`, and phase 2 types the body's
+`p` as `Adt(0)` and unifies it against the declared return.
+
+The fuller program — `fn make(a, b) -> Point { Point { x: a, y: b } }`
+exercising struct-literal construction and field access — is the
+acceptance for **TBD-T6** (operations on ADTs), not this round.
+Just like 07_POINTER's acceptance gets pointers passed through fn
+signatures without yet supporting deref, this round gets `Adt(_)`
+flowing through fn signatures and locals without supporting
+construction or field access.
 
 ## Position in the pipeline
 
@@ -436,20 +444,244 @@ types) versus `Adt(HAdtId(0))` (in `ret_ty`) — both are correct
 per the resolution rules. Primitives stay as strings; user types
 become `HAdtId` handles.
 
-## TBDs (typeck and codegen, future iterations)
+## Typeck phase ordering and ADT vocabulary
 
-- **TBD-T1**: typeck phase ordering — when does adt info land vs fn
-  signatures vs body checking?
+(This section resolves TBD-T1, TBD-T3, TBD-T4, TBD-T5.)
+
+The graph-shape problem: structs can reference each other (or
+themselves), so a fn signature mentioning `Foo` may need `Foo`'s
+type representation before `Foo`'s field types have been resolved
+(since one of those fields might be `Bar`, which mentions `Foo`).
+
+We solve it the way pyright (and most graph-building algorithms)
+do: **partial construction**. Allocate the per-ADT identity first,
+mutably backfill the structural details in a second pass.
+
+### Type vocabulary
+
+```rust
+// Typeck has its own AdtId — HAdtId is HIR's identifier and stays in HIR.
+// 1:1 mapping with HAdtId today; the indirection leaves room for future
+// generic-instantiation many-to-one (e.g., Vec<i32> and Vec<u8> both
+// reference the same HAdtId but produce distinct AdtIds).
+index_vec::define_index_type! { pub struct AdtId = u32; }
+
+pub enum TyKind {
+    ...
+    /// Identity-only handle. Structural data lives in
+    /// `TypeckResults.adts[aid]`; equality is `aid == aid`.
+    Adt(AdtId),
+}
+```
+
+The structural data:
+
+```rust
+pub struct AdtDef {
+    pub name: String,
+    pub kind: AdtKind,                                // mirror HIR's
+    pub variants: IndexVec<VariantIdx, VariantDef>,
+    /// `true` while mid-construction (phase 0 stub, before 0.5 backfill).
+    /// Flipped to `false` once variant/field types are resolved. Reading
+    /// a partial AdtDef from outside the build phases is a typeck bug.
+    pub partial: bool,
+}
+
+pub struct VariantDef {
+    pub name: Option<String>,
+    pub fields: IndexVec<FieldIdx, FieldDef>,
+}
+
+pub struct FieldDef {
+    pub name: String,
+    pub ty: TyId,                                     // resolved
+    pub span: Span,
+}
+```
+
+`FnSig` gains the same flag for symmetry — placeholder sigs at
+`Checker::new` time have `partial: true`, phase 1 flips them:
+
+```rust
+pub struct FnSig {
+    pub params: Vec<TyId>,
+    pub ret: TyId,
+    pub partial: bool,
+}
+```
+
+Note: today the FnSig flag is mostly ceremonial. Phase 1 is single-
+pass and nothing reads `fn_sig` between `Checker::new` (where the
+sig is placeholder-shaped with `partial: true`) and the flip at
+the end of phase 1, so there's no observable partial-FnSig state
+in our pipeline. The flag carries its weight only on `AdtDef`,
+where phase 0 and phase 0.5 are split. We keep `FnSig::partial`
+for symmetry and as a hook for any future case where signature
+resolution itself becomes multi-pass — generics, trait method
+default impls, where-clause resolution. For our C-ish language
+that's likely never; the flag may eventually go away if it stays
+ceremonial.
+
+Both `partial` flags should be `false` for every entry by the time
+`finish()` produces `TypeckResults`. A `debug_assert!` at finalize
+and a panic in any reader path enforce this — partial state is
+an internal-construction concept that must not leak.
+
+`TypeckResults`:
+
+```rust
+pub struct TypeckResults {
+    pub tys: TyArena,
+    pub adts: IndexVec<AdtId, AdtDef>,                // new
+    pub fn_sigs: IndexVec<FnId, FnSig>,
+    pub local_tys: IndexVec<LocalId, TyId>,
+    pub expr_tys: IndexVec<HExprId, TyId>,
+}
+```
+
+`adts` lives alongside `tys` on `Checker` during construction and
+moves into `TypeckResults` at finalize, exactly mirroring how
+`tys`/`fn_sigs` already work. `TyArena` keeps doing hash-cons
+interning (just adds the `Adt(aid)` variant); `AdtDef` storage is
+identity-keyed and mutably built — separate concerns, separate
+field on the struct.
+
+`AdtKind`, `VariantIdx`, `FieldIdx` are reused verbatim from
+`crate::hir`. `HAdtId` is *not* — typeck uses its own `AdtId`
+(today: `AdtId(N)` always corresponds to `HAdtId(N)`; the explicit
+mapping site lives in `decl.rs`'s phase 0 to make the
+correspondence visible).
+
+### Phase ordering and module layout
+
+The multi-pass type-building (phases 0, 0.5, 1) lives in a child
+submodule of `check.rs` so it can access `Checker`'s private fields
+directly without leaking visibility to `ty.rs` / `error.rs`.
+Phase 2 (body inference) stays in `check.rs`.
+
+```
+src/typeck/
+    mod.rs              — re-exports
+    error.rs            — TypeError
+    ty.rs               — TyArena, TyKind, AdtDef, FnSig (vocab + partial flags)
+    check.rs            — Checker, Inferer, phase 2, entry point;
+                          declares `mod decl;` at the top
+    check/
+        decl.rs         — phases 0, 0.5, 1;
+                          pub(super) fn resolve_decls(cx: &mut Checker)
+```
+
+```rust
+// check.rs
+mod decl;
+
+pub fn check(hir: &HirModule) -> (TypeckResults, Vec<TypeError>) {
+    let mut cx = Checker::new(hir);
+    decl::resolve_decls(&mut cx);    // Phase 0 + 0.5 + 1
+    for (fid, _) in hir.fns.iter_enumerated() {
+        cx.check_fn(fid);            // Phase 2
+    }
+    cx.finish()
+}
+
+// check/decl.rs
+pub(super) fn resolve_decls(cx: &mut Checker) {
+    // Phase 0  — alloc AdtDef stubs (partial: true), intern TyKind::Adt(aid)
+    //            for each. Stubs have name+kind copied from HIR but empty
+    //            variants.
+    // Phase 0.5 — walk hir.adts, resolve each field's HirTy → TyId, mutably
+    //             backfill AdtDef.variants, set partial: false. The shared
+    //             resolve_named_ty handles HirTyKind::Adt(haid) → the
+    //             pre-interned TyKind::Adt(aid).
+    // Phase 1   — fn signatures: resolve params + ret, set partial: false.
+}
+```
+
+Why this works for graph-shaped types:
+
+- **Forward / backward references** between ADTs (`struct A { b: B }`
+  / `struct B { x: i32 }`, in either source order): both `HAdtId`s
+  exist after phase 0. Phase 0.5 resolves `b: B` to
+  `TyKind::Adt(B_haid)` cleanly.
+- **Mutual references** (`struct A { b: B }` / `struct B { a: A }`):
+  same as above. (TBD-T3 falls out — no separate work needed.)
+- **Self-reference via pointer** (`struct Node { next: *const Node }`):
+  resolves to `TyKind::Ptr(TyKind::Adt(Node_haid), Const)`. Pointer-
+  sized, no cycle problem.
+- **Self-reference without indirection** (`struct A { x: A }`):
+  resolves cleanly at the TyId level, but produces a structurally
+  infinite type. TBD-T2 catches this with a separate size check
+  (cycle detection over the field-type graph).
+
+### Unification
+
+Pure nominal:
+
+```text
+unify(Adt(a), Adt(b), span):
+    a == b   →  ok
+    a != b   →  TypeMismatch
+```
+
+Three things this rule does *not* do:
+
+- **No structural recursion into fields.** `Adt(a)` and `Adt(a)` have
+  identical fields by construction (we allocate exactly one `AdtDef`
+  per HIR struct decl), so walking is pointless. And recursing on
+  cyclic types (`struct A { x: A }`) would loop forever.
+- **No coercion or subtyping.** Distinct AdtIds with identical field
+  shapes are distinct types. The standard nominal rule.
+- **No partial-state read.** Unify only inspects `aid`, never
+  `cx.adts[aid]`. The identity is set in phase 0 before any
+  inference runs, so even if an `AdtDef` were still `partial: true`
+  at unify time (it shouldn't be — phase 0.5 finishes before
+  phase 2), unify wouldn't care.
+
+Adt-vs-anything-else (Prim, Unit, Fn, Ptr) → `TypeMismatch`. Adt-
+vs-`Infer(?)` falls through to the existing Infer rule (binds
+`?T := Adt(a)`). Adt-vs-`Error` and Adt-vs-`Never` fall through to
+the existing absorb rules.
+
+### `resolve_named_ty` extension
+
+```rust
+fn resolve_named_ty(...) -> TyId {
+    match &ty.kind {
+        HirTyKind::Named(name) => /* primitive lookup, existing */,
+        HirTyKind::Adt(haid)   => tys.intern(TyKind::Adt(*haid)),
+        HirTyKind::Ptr { .. }  => /* recurse, existing */,
+        HirTyKind::Error       => tys.error,
+    }
+}
+```
+
+Phase 0 has already populated `adts[haid]` with at least a stub, so
+the `intern` is sound; readers can defer to `adts[haid]` for
+field-level structural info when they need it (e.g., `Field`
+lookup in TBD-T6, `lower_ty` in TBD-T7).
+
+### Render
+
+`TyArena.render(TyKind::Adt(haid))` needs the AdtDef to print the
+name. The arena alone doesn't have it. Two options:
+
+- (chosen) `TypeckResults` exposes a `render_with_adts(ty)` helper
+  that has both the arena and the adts. The plain `tys.render(ty)`
+  for `Adt` falls back to `Adt(N)` (where N is the raw HAdtId) when
+  the adts table isn't in scope. This keeps `TyArena` self-contained.
+- Pass `&adts` into `TyArena::render`. Couples the two more tightly
+  but rendering is always-correct.
+
+We pick option 1 — render falls back to `Adt(N)` if the caller
+only has `TyArena`; full rendering happens through a `TypeckResults`
+helper.
+
+## Remaining TBDs
+
 - **TBD-T2**: recursive type cycle detection (`struct A { x: A }`
-  rejected; `struct A { x: *const A }` accepted because pointers
-  are pointer-sized).
-- **TBD-T3**: mutual reference between adts (forward/back across
-  decls); should fall out naturally from phase ordering.
-- **TBD-T4**: field type resolution against typeck's type vocabulary
-  (`HirTyKind::Named("i32")` → `TyKind::Prim(I32)`,
-  `HirTyKind::Named("Blarg")` → unknown-type error).
-- **TBD-T5**: AdtDef storage and interning location (TyArena vs a
-  sibling arena on `TypeckResults`).
+  rejected as infinite-size; `struct A { x: *const A }` accepted).
+  Independent of the phase machinery above — runs after phase 0.5
+  as a graph walk over field-type dependencies.
 - **TBD-T6**: typing rules for `StructLit` (field-set validation,
   per-field unification) and `Field` (place-expression rule, field
   name lookup, mutability for assignment-through-field). Rule for

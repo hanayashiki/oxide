@@ -1,0 +1,4 @@
+== diagnostics ==
+== types ==
+Fn[0] pass(n[Local(0)]: *const Adt(0)) -> *const Adt(0)
+  HExprId(0) : *const Adt(0)

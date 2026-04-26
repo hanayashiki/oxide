@@ -32,12 +32,13 @@ codegen consumes through query methods.
 ```rust
 pub enum TyKind {
     Prim(PrimTy),
-    Unit,                    // ()
-    Never,                   // ! — subtype of every type during unify
+    Unit,                       // ()
+    Never,                      // ! — bottom type; absorbs in coerce
     Fn(Vec<TyId>, TyId),
-    Ptr(TyId),               // reserved for future pointer support
-    Infer(InferId),           // unification variable
-    Error,                   // poison; absorbs without further errors
+    Ptr(TyId, Mutability),      // *const T / *mut T; mutability interned alongside pointee
+    Adt(AdtId),                 // reserved: identity handle for user-defined types (see spec/08_ADT.md)
+    Infer(InferId),             // unification variable
+    Error,                      // poison; absorbs without further errors
 }
 
 pub enum PrimTy {
@@ -47,7 +48,7 @@ pub enum PrimTy {
 }
 
 pub struct TyArena { /* hash-cons: equal types share TyId */ }
-pub struct FnSig { pub params: Vec<TyId>, pub ret: TyId }
+pub struct FnSig { pub params: Vec<TyId>, pub ret: TyId, pub partial: bool }
 ```
 
 `TyArena` pre-interns all primitives plus `Unit`, `Never`, and `Error`,
@@ -66,6 +67,13 @@ leaks across functions.
 struct Inferer {
     bindings: IndexVec<InferId, Option<TyId>>,
     int_default: IndexVec<InferId, bool>,
+    /// Errors emitted while this fn body was being inferred. TyId fields
+    /// inside may still reference unresolved Infer vars; finalize resolves
+    /// them post-defaulting before flushing into Checker.errors.
+    errors: Vec<TypeError>,
+    /// Declared return type of the fn whose body is being inferred. Read
+    /// by the `Return` arm of `infer_expr`.
+    cur_ret: TyId,
 }
 ```
 
@@ -94,8 +102,9 @@ pub fn check(hir: &HirModule) -> (TypeckResults, Vec<TypeError>) {
 1. Spin up a fresh `Inferer`; record `cur_ret = fn_sigs[fid].ret`.
 2. `infer_block(body)` — walks items (results discarded), then tail
    (or `Unit` if absent). Returns the block's value type.
-3. `unify(body_ty, cur_ret, body_span)` — body must produce the
-   declared return type.
+3. `coerce(body_ty, cur_ret, body_span)` — body must produce the
+   declared return type. Coerce (not unify) so a divergent body
+   (`!`) vacuously satisfies any declared return.
 4. `finalize_fn` — defaults unconstrained int vars to `i32`, replaces
    any other still-unresolved `Infer` with `Error`, walks
    `expr_tys`/`local_tys` and substitutes through resolved binding
@@ -111,7 +120,7 @@ responsible for unifying with whatever they expected.
 | `IntLit(_)` | fresh `Infer` flagged for int default |
 | `BoolLit(_)` | `bool` |
 | `CharLit(_)` | `u8` |
-| `StrLit(_)` | `Error`; emit `UnsupportedStrLit` (E0254) |
+| `StrLit(_)` | intern `Ptr(u8, Const)` (C-style, NUL-terminated at codegen — see spec/07_POINTER.md) |
 | `Local(lid)` | `local_tys[lid]` (set in Phase 1 for params; in `infer_let` for bindings) |
 | `Fn(fid)` | intern `Fn(fn_sigs[fid].params, fn_sigs[fid].ret)` |
 | `Unresolved(_)` | `Error` (already errored at HIR) |
@@ -122,14 +131,15 @@ responsible for unifying with whatever they expected.
 | `Binary { cmp, l, r }` | unify `l` & `r`; result = `bool` |
 | `Binary { logical, l, r }` | unify both with `bool`; result = `bool` |
 | `Binary { shift, l, r }` | result = `l`'s type |
-| `Assign { _, target, rhs }` | unify; result = `Unit` |
-| `Call { callee, args }` | callee must be `Fn(...)`; arity + arg types check; result = sig ret |
-| `Index/Field` | `Error`; emit `UnsupportedFeature` (E0255) — no arrays/structs in v0 |
+| `Assign { _, target, rhs }` | `coerce(rhs, target)` (directional — pointer-mut subtype applies); result = `Unit` |
+| `Call { callee, args }` | callee must be `Fn(...)`; arity + per-arg `coerce` check; result = sig ret |
+| `Index/Field` | `Error`; emit `UnsupportedFeature` (E0255) — no arrays in v0; field access pending ADT support |
+| `StructLit { adt, fields }` | walk field exprs for inner diagnostics; emit `UnsupportedFeature` (E0255); result = `Error` |
 | `Cast { expr, ty }` | result = resolved `ty` (no compat check in v0) |
-| `If { cond, then, else? }` | cond unified with `bool`; then/else unified together (or with `Unit` if no else) |
+| `If { cond, then, else? }` | cond unified with `bool`; then/else go through `unify_arms` + `join_never` (or `expect_unit` on then-arm if no else) |
 | `Block(bid)` | recurse `infer_block` |
-| `Return(val)` | val unified with `cur_ret`; result = `Never` |
-| `Let { local, init }` | local's annotated ty (or fresh `Infer`); unify init; result = `Unit` |
+| `Return(val)` | `coerce(val, cur_ret)` (or `coerce(Unit, cur_ret)` if no val); result = `Never` |
+| `Let { local, init }` | local's annotated ty (or fresh `Infer`); `coerce(init, local_ty)`; result = `Unit` |
 | `Poison` | `Error` |
 
 ## Unification rules
@@ -183,13 +193,14 @@ non-divergent arm decides the if-expr's type via `join_never`.
 
 ```rust
 pub enum TypeError {
-    TypeMismatch       { expected: TyId, found: TyId, span: Span },     // E0250
-    UnknownType        { name: String, span: Span },                     // E0251
-    NotCallable        { found: TyId, span: Span },                      // E0252
-    WrongArgCount      { expected: usize, found: usize, span: Span },    // E0253
-    UnsupportedStrLit  { span: Span },                                   // E0254
-    UnsupportedFeature { feature: &'static str, span: Span },            // E0255
-    CannotInfer        { span: Span },                                   // E0256
+    TypeMismatch              { expected: TyId, found: TyId, span: Span },    // E0250
+    UnknownType               { name: String, span: Span },                    // E0251
+    NotCallable               { found: TyId, span: Span },                     // E0252
+    WrongArgCount             { expected: usize, found: usize, span: Span },   // E0253
+    // E0254 retired — string literals are typed `*const u8` (see StrLit row above)
+    UnsupportedFeature        { feature: &'static str, span: Span },           // E0255
+    CannotInfer               { span: Span },                                  // E0256
+    PointerMutabilityMismatch { expected: TyId, actual: TyId, span: Span },    // E0257
 }
 ```
 
@@ -238,10 +249,14 @@ errors.
 ## Out of scope (v0)
 
 - Let-generalization / polymorphism / generics.
-- User-defined types (struct/enum) — no type-namespace resolution
-  beyond primitive lookup.
-- Pointer types, address-of/deref operators.
-- Arrays, slices, strings (E0254/E0255 placeholders).
+- User-defined types in type position — `HirTyKind::Adt` is parsed and
+  reaches typeck, but lowering it to a usable `TyKind::Adt(_)` is not
+  wired up yet; today it surfaces as `UnsupportedFeature` (E0255). Same
+  for `StructLit` / `Field` access. See spec/08_ADT.md.
+- Address-of / deref operators. Pointer *types* (`*const T` / `*mut T`)
+  are first-class for FFI and string literals — the operators that
+  produce/consume them are not.
+- Arrays, slices (E0255 placeholder).
 - Implicit numeric widening (Rust-strict: explicit `as` required).
 - Cast compatibility check (loose in v0; codegen will refuse invalid
   casts).

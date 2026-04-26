@@ -17,6 +17,14 @@ pub fn lower_ty<'ctx>(ctx: &'ctx Context, tcx: &TyArena, ty: TyId) -> BasicTypeE
             panic!("lower_ty called on non-value type {}", tcx.render(ty))
         }
         TyKind::Fn(_, _) => panic!("lower_ty called on Fn — use lower_fn_type"),
+        TyKind::Adt(_) => {
+            // ADT codegen is TBD-T7 in spec/08_ADT.md. The vocabulary
+            // round of ADT support doesn't lower struct values to LLVM
+            // yet — typeck should emit UnsupportedFeature on any
+            // expression that constructs/uses an ADT, so codegen never
+            // reaches this arm. If we get here, a typeck path missed.
+            panic!("v0 codegen: ADT lowering not implemented (TBD-T7); typeck should have rejected")
+        }
         TyKind::Infer(_) | TyKind::Error => {
             panic!("post-typeck type is unresolved: {}", tcx.render(ty))
         }

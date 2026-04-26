@@ -1,0 +1,13 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `Adt(1)`, found `Adt(0)`
+   ╭─[ error_struct_type_mismatch_distinct_adts.ox:4:22 ]
+   │
+ 4 │ ╭─▶ fn coerce(a: A) -> B {
+   ┆ ┆   
+ 6 │ ├─▶ }
+   │ │       
+   │ ╰─────── type mismatch here
+───╯
+== types ==
+Fn[0] coerce(a[Local(0)]: Adt(0)) -> Adt(1)
+  HExprId(0) : Adt(0)

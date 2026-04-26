@@ -1,0 +1,4 @@
+== diagnostics ==
+== types ==
+Fn[0] id(p[Local(0)]: Adt(0)) -> Adt(0)
+  HExprId(0) : Adt(0)

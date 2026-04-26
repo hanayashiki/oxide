@@ -1,0 +1,11 @@
+== diagnostics ==
+[E0251] Error: unknown type `Blarg`
+   ╭─[ error_struct_field_unknown_type.ox:1:17 ]
+   │
+ 1 │ struct Foo { x: Blarg }
+   │                 ──┬──  
+   │                   ╰──── not a known type
+   │ 
+   │ Help: v0 supports only primitive types: i8..i64, u8..u64, bool, void, never
+───╯
+== types ==

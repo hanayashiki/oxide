@@ -8,10 +8,17 @@ use std::collections::HashMap;
 
 use index_vec::IndexVec;
 
+use crate::hir::{AdtKind, FieldIdx, VariantIdx};
+use crate::lexer::Span;
 use crate::parser::ast::Mutability;
 
 index_vec::define_index_type! { pub struct TyId    = u32; }
 index_vec::define_index_type! { pub struct InferId = u32; }
+// Typeck-side ADT identity. Distinct from HIR's `HAdtId`; today the
+// numbering is 1:1 (allocated in `decl::resolve_decls` phase 0), but
+// the indirection leaves room for future generic-instantiation
+// many-to-one without renaming every `Adt(_)` site.
+index_vec::define_index_type! { pub struct AdtId   = u32; }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum TyKind {
@@ -27,6 +34,10 @@ pub enum TyKind {
     /// equivalently (shape only); the coercion check at use sites enforces
     /// the actual `mut → const` direction rule. See `spec/07_POINTER.md`.
     Ptr(TyId, Mutability),
+    /// Identity-only handle to an ADT. Structural data (fields, variants)
+    /// lives in `TypeckResults.adts[aid]`; equality is `aid == aid`.
+    /// See `spec/08_ADT.md` "Typeck phase ordering and ADT vocabulary".
+    Adt(AdtId),
     /// Unification variable; resolved via the per-fn `Inferer`.
     Infer(InferId),
     /// Poison; absorbs without further errors.
@@ -70,6 +81,44 @@ impl PrimTy {
 pub struct FnSig {
     pub params: Vec<TyId>,
     pub ret: TyId,
+    /// `true` while the placeholder sig is in `Checker::new`, before
+    /// `decl::resolve_decls` phase 1 fills in real param/ret TyIds.
+    /// Flipped to `false` once resolved. Reading a partial FnSig from
+    /// outside the build phases is a typeck bug.
+    ///
+    /// Note: today this flag is mostly ceremonial — phase 1 is single-
+    /// pass and nothing reads `fn_sig` between `Checker::new` and the
+    /// flip, so there's no observable partial-FnSig state in the
+    /// current pipeline. Kept for symmetry with `AdtDef::partial` and
+    /// in case fn signatures ever grow a real multi-pass shape (generics,
+    /// trait method default impls, where-clause resolution).
+    pub partial: bool,
+}
+
+/// Typed ADT definition. Built up across phases 0 and 0.5 in
+/// `decl::resolve_decls`: phase 0 pushes a stub with empty `variants`
+/// and `partial: true`; phase 0.5 backfills the variants/fields with
+/// resolved `TyId`s and flips `partial` to `false`. Indexed in
+/// `Checker.adts` / `TypeckResults.adts` by `AdtId`.
+#[derive(Clone, Debug)]
+pub struct AdtDef {
+    pub name: String,
+    pub kind: AdtKind,
+    pub variants: IndexVec<VariantIdx, VariantDef>,
+    pub partial: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct VariantDef {
+    pub name: Option<String>,
+    pub fields: IndexVec<FieldIdx, FieldDef>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FieldDef {
+    pub name: String,
+    pub ty: TyId,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -195,6 +244,10 @@ impl TyArena {
                 s
             }
             TyKind::Ptr(inner, m) => format!("*{} {}", m.as_str(), self.render(*inner)),
+            // Bare arena rendering doesn't have access to the AdtDef table —
+            // print just the identity. A future `TypeckResults`-aware
+            // Printer can resolve the name. See spec/08_ADT.md "Render".
+            TyKind::Adt(aid) => format!("Adt({})", aid.raw()),
             TyKind::Infer(id) => format!("?T{}", id.raw()),
             TyKind::Error => "{error}".to_string(),
         }

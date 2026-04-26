@@ -8,4 +8,4 @@ mod ty;
 
 pub use check::{TypeckResults, check};
 pub use error::TypeError;
-pub use ty::{FnSig, InferId, PrimTy, TyArena, TyId, TyKind};
+pub use ty::{AdtDef, AdtId, FieldDef, FnSig, InferId, PrimTy, TyArena, TyId, TyKind, VariantDef};

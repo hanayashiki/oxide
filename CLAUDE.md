@@ -12,4 +12,12 @@ Compiler has stable structure so our development follows:
 
 ## Ask question
 
-1. Do not throw many questions all at once, ask your human one at a time. The answer to the first can affect the following, so ask one after anotheryou .
+1. Do not throw many questions all at once, ask your human one at a time. The answer to the first can affect the following, so ask one after another you.
+
+## Bug Reporting
+
+When reviewingg, report directly to your human and ask for confirmation; 
+
+## Committing
+
+A local `.git/hooks/pre-commit` is setup to guard the commit. Tests and types must be green to commit.
