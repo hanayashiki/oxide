@@ -1,0 +1,17 @@
+HirModule
+  Fn[0] make() -> i32
+    Block
+      tail: Int(1)
+  Fn[1] f()
+    Block
+      ExprStmt AddrOf(const, Call(Fn(0, "make")))
+== diagnostics ==
+[E0208] Error: cannot take the address of a non-place expression
+   ╭─[ addr_of_call_invalid.ox:4:6 ]
+   │
+ 4 │     &make();
+   │      ───┬──  
+   │         ╰──── not addressable
+   │ 
+   │ Help: only places — locals, fields of places, and pointer derefs — have a stable memory location to take the address of
+───╯

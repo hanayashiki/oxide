@@ -279,6 +279,9 @@ impl<'a> Printer<'a> {
             HirExprKind::Cast { expr: sub, ty } => {
                 vec![self.render_expr(*sub), ty_str(ty)]
             }
+            HirExprKind::AddrOf { mutability, expr: sub } => {
+                vec![mutability.as_str().to_string(), self.render_expr(*sub)]
+            }
             HirExprKind::If { cond, then_block, else_arm } => {
                 let mut out = vec![self.render_expr(*cond), self.render_block_inline(*then_block)];
                 if let Some(arm) = else_arm {
@@ -370,6 +373,7 @@ fn expr_name(kind: &HirExprKind) -> &'static str {
         HirExprKind::Field { .. } => "Field",
         HirExprKind::StructLit { .. } => "StructLit",
         HirExprKind::Cast { .. } => "Cast",
+        HirExprKind::AddrOf { .. } => "AddrOf",
         HirExprKind::If { .. } => "If",
         HirExprKind::Block(_) => "Block",
         HirExprKind::Return(_) => "Return",

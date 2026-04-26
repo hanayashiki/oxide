@@ -62,6 +62,19 @@ pub enum TypeError {
     },
     /// `e.f` where `e`'s type isn't an ADT (primitive, unit, fn, ptr...). E0262.
     TypeNotFieldable { ty: TyId, span: Span },
+    /// `&mut place` or `place = rhs` where the root of `place` is an
+    /// immutable Local (or, future, a `*const T` deref). The `op` field
+    /// says which operation triggered it; the diagnostic message
+    /// renders accordingly. See spec/10_ADDRESS_OF.md. E0263.
+    MutateImmutable { op: MutateOp, span: Span },
+}
+
+/// Discriminator on `MutateImmutable` so the diagnostic can phrase
+/// the message appropriately for `&mut x` vs `x = v`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MutateOp {
+    BorrowMut,
+    Assign,
 }
 
 impl TypeError {
@@ -76,7 +89,8 @@ impl TypeError {
             | Self::PointerMutabilityMismatch { span, .. }
             | Self::StructLitUnknownField { span, .. }
             | Self::NoFieldOnAdt { span, .. }
-            | Self::TypeNotFieldable { span, .. } => span,
+            | Self::TypeNotFieldable { span, .. }
+            | Self::MutateImmutable { span, .. } => span,
             Self::StructLitMissingField { lit_span, .. } => lit_span,
             Self::StructLitDuplicateField { dup, .. } => dup,
         }

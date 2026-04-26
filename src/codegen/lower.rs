@@ -289,6 +289,15 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             HirExprKind::StructLit { adt, fields } => {
                 Some(self.emit_struct_lit(fx, adt, &fields))
             }
+            // `&place` / `&mut place` — the slot pointer that `lvalue`
+            // already produces for assignment targets *is* the value we
+            // want here. LLVM `ptr` is mutability-agnostic; the
+            // mutability tag was a typeck concept only. See
+            // spec/10_ADDRESS_OF.md "Codegen".
+            HirExprKind::AddrOf { mutability: _, expr } => {
+                let ptr = self.lvalue(fx, expr);
+                Some(ptr.into())
+            }
             HirExprKind::Unresolved(_) | HirExprKind::Poison => {
                 panic!("v0 codegen: poisoned expr reached codegen")
             }

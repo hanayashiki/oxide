@@ -1,0 +1,20 @@
+== diagnostics ==
+[E0263] Error: cannot take a mutable pointer to an immutable place
+   ╭─[ error_addr_of_mut_immutable_local.ox:9:16 ]
+   │
+ 9 │     reset(&mut c);
+   │                ┬  
+   │                ╰── cannot borrow as `&mut`
+   │ 
+   │ Help: declare the binding as `let mut` to allow `&mut` borrows
+───╯
+== types ==
+Fn[0] reset(p[Local(0)]: *mut Adt(0)) -> ()
+  HExprId(0) : i32
+  HExprId(1) : Adt(0)
+  HExprId(2) : ()
+  HExprId(3) : fn(*mut Adt(0))
+  HExprId(4) : Adt(0)
+  HExprId(5) : *mut Adt(0)
+  HExprId(6) : ()
+Fn[1] bad() -> ()

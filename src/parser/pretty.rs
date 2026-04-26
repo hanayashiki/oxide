@@ -243,6 +243,13 @@ impl<'a> Printer<'a> {
                 self.append_expr(buf, *expr);
                 write!(buf, " as {}", type_str(self.m, *ty)).unwrap();
             }
+            ExprKind::AddrOf { mutability, expr } => {
+                buf.push('&');
+                if *mutability == Mutability::Mut {
+                    buf.push_str("mut ");
+                }
+                self.append_expr(buf, *expr);
+            }
             ExprKind::Let { mutable, name, ty, init } => {
                 buf.push_str("Let ");
                 if *mutable {

@@ -1,0 +1,14 @@
+HirModule
+  Fn[0] f()
+    Block
+      ExprStmt AddrOf(const, Int(1))
+== diagnostics ==
+[E0208] Error: cannot take the address of a non-place expression
+   ╭─[ addr_of_literal_invalid.ox:2:6 ]
+   │
+ 2 │     &1;
+   │      ┬  
+   │      ╰── not addressable
+   │ 
+   │ Help: only places — locals, fields of places, and pointer derefs — have a stable memory location to take the address of
+───╯

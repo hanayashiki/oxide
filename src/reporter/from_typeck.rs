@@ -1,6 +1,6 @@
 use super::diagnostic::{Diagnostic, Label};
 use super::source_map::FileId;
-use crate::typeck::{TyArena, TypeError};
+use crate::typeck::{MutateOp, TyArena, TypeError};
 
 /// Map a typeck error to a structured diagnostic. Needs the `TyArena` to
 /// render type names (`expected: i32, found: bool`).
@@ -90,5 +90,23 @@ pub fn from_typeck_error(err: &TypeError, file: FileId, tys: &TyArena) -> Diagno
             format!("type `{}` does not have fields", tys.render(*ty)),
         )
         .with_label(Label::primary(file, span.clone(), "field access not allowed here")),
+
+        TypeError::MutateImmutable { op, span } => {
+            let (msg, label, help) = match op {
+                MutateOp::BorrowMut => (
+                    "cannot take a mutable pointer to an immutable place",
+                    "cannot borrow as `&mut`",
+                    "declare the binding as `let mut` to allow `&mut` borrows",
+                ),
+                MutateOp::Assign => (
+                    "cannot assign to an immutable place",
+                    "cannot assign to this",
+                    "declare the binding as `let mut` to allow assignment",
+                ),
+            };
+            Diagnostic::error("E0263", msg)
+                .with_label(Label::primary(file, span.clone(), label))
+                .with_help(help)
+        }
     }
 }

@@ -1,0 +1,18 @@
+== diagnostics ==
+[E0263] Error: cannot assign to an immutable place
+   ╭─[ error_assign_to_immutable_local.ox:3:5 ]
+   │
+ 3 │     x = 5;
+   │     ┬  
+   │     ╰── cannot assign to this
+   │ 
+   │ Help: declare the binding as `let mut` to allow assignment
+───╯
+== types ==
+Fn[0] f() -> i32
+  HExprId(0) : i32
+  HExprId(1) : ()
+  HExprId(2) : i32
+  HExprId(3) : i32
+  HExprId(4) : ()
+  HExprId(5) : i32

@@ -1,0 +1,6 @@
+HirModule
+  Fn[0] f()
+    Block
+      Let(0, "x", mut, Int(1))
+      ExprStmt AddrOf(const, Local(0, "x", place))
+      ExprStmt AddrOf(mut, Local(0, "x", place))

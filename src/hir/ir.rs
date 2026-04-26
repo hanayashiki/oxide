@@ -177,6 +177,13 @@ pub enum HirExprKind {
         adt: HAdtId,
         fields: Vec<HirStructLitField>,
     },
+    /// `&expr` / `&mut expr`. Operand validated to be a place at lower
+    /// time (errors as `AddrOfNonPlace` if not). Result is `*const T` /
+    /// `*mut T` per the operator's mutability. See spec/10_ADDRESS_OF.md.
+    AddrOf {
+        mutability: Mutability,
+        expr: HExprId,
+    },
     Cast {
         expr: HExprId,
         ty: HirTy,
@@ -268,6 +275,9 @@ pub enum HirError {
     /// Left-hand side of `=` (or compound assign) is not a place
     /// expression. See spec/08_ADT.md "Place expressions and `is_place`".
     InvalidAssignTarget { span: Span },
+    /// Operand of `&` / `&mut` is not a place expression. See
+    /// spec/10_ADDRESS_OF.md "Place rule". Span points at the operand.
+    AddrOfNonPlace { span: Span },
 }
 
 impl HirError {
@@ -276,7 +286,8 @@ impl HirError {
             Self::UnresolvedName { span, .. }
             | Self::CharOutOfRange { span, .. }
             | Self::UnresolvedAdt { span, .. }
-            | Self::InvalidAssignTarget { span } => span,
+            | Self::InvalidAssignTarget { span }
+            | Self::AddrOfNonPlace { span } => span,
             Self::DuplicateFn { dup, .. }
             | Self::DuplicateAdt { dup, .. }
             | Self::DuplicateField { dup, .. } => dup,

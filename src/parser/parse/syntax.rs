@@ -200,6 +200,21 @@ where
                 TokenKind::Bang => UnOp::Not,
                 TokenKind::Tilde => UnOp::BitNot,
             ),
+            // `&expr` / `&mut expr` — same precedence as the other prefix
+            // unary ops. `Amp` here is the prefix path; the infix `Amp`
+            // (binary BitAnd, level 8) is disambiguated by Pratt position.
+            // See spec/10_ADDRESS_OF.md "Token disambiguation".
+            prefix(
+                13,
+                just(TokenKind::Amp).ignore_then(
+                    just(TokenKind::KwMut)
+                        .or_not()
+                        .map(|m| if m.is_some() { Mutability::Mut } else { Mutability::Const }),
+                ),
+                |mutability: Mutability, rhs, e: &mut OMapExtra<'_, '_, I>| {
+                    e.push_expr(ExprKind::AddrOf { mutability, expr: rhs })
+                },
+            ),
             postfix(
                 12,
                 just(TokenKind::KwAs).ignore_then(type_parser()),

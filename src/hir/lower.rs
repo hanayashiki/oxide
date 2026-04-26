@@ -342,6 +342,18 @@ impl<'a> Lowerer<'a> {
                 let ty = self.lower_ty(ty);
                 HirExprKind::Cast { expr, ty }
             }
+            ast::ExprKind::AddrOf { mutability, expr } => {
+                let inner = self.lower_expr(expr);
+                if !self.exprs[inner].is_place {
+                    self.errors.push(HirError::AddrOfNonPlace {
+                        span: self.exprs[inner].span.clone(),
+                    });
+                }
+                HirExprKind::AddrOf {
+                    mutability,
+                    expr: inner,
+                }
+            }
             ast::ExprKind::If {
                 cond,
                 then_block,

@@ -26,13 +26,13 @@ mod decl;
 use index_vec::IndexVec;
 
 use crate::hir::{
-    FnId, HBlockId, HElseArm, HExprId, HirExpr, HirExprKind, HirLocal, HirModule, HirStructLitField,
-    HirTy, HirTyKind, LocalId, VariantIdx,
+    FnId, HBlockId, HElseArm, HExprId, HirExpr, HirExprKind, HirLocal, HirModule,
+    HirStructLitField, HirTy, HirTyKind, LocalId, VariantIdx,
 };
 use crate::lexer::Span;
 use crate::parser::ast::{AssignOp, BinOp, Mutability, UnOp};
 
-use super::error::TypeError;
+use super::error::{MutateOp, TypeError};
 use super::ty::{AdtDef, AdtId, FnSig, InferId, TyArena, TyId, TyKind};
 
 #[derive(Clone, Debug)]
@@ -229,7 +229,8 @@ impl<'hir> Checker<'hir> {
             | TypeError::StructLitUnknownField { .. }
             | TypeError::StructLitMissingField { .. }
             | TypeError::StructLitDuplicateField { .. }
-            | TypeError::NoFieldOnAdt { .. } => {}
+            | TypeError::NoFieldOnAdt { .. }
+            | TypeError::MutateImmutable { .. } => {}
         }
     }
 
@@ -659,6 +660,10 @@ impl<'hir> Checker<'hir> {
                 let _ = self.infer_expr(inf, inner);
                 Self::resolve_named_ty(&mut self.tys, &mut inf.errors, &ty)
             }
+            HirExprKind::AddrOf {
+                mutability,
+                expr: inner,
+            } => self.infer_addr_of(inf, mutability, inner),
             HirExprKind::If {
                 cond,
                 then_block,
@@ -706,8 +711,7 @@ impl<'hir> Checker<'hir> {
 
         // Track first occurrences for duplicate-detection and to exclude
         // already-seen names from the missing-field check.
-        let mut seen: std::collections::HashMap<String, Span> =
-            std::collections::HashMap::new();
+        let mut seen: std::collections::HashMap<String, Span> = std::collections::HashMap::new();
 
         for provided in fields {
             // Type-check the value first so inner errors still surface
@@ -766,13 +770,7 @@ impl<'hir> Checker<'hir> {
     ///   - `base: Never` — propagate `Never`.
     ///   - `base: Error` — propagate `Error` silently.
     ///   - anything else (Prim/Unit/Fn/Ptr) — `TypeNotFieldable`.
-    fn infer_field(
-        &mut self,
-        inf: &mut Inferer,
-        base: HExprId,
-        name: &str,
-        span: &Span,
-    ) -> TyId {
+    fn infer_field(&mut self, inf: &mut Inferer, base: HExprId, name: &str, span: &Span) -> TyId {
         let base_ty = self.infer_expr(inf, base);
         let resolved = self.resolve(inf, base_ty);
         match self.tys.kind(resolved).clone() {
@@ -795,7 +793,8 @@ impl<'hir> Checker<'hir> {
                 }
             }
             TyKind::Infer(_) => {
-                inf.errors.push(TypeError::CannotInfer { span: span.clone() });
+                inf.errors
+                    .push(TypeError::CannotInfer { span: span.clone() });
                 self.tys.error
             }
             TyKind::Never => self.tys.never,
@@ -876,7 +875,62 @@ impl<'hir> Checker<'hir> {
         // RHS coerces *to* the LHS slot — direction matters for pointer
         // mutability (`*mut → *const` OK, reverse is not).
         self.coerce(inf, r, t, span.clone());
+        // Mutability of the target. `None` means "not a place" — HIR has
+        // already filed `InvalidAssignTarget`, so we don't double-report.
+        // See spec/10_ADDRESS_OF.md "Mutability check for `&mut`".
+        if let Some(Mutability::Const) = self.place_mutability(target) {
+            let target_span = self.hir.exprs[target].span.clone();
+            inf.errors.push(TypeError::MutateImmutable {
+                op: MutateOp::Assign,
+                span: target_span,
+            });
+        }
         self.tys.unit
+    }
+
+    /// `&expr` / `&mut expr`. The operand was already validated to be a
+    /// place at HIR-lower time (`AddrOfNonPlace` if not). Here we only
+    /// need to type the operand and, for `&mut`, ensure the place is
+    /// mutable. See spec/10_ADDRESS_OF.md "Type rule" / "Mutability check".
+    fn infer_addr_of(&mut self, inf: &mut Inferer, mutability: Mutability, expr: HExprId) -> TyId {
+        let inner_ty = self.infer_expr(inf, expr);
+        if matches!(mutability, Mutability::Mut) {
+            // None ⇒ HIR already filed `AddrOfNonPlace`; suppress.
+            if matches!(self.place_mutability(expr), Some(Mutability::Const)) {
+                let span = self.hir.exprs[expr].span.clone();
+                inf.errors.push(TypeError::MutateImmutable {
+                    op: MutateOp::BorrowMut,
+                    span,
+                });
+            }
+        }
+        self.tys.intern(TyKind::Ptr(inner_ty, mutability))
+    }
+
+    /// Walk the place expression tree, returning the root's mutability.
+    /// `None` for non-places — typeck callers treat `None` as "no error
+    /// here, HIR already reported InvalidAssignTarget / AddrOfNonPlace."
+    /// `Some(Mut)` / `Some(Const)` for places, where:
+    ///   - `Local(lid)` → the local's `mutable` flag.
+    ///   - `Field { base, _ }` / `Index { base, _ }` → inherits from base
+    ///     (writing through a struct field requires the owner be mutable).
+    ///   - everything else → `None`.
+    ///
+    /// `Unary { Deref, _ }` will join the place producers under
+    /// 07_POINTER §5; its mutability comes from the pointer's type
+    /// (`*mut T` → Mut, `*const T` → Const). TBD until that lands.
+    fn place_mutability(&self, eid: HExprId) -> Option<Mutability> {
+        match &self.hir.exprs[eid].kind {
+            HirExprKind::Local(lid) => Some(if self.hir.locals[*lid].mutable {
+                Mutability::Mut
+            } else {
+                Mutability::Const
+            }),
+            HirExprKind::Field { base, .. } | HirExprKind::Index { base, .. } => {
+                self.place_mutability(*base)
+            }
+            _ => None,
+        }
     }
 
     fn infer_call(

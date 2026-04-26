@@ -149,6 +149,13 @@ pub enum ExprKind {
         name: Ident,
         fields: Vec<StructLitField>,
     },
+    /// `&expr` / `&mut expr` — produces `*const T` / `*mut T` where
+    /// `T` is the operand's type. Operand must be a place expression
+    /// (HIR enforces; see spec/10_ADDRESS_OF.md).
+    AddrOf {
+        mutability: Mutability,
+        expr: ExprId,
+    },
     Cast {
         expr: ExprId,
         ty: TypeId,

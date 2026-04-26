@@ -1,0 +1,18 @@
+== diagnostics ==
+== types ==
+Fn[0] read_counter(p[Local(0)]: *const Adt(0)) -> i32
+  HExprId(0) : i32
+  HExprId(1) : Adt(0)
+  HExprId(2) : ()
+  HExprId(3) : fn(*const Adt(0)) -> i32
+  HExprId(4) : Adt(0)
+  HExprId(5) : *const Adt(0)
+  HExprId(6) : i32
+  HExprId(7) : ()
+  HExprId(8) : fn(*mut Adt(0))
+  HExprId(9) : Adt(0)
+  HExprId(10) : *mut Adt(0)
+  HExprId(11) : ()
+  HExprId(12) : i32
+Fn[1] reset_counter(p[Local(1)]: *mut Adt(0)) -> ()
+Fn[2] snapshot_then_reset() -> i32

@@ -54,5 +54,14 @@ pub fn from_hir_error(err: &HirError, file: FileId) -> Diagnostic {
              of a pointer; literals, calls, and struct literals produce values \
              without a stable location",
         ),
+        HirError::AddrOfNonPlace { span } => Diagnostic::error(
+            "E0208",
+            "cannot take the address of a non-place expression",
+        )
+        .with_label(Label::primary(file, span.clone(), "not addressable"))
+        .with_help(
+            "only places — locals, fields of places, and pointer derefs — \
+             have a stable memory location to take the address of",
+        ),
     }
 }
