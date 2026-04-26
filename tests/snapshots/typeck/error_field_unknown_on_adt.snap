@@ -1,0 +1,12 @@
+== diagnostics ==
+[E0261] Error: no field `z` on type `Point`
+   ╭─[ error_field_unknown_on_adt.ox:4:5 ]
+   │
+ 4 │     p.z
+   │     ─┬─  
+   │      ╰─── unknown field
+───╯
+== types ==
+Fn[0] f(p[Local(0)]: Adt(0)) -> i32
+  HExprId(0) : Adt(0)
+  HExprId(1) : {error}

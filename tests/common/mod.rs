@@ -20,6 +20,11 @@ use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use inkwell::OptimizationLevel;
+use inkwell::context::Context;
+use inkwell::execution_engine::JitFunction;
+
+use oxide::codegen::codegen;
 use oxide::hir::lower;
 use oxide::hir::pretty::pretty_print as hir_pretty_print;
 use oxide::lexer::lex;
@@ -77,19 +82,31 @@ pub fn assert_snapshots(dir: &Path, render: impl Fn(&str, &str) -> String) {
         let actual = render(&file_name, &src);
         let snap_path = ox_path.with_extension("snap");
 
-        if update {
-            fs::write(&snap_path, &actual)
-                .unwrap_or_else(|e| panic!("write {}: {e}", snap_path.display()));
-            updated += 1;
-            continue;
-        }
+        let maybe_update = match fs::read_to_string(&snap_path) {
+            Ok(expected) => {
+                let matches = expected == actual;
+                if matches {
+                    passed += 1;
+                    None
+                } else if update {
+                    updated += 1;
+                    Some(actual)
+                } else {
+                    failed += 1;
+                    eprintln!("{}", format_mismatch(&snap_path, &expected, &actual));
+                    None
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                updated += 1;
+                Some(actual)
+            }
+            Err(e) => panic!("read {}: {e}", snap_path.display()),
+        };
 
-        let expected = fs::read_to_string(&snap_path).unwrap_or_default();
-        if actual == expected {
-            passed += 1;
-        } else {
-            failed += 1;
-            eprintln!("{}", format_mismatch(&snap_path, &expected, &actual));
+        if let Some(new_content) = maybe_update {
+            fs::write(&snap_path, new_content)
+                .unwrap_or_else(|e| panic!("write {}: {e}", snap_path.display()));
         }
     }
 
@@ -99,10 +116,11 @@ pub fn assert_snapshots(dir: &Path, render: impl Fn(&str, &str) -> String) {
     }
 
     eprintln!(
-        "snapshot summary for {}: {} passed, {} failed",
+        "snapshot summary for {}: {} passed, {} failed, {} updated",
         dir.display(),
         passed,
-        failed
+        failed,
+        updated,
     );
 
     if failed > 0 {
@@ -167,6 +185,57 @@ pub fn render_hir(file_name: &str, src: &str) -> String {
     out
 }
 
+/// JIT-compile `src` end-to-end (lex → parse → HIR → typeck → codegen)
+/// and run the function `entry` with no arguments. Returns the LLVM IR
+/// text alongside whatever the function returned.
+///
+/// **Constraints:**
+/// - Test programs must compile clean: any parse / HIR / typeck error
+///   panics so the test fails loudly with the diagnostic.
+/// - `entry` is a no-arg function. Multi-arg variants can be added when
+///   needed.
+/// - `R` must be a primitive that survives the C ABI return convention
+///   for this target (i32, i64, bool, etc.). Struct return is the
+///   deferred ABI work; tests should return primitives that encode
+///   what they want to verify (e.g., `let p = Point{...}; p.x`).
+///
+/// Safety: the caller asserts the function's actual return type matches
+/// `R`. A mismatch here is undefined behaviour.
+pub unsafe fn jit_run_with_ir<R: Copy + 'static>(src: &str, entry: &str) -> (String, R) {
+    let tokens = lex(src);
+    let (ast, parse_errs) = parse(&tokens);
+    assert!(parse_errs.is_empty(), "parse errors: {parse_errs:#?}");
+    let (hir, hir_errs) = lower(&ast);
+    assert!(hir_errs.is_empty(), "hir errors: {hir_errs:#?}");
+    let (results, type_errs) = check(&hir);
+    assert!(type_errs.is_empty(), "type errors: {type_errs:#?}");
+
+    let ctx = Context::create();
+    let module = codegen(&ctx, &hir, &results, "jit");
+
+    // Capture IR text before handing the module to the execution engine
+    // (which takes ownership). The string ends with a trailing newline.
+    let ir = module.print_to_string().to_string();
+
+    let ee = module
+        .create_jit_execution_engine(OptimizationLevel::None)
+        .expect("failed to create JIT execution engine");
+
+    let func: JitFunction<'_, unsafe extern "C" fn() -> R> = unsafe {
+        ee.get_function(entry)
+            .unwrap_or_else(|e| panic!("function `{entry}` not found in JIT module: {e:?}"))
+    };
+    let result = unsafe { func.call() };
+    (ir, result)
+}
+
+/// Convenience wrapper around `jit_run_with_ir` for callers that only
+/// want the runtime result.
+pub unsafe fn jit_run<R: Copy + 'static>(src: &str, entry: &str) -> R {
+    let (_ir, r) = unsafe { jit_run_with_ir::<R>(src, entry) };
+    r
+}
+
 pub fn render_typeck(file_name: &str, src: &str) -> String {
     let tokens = lex(src);
     let (ast, parse_errs) = parse(&tokens);
@@ -221,8 +290,7 @@ pub fn render_typeck(file_name: &str, src: &str) -> String {
         .unwrap();
         for (eid, &ty) in results.expr_tys.iter_enumerated() {
             if fid.raw() == 0 {
-                writeln!(out, "  HExprId({}) : {}", eid.raw(), results.tys.render(ty))
-                    .unwrap();
+                writeln!(out, "  HExprId({}) : {}", eid.raw(), results.tys.render(ty)).unwrap();
             }
         }
     }

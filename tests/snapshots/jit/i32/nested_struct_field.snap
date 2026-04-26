@@ -1,0 +1,21 @@
+== ir ==
+; ModuleID = 'jit'
+source_filename = "jit"
+
+%Outer = type { %Inner }
+%Inner = type { i32 }
+
+define i32 @main() {
+allocas:
+  %o.0.slot = alloca %Outer, align 8
+  br label %body
+
+body:                                             ; preds = %allocas
+  store %Outer { %Inner { i32 99 } }, ptr %o.0.slot, align 4
+  %fld.gep = getelementptr inbounds %Outer, ptr %o.0.slot, i32 0, i32 0
+  %fld.gep1 = getelementptr inbounds %Inner, ptr %fld.gep, i32 0, i32 0
+  %fld.load = load i32, ptr %fld.gep1, align 4
+  ret i32 %fld.load
+}
+== result ==
+99

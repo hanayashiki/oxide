@@ -59,5 +59,36 @@ pub fn from_typeck_error(err: &TypeError, file: FileId, tys: &TyArena) -> Diagno
             "only `*mut T` → `*const T` is allowed at the outer layer; \
              inner positions must match exactly",
         ),
+
+        TypeError::StructLitUnknownField { field, adt, span } => Diagnostic::error(
+            "E0258",
+            format!("struct `{adt}` has no field `{field}`"),
+        )
+        .with_label(Label::primary(file, span.clone(), "unknown field")),
+
+        TypeError::StructLitMissingField { field, adt, lit_span } => Diagnostic::error(
+            "E0259",
+            format!("missing field `{field}` in struct literal of `{adt}`"),
+        )
+        .with_label(Label::primary(file, lit_span.clone(), "field not provided")),
+
+        TypeError::StructLitDuplicateField { field, first, dup } => Diagnostic::error(
+            "E0260",
+            format!("field `{field}` specified more than once"),
+        )
+        .with_label(Label::primary(file, dup.clone(), "duplicate"))
+        .with_label(Label::secondary(file, first.clone(), "first specified here")),
+
+        TypeError::NoFieldOnAdt { field, adt, span } => Diagnostic::error(
+            "E0261",
+            format!("no field `{field}` on type `{adt}`"),
+        )
+        .with_label(Label::primary(file, span.clone(), "unknown field")),
+
+        TypeError::TypeNotFieldable { ty, span } => Diagnostic::error(
+            "E0262",
+            format!("type `{}` does not have fields", tys.render(*ty)),
+        )
+        .with_label(Label::primary(file, span.clone(), "field access not allowed here")),
     }
 }

@@ -1,0 +1,12 @@
+== diagnostics ==
+[E0259] Error: missing field `y` in struct literal of `Point`
+   ╭─[ error_struct_lit_missing_field.ox:4:5 ]
+   │
+ 4 │     Point { x: 1 }
+   │     ───────┬──────  
+   │            ╰──────── field not provided
+───╯
+== types ==
+Fn[0] f() -> Adt(0)
+  HExprId(0) : i32
+  HExprId(1) : Adt(0)

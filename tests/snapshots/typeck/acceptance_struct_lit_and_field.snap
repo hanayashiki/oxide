@@ -1,0 +1,13 @@
+== diagnostics ==
+== types ==
+Fn[0] make() -> Adt(0)
+  HExprId(0) : i32
+  HExprId(1) : i32
+  HExprId(2) : Adt(0)
+  HExprId(3) : fn() -> Adt(0)
+  HExprId(4) : Adt(0)
+  HExprId(5) : ()
+  HExprId(6) : Adt(0)
+  HExprId(7) : i32
+Fn[1] x_of_make() -> i32
+Fn[2] ptr(p[Local(1)]: *mut Adt(0)) -> ()

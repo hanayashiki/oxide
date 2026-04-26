@@ -26,8 +26,8 @@ mod decl;
 use index_vec::IndexVec;
 
 use crate::hir::{
-    FnId, HBlockId, HElseArm, HExprId, HirExpr, HirExprKind, HirLocal, HirModule, HirTy, HirTyKind,
-    LocalId,
+    FnId, HBlockId, HElseArm, HExprId, HirExpr, HirExprKind, HirLocal, HirModule, HirStructLitField,
+    HirTy, HirTyKind, LocalId, VariantIdx,
 };
 use crate::lexer::Span;
 use crate::parser::ast::{AssignOp, BinOp, Mutability, UnOp};
@@ -219,10 +219,17 @@ impl<'hir> Checker<'hir> {
                 *expected = self.resolve_fully(inf, *expected);
                 *actual = self.resolve_fully(inf, *actual);
             }
+            TypeError::TypeNotFieldable { ty, .. } => {
+                *ty = self.resolve_fully(inf, *ty);
+            }
             TypeError::UnknownType { .. }
             | TypeError::WrongArgCount { .. }
             | TypeError::UnsupportedFeature { .. }
-            | TypeError::CannotInfer { .. } => {}
+            | TypeError::CannotInfer { .. }
+            | TypeError::StructLitUnknownField { .. }
+            | TypeError::StructLitMissingField { .. }
+            | TypeError::StructLitDuplicateField { .. }
+            | TypeError::NoFieldOnAdt { .. } => {}
         }
     }
 
@@ -643,25 +650,10 @@ impl<'hir> Checker<'hir> {
                 });
                 self.tys.error
             }
-            HirExprKind::Field { base, name: _ } => {
-                let _ = self.infer_expr(inf, base);
-                inf.errors.push(TypeError::UnsupportedFeature {
-                    feature: "field access",
-                    span: span.clone(),
-                });
-                self.tys.error
-            }
-            HirExprKind::StructLit { adt: _, fields } => {
-                // Walk field expressions for side effects so any inner
-                // diagnostics still surface. See TBD-T6 in spec/08_ADT.md.
-                for f in &fields {
-                    let _ = self.infer_expr(inf, f.value);
-                }
-                inf.errors.push(TypeError::UnsupportedFeature {
-                    feature: "struct literals",
-                    span: span.clone(),
-                });
-                self.tys.error
+            HirExprKind::Field { base, name } => self.infer_field(inf, base, &name, &span),
+            HirExprKind::StructLit { adt, fields } => {
+                let aid = AdtId::from_raw(adt.raw());
+                self.infer_struct_lit(inf, aid, &fields, &span)
             }
             HirExprKind::Cast { expr: inner, ty } => {
                 let _ = self.infer_expr(inf, inner);
@@ -690,6 +682,132 @@ impl<'hir> Checker<'hir> {
         };
         self.expr_tys[eid] = ty;
         ty
+    }
+
+    /// Type a struct literal `Foo { f1: e1, f2: e2, ... }`. Per spec/08_ADT.md
+    /// "TBD-T6": validate the field set (no unknown / no duplicate / nothing
+    /// missing) and unify each value with the declared field type. Result
+    /// is `Adt(aid)` regardless of any per-field errors so cascades stay
+    /// typed (`Error` absorbs at the field level).
+    fn infer_struct_lit(
+        &mut self,
+        inf: &mut Inferer,
+        aid: AdtId,
+        fields: &[HirStructLitField],
+        lit_span: &Span,
+    ) -> TyId {
+        let result_ty = self.tys.intern(TyKind::Adt(aid));
+
+        // Snapshot the declared fields so we don't hold a borrow on
+        // `self.adts` while inferring sub-expressions (which may mutably
+        // touch `self.tys`/`self.errors`).
+        let adt_def = self.adts[aid].clone();
+        let declared = &adt_def.variants[VariantIdx::from_raw(0)].fields;
+
+        // Track first occurrences for duplicate-detection and to exclude
+        // already-seen names from the missing-field check.
+        let mut seen: std::collections::HashMap<String, Span> =
+            std::collections::HashMap::new();
+
+        for provided in fields {
+            // Type-check the value first so inner errors still surface
+            // even if the field-set check fails.
+            let value_ty = self.infer_expr(inf, provided.value);
+            let value_span = self.hir.exprs[provided.value].span.clone();
+
+            if let Some(first_span) = seen.get(&provided.name) {
+                inf.errors.push(TypeError::StructLitDuplicateField {
+                    field: provided.name.clone(),
+                    first: first_span.clone(),
+                    dup: provided.span.clone(),
+                });
+                // Don't unify the second occurrence — its target slot is
+                // already accounted for; treat the second as a free-floating
+                // expression for diagnostic purposes only.
+                continue;
+            }
+            seen.insert(provided.name.clone(), provided.span.clone());
+
+            match declared.iter().find(|f| f.name == provided.name) {
+                Some(field_def) => {
+                    self.coerce(inf, value_ty, field_def.ty, value_span);
+                }
+                None => {
+                    inf.errors.push(TypeError::StructLitUnknownField {
+                        field: provided.name.clone(),
+                        adt: adt_def.name.clone(),
+                        span: provided.span.clone(),
+                    });
+                }
+            }
+        }
+
+        for declared_field in declared.iter() {
+            if !seen.contains_key(&declared_field.name) {
+                inf.errors.push(TypeError::StructLitMissingField {
+                    field: declared_field.name.clone(),
+                    adt: adt_def.name.clone(),
+                    lit_span: lit_span.clone(),
+                });
+            }
+        }
+
+        result_ty
+    }
+
+    /// Type `base.name` as a value (rvalue). Place-vs-value distinction is
+    /// already in HIR (`HirExpr::is_place`); this rule only inspects the
+    /// type of `base`. Per spec/08_ADT.md "TBD-T6":
+    ///
+    ///   - `base: Adt(aid)` — look up the field, return its type. Unknown
+    ///     name → `NoFieldOnAdt`, return `error`.
+    ///   - `base: Infer(_)` — receiver type unresolved at this point.
+    ///     `CannotInfer`, return `error`.
+    ///   - `base: Never` — propagate `Never`.
+    ///   - `base: Error` — propagate `Error` silently.
+    ///   - anything else (Prim/Unit/Fn/Ptr) — `TypeNotFieldable`.
+    fn infer_field(
+        &mut self,
+        inf: &mut Inferer,
+        base: HExprId,
+        name: &str,
+        span: &Span,
+    ) -> TyId {
+        let base_ty = self.infer_expr(inf, base);
+        let resolved = self.resolve(inf, base_ty);
+        match self.tys.kind(resolved).clone() {
+            TyKind::Adt(aid) => {
+                let adt_def = &self.adts[aid];
+                match adt_def.variants[VariantIdx::from_raw(0)]
+                    .fields
+                    .iter()
+                    .find(|f| f.name == name)
+                {
+                    Some(field_def) => field_def.ty,
+                    None => {
+                        inf.errors.push(TypeError::NoFieldOnAdt {
+                            field: name.to_string(),
+                            adt: adt_def.name.clone(),
+                            span: span.clone(),
+                        });
+                        self.tys.error
+                    }
+                }
+            }
+            TyKind::Infer(_) => {
+                inf.errors.push(TypeError::CannotInfer { span: span.clone() });
+                self.tys.error
+            }
+            TyKind::Never => self.tys.never,
+            TyKind::Error => self.tys.error,
+            TyKind::Prim(_) | TyKind::Unit | TyKind::Fn(_, _) | TyKind::Ptr(_, _) => {
+                inf.errors.push(TypeError::TypeNotFieldable {
+                    ty: resolved,
+                    span: span.clone(),
+                });
+                self.tys.error
+            }
+        }
     }
 
     fn infer_unary(&mut self, inf: &mut Inferer, op: UnOp, inner: HExprId, _span: &Span) -> TyId {

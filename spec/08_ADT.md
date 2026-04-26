@@ -34,25 +34,31 @@ structs, unit structs) are *omissions*, not deviations.
 ```rust
 struct Point { x: i32, y: i32 }
 
-fn id(p: Point) -> Point {
-    p
+fn make() -> Point {
+    Point { x: 1, y: 2 }
+}
+
+fn x_of_make() -> i32 {
+    let p = make();
+    p.x
 }
 ```
 
 This program parses, lowers cleanly to HIR (`Point` resolves to
 `HirTyKind::Adt(HAdtId(0))` everywhere it appears in type position)
-and typechecks: phase 0 allocates `AdtId(0)` for `Point`, phase 0.5
-resolves both fields' `i32` types, phase 1 resolves `id`'s
-signature to `(Adt(0)) -> Adt(0)`, and phase 2 types the body's
-`p` as `Adt(0)` and unifies it against the declared return.
+and typechecks end-to-end: phase 0 allocates `AdtId(0)` for `Point`,
+phase 0.5 resolves both fields' `i32` types, phase 1 resolves the
+two fn signatures, and phase 2 types each body — `Point { x: 1,
+y: 2 }` as `Adt(0)`, `make()` as `Adt(0)`, and `p.x` as `i32`.
 
-The fuller program — `fn make(a, b) -> Point { Point { x: a, y: b } }`
-exercising struct-literal construction and field access — is the
-acceptance for **TBD-T6** (operations on ADTs). The vocabulary
-covered here passes `Adt(_)` through fn signatures and locals;
-construction and field access are deferred, mirroring how
-07_POINTER passes pointers through fn signatures without supporting
-deref.
+Codegen lowers it to runnable LLVM IR: the struct literal becomes
+an `insertvalue` chain, the local binding gets an alloca + store of
+the aggregate, and the field read becomes a `getelementptr` + `load`.
+JIT-executing `x_of_make` yields `1`.
+
+What stays out of scope is *writes through* fields (`s.f = 1`) and
+struct-by-value across the FFI boundary; those are tracked in the
+remaining TBDs below.
 
 ## Position in the pipeline
 
@@ -767,27 +773,137 @@ We pick option 1 — render falls back to `Adt(N)` if the caller
 only has `TyArena`; full rendering happens through a `TypeckResults`
 helper.
 
+## Operations on ADTs
+
+This section documents two operations on ADTs: **construction**
+(`StructLit`) and **field read** (`Field` as rvalue). Both are
+fully implemented in typeck and codegen. The third operation,
+**field write** (`Field` as place + `Assign`), is in the remaining
+TBDs.
+
+### Construction (`StructLit`)
+
+Typeck rule for `HirExprKind::StructLit { adt: HAdtId, fields }`:
+
+- Result type: `tys.intern(TyKind::Adt(AdtId::from_raw(adt.raw())))`.
+- Field-set validation, per-field:
+  - Provided name occurs more than once in the literal →
+    `E0260 StructLitDuplicateField { field, first, dup }`.
+  - Provided name not declared on the adt →
+    `E0258 StructLitUnknownField { field, adt, span }`.
+  - Provided value is `coerce`d to the declared field's `ty`.
+- After the per-field walk, missing fields → `E0259
+  StructLitMissingField { field, adt, lit_span }`.
+- Result is `Adt(aid)` regardless of any per-field error so cascades
+  stay typed (`Error` absorbs at the per-field level).
+
+Codegen emits an SSA aggregate via `insertvalue`:
+
+```text
+%agg = undef of <struct ty>
+%agg = insertvalue <T> %agg, <fld_0_value>, 0
+%agg = insertvalue <T> %agg, <fld_1_value>, 1
+...
+```
+
+The walk goes in *declared* field order. The literal's provided
+order may differ; we look up each declared field's matching value
+by name. Typeck has already validated completeness, so the lookup
+is infallible at codegen time.
+
+LLVM at `-O0` typically constant-folds the chain when all field
+values are constants (`store %T { i32 3, i32 4 }, ptr %slot`); at
+higher opt levels both forms collapse to the same code.
+
+### Field read (`Field` as rvalue)
+
+Typeck rule for `HirExprKind::Field { base, name }`:
+
+- Infer `base`, resolve through `Infer` chains.
+- Dispatch on the resolved kind:
+  - `Adt(aid)`: look up `name` in `adts[aid].variants[0].fields`.
+    Hit → matched field's `ty`. Miss →
+    `E0261 NoFieldOnAdt { field, adt, span }`.
+  - `Infer(_)`: the receiver type is unresolved at this point. Emit
+    `E0256 CannotInfer { span }`. (We don't have an obligation
+    queue; field access can't make progress without the receiver
+    type, see spec/05_TYPE_CHECKER.md "Inference is per-function".)
+  - `Never`: propagate `Never`.
+  - `Error`: propagate `Error` silently.
+  - `Prim`/`Unit`/`Fn`/`Ptr`: emit
+    `E0262 TypeNotFieldable { ty, span }`. No auto-deref for `Ptr`
+    in v0.
+
+Codegen dispatches on `base.is_place` (the cached HIR bit):
+
+- **Place path** (`is_place == true`): `lvalue(base)` returns a
+  pointer to the base's storage. `getelementptr inbounds <T>, ptr,
+  i32 0, i32 <field_idx>` projects to the field's slot, then
+  `load <field_ty>` reads just that slot. Single-field memory
+  traffic.
+- **Value path** (`is_place == false`): `emit_expr(base)` returns
+  the SSA aggregate; `extractvalue <T>, <field_idx>` pulls the
+  field out. No memory traffic.
+
+Both paths produce the same observable value; the choice mirrors
+how the base lives (in memory vs in SSA). `lvalue` recurses through
+`Field` for chained access (`a.b.c`), emitting one `getelementptr`
+per layer and a single trailing `load` at the outermost rvalue use.
+
+The `lvalue`-of-`Field` machinery is shared with the future
+assignment-through-field path (TBD below): once `place_mutability`
+lands, `s.f = v` reuses the same GEP chain and emits a `store`
+instead of a `load`.
+
+### LLVM type construction (`prepare_adt_types`)
+
+ADT type lowering mirrors typeck's phase 0 / 0.5 split.
+
+- **Phase A** — `ctx.opaque_struct_type(&adt.name)` for every
+  `AdtDef`, producing one stable `StructType<'ctx>` handle per
+  `AdtId` *before* any field types are resolved.
+- **Phase B** — for each AdtDef, lower each field's `TyId` via
+  `lower_ty` (which now hits the cache for any `TyKind::Adt(aid)`
+  field) and `set_body` on the opaque struct.
+
+The cache lives on `Codegen.adt_ll: IndexVec<AdtId, StructType<'ctx>>`
+and is threaded into every `lower_ty` / `lower_fn_type` call.
+
+Self-reference via `Ptr` resolves cleanly because pointers lower
+to opaque `ptr` (no recursion into the pointee). Direct
+self-reference (`struct A { x: A }`) would loop in phase B —
+**TBD-T2** must catch it before we reach codegen.
+
+`set_body(_, packed: false)` — natural alignment, padding inserted
+per LLVM's target data layout. Matches the C ABI on common targets;
+the day `repr(packed)` lands, the second arg toggles.
+
 ## Remaining TBDs
 
 - **TBD-T2**: recursive type cycle detection (`struct A { x: A }`
   rejected as infinite-size; `struct A { x: *const A }` accepted).
   Independent of the phase machinery above — runs after phase 0.5
-  as a graph walk over field-type dependencies.
-- **TBD-T6**: typeck rules for the operations on ADTs.
-  - `StructLit`: field-set validation (missing/duplicate/unknown),
-    per-field unification against declared field types, result
-    type `Adt(aid)`.
-  - `Field`: field-name lookup against the resolved Adt, result
-    type from the matched `FieldDef.ty`. Errors for unknown field,
-    field on non-Adt, field on still-Infer base.
+  as a graph walk over field-type dependencies. Until this lands,
+  a directly-self-referential struct passes typeck and infinite-loops
+  in codegen's `prepare_adt_types` phase B.
+- **TBD-T6**: mutability and field assignment.
   - `place_mutability` recursing through `Local`/`Field` (and a
     `Deref` arm when 07_POINTER's deferred section lands), plus a
     new `AssignToImmutable` typeck error. Closes the existing
-    plain-`Local`-mutability gap at the same time.
-- **TBD-T7**: codegen for struct values (LLVM `struct_type`, GEP
-  for field access, lvalue extension for `Field`, struct-by-value
-  parameter/return for in-language calls only — `extern "C"` boundary
-  forbidden initially per the C-ABI discussion in 07_POINTER.md).
+    plain-`Local`-mutability gap at the same time (today
+    `let x = 1; x = 2;` typechecks because `infer_assign` doesn't
+    consult the local's `mutable` flag).
+  - Codegen for `Field`-as-place in `Assign`: the `lvalue`-of-`Field`
+    GEP chain already exists for the rvalue-place path; assignment
+    just emits `store` instead of `load` against the same pointer.
+- **TBD-T7**: struct-by-value across `extern "C"` boundaries. Today
+  Oxide-internal calls work (LLVM picks a default lowering, both
+  ends agree because both ends are us). FFI calls that pass or
+  return structs by value fall off the C-ABI cliff documented in
+  07_POINTER.md "ABI considerations" — needs a per-target classifier
+  (rustc's `rustc_target/src/callconv/<arch>.rs` is the reference
+  shape). Mitigation while deferred: emit a typeck error on
+  struct-by-value at any `extern "C"` signature.
 
 ## Out of scope (forever-ish for v0)
 

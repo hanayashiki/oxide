@@ -36,6 +36,7 @@ pub(super) fn resolve_decls(cx: &mut Checker<'_>) {
 /// Phase 0 — push an `AdtDef` stub per HIR adt and pre-intern its
 /// `TyKind::Adt(aid)`. The `IndexVec` order is HAdtId-aligned so
 /// `AdtId::from_raw(haid.raw())` is the lookup throughout.
+/// FIXME: do not assume they are equal!
 fn alloc_partial_adts(cx: &mut Checker<'_>) {
     for hir_adt in cx.hir.adts.iter() {
         let aid = cx.adts.push(AdtDef {

@@ -36,6 +36,32 @@ pub enum TypeError {
         actual: TyId,
         span: Span,
     },
+    /// Struct literal names a field that isn't declared on the ADT. E0258.
+    StructLitUnknownField {
+        field: String,
+        adt: String,
+        span: Span,
+    },
+    /// Struct literal omits a field that is declared on the ADT. E0259.
+    StructLitMissingField {
+        field: String,
+        adt: String,
+        lit_span: Span,
+    },
+    /// Struct literal names the same field twice. E0260.
+    StructLitDuplicateField {
+        field: String,
+        first: Span,
+        dup: Span,
+    },
+    /// `s.f` where `s` is a struct but `f` isn't a declared field of it. E0261.
+    NoFieldOnAdt {
+        field: String,
+        adt: String,
+        span: Span,
+    },
+    /// `e.f` where `e`'s type isn't an ADT (primitive, unit, fn, ptr...). E0262.
+    TypeNotFieldable { ty: TyId, span: Span },
 }
 
 impl TypeError {
@@ -47,7 +73,12 @@ impl TypeError {
             | Self::WrongArgCount { span, .. }
             | Self::UnsupportedFeature { span, .. }
             | Self::CannotInfer { span }
-            | Self::PointerMutabilityMismatch { span, .. } => span,
+            | Self::PointerMutabilityMismatch { span, .. }
+            | Self::StructLitUnknownField { span, .. }
+            | Self::NoFieldOnAdt { span, .. }
+            | Self::TypeNotFieldable { span, .. } => span,
+            Self::StructLitMissingField { lit_span, .. } => lit_span,
+            Self::StructLitDuplicateField { dup, .. } => dup,
         }
     }
 }

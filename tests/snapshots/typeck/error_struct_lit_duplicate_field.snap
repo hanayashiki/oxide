@@ -1,0 +1,16 @@
+== diagnostics ==
+[E0260] Error: field `x` specified more than once
+   ╭─[ error_struct_lit_duplicate_field.ox:4:19 ]
+   │
+ 4 │     Point { x: 1, x: 2, y: 3 }
+   │             ──┬─  ──┬─  
+   │               ╰───────── first specified here
+   │                     │   
+   │                     ╰─── duplicate
+───╯
+== types ==
+Fn[0] f() -> Adt(0)
+  HExprId(0) : i32
+  HExprId(1) : i32
+  HExprId(2) : i32
+  HExprId(3) : Adt(0)

@@ -1,0 +1,12 @@
+== diagnostics ==
+[E0262] Error: type `i32` does not have fields
+   ╭─[ error_field_on_primitive.ox:2:5 ]
+   │
+ 2 │     x.bogus
+   │     ───┬───  
+   │        ╰───── field access not allowed here
+───╯
+== types ==
+Fn[0] f(x[Local(0)]: i32) -> i32
+  HExprId(0) : i32
+  HExprId(1) : {error}

@@ -13,14 +13,20 @@ use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue, UnnamedAddress,
+    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue,
+    UnnamedAddress,
 };
 
-use crate::hir::{FnId, HBlockId, HElseArm, HExprId, HirExprKind, HirModule, LocalId};
+use crate::hir::{
+    FieldIdx, FnId, HBlockId, HElseArm, HExprId, HirExprKind, HirModule, LocalId, VariantIdx,
+};
 use crate::parser::ast::{AssignOp, BinOp, UnOp};
-use crate::typeck::{TyId, TyKind, TypeckResults};
+use crate::typeck::{AdtId, TyId, TyKind, TypeckResults};
 
-use super::ty::{as_prim, is_signed_prim, is_void_ret, lower_fn_type, lower_prim, lower_ty};
+use super::ty::{
+    AdtLlTypes, as_prim, is_signed_prim, is_void_ret, lower_fn_type, lower_prim, lower_ty,
+    prepare_adt_types,
+};
 
 /// Lower an entire `HirModule` to an LLVM `Module`. Verifies before
 /// returning; verifier failures panic.
@@ -33,14 +39,18 @@ pub fn codegen<'ctx>(
     let module = ctx.create_module(module_name);
     let builder = ctx.create_builder();
 
-    // Pass 1 — declare. `Module::add_function` uses interior mutability,
-    // so fn_decls is filled before constructing Codegen and Codegen never
-    // needs &mut.
+    // Phase A — pre-allocate one LLVM struct type per ADT (opaque),
+    // then phase B set_body recursively. Mirrors typeck's phase 0/0.5.
+    let adt_ll = prepare_adt_types(ctx, typeck_results);
+
+    // Phase 1 — declare functions. `Module::add_function` uses interior
+    // mutability, so fn_decls is filled before constructing Codegen and
+    // Codegen never needs &mut.
     let mut fn_decls: IndexVec<FnId, FunctionValue<'ctx>> =
         IndexVec::with_capacity(hir.fns.len());
     for (_fid, hir_fn) in hir.fns.iter_enumerated() {
         let sig = typeck_results.fn_sig(_fid);
-        let fn_ty = lower_fn_type(ctx, typeck_results.tys(), sig);
+        let fn_ty = lower_fn_type(ctx, typeck_results.tys(), &adt_ll, sig);
         let fnv = module.add_function(&hir_fn.name, fn_ty, None);
         for (i, pv) in fnv.get_param_iter().enumerate() {
             let lid = hir_fn.params[i];
@@ -56,6 +66,7 @@ pub fn codegen<'ctx>(
         hir,
         typeck_results,
         fn_decls,
+        adt_ll,
         str_counter: Cell::new(0),
     };
 
@@ -85,6 +96,10 @@ struct Codegen<'a, 'ctx> {
     hir: &'a HirModule,
     typeck_results: &'a TypeckResults,
     fn_decls: IndexVec<FnId, FunctionValue<'ctx>>,
+    /// LLVM struct type per `AdtId`, populated up front by
+    /// `prepare_adt_types`. All later `lower_ty` / `lower_fn_type` calls
+    /// thread this in.
+    adt_ll: AdtLlTypes<'ctx>,
     /// Suffix counter for emitted string-literal globals (`@.str.0`,
     /// `@.str.1`, …). Inkwell uses interior mutability everywhere so the
     /// rest of `Codegen` lives behind `&self`; we do the same here.
@@ -174,7 +189,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         let hir_fn = &self.hir.fns[fid];
         for (i, &lid) in hir_fn.params.iter().enumerate() {
             let pty = self.local_ty(lid);
-            let llty = lower_ty(self.ctx, self.typeck_results.tys(), pty);
+            let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, pty);
             let slot = self.alloca_in_entry(
                 &fx,
                 llty,
@@ -267,11 +282,12 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 panic!("v0 codegen: fn references are only valid as call targets")
             }
             HirExprKind::StrLit(s) => Some(self.emit_str_lit(&s)),
-            HirExprKind::Index { .. } | HirExprKind::Field { .. } => {
-                panic!("v0 codegen: index/field should have been rejected at typeck")
+            HirExprKind::Index { .. } => {
+                panic!("v0 codegen: index should have been rejected at typeck")
             }
-            HirExprKind::StructLit { .. } => {
-                panic!("v0 codegen: struct literals should have been rejected at typeck")
+            HirExprKind::Field { base, name } => self.emit_field(fx, base, &name),
+            HirExprKind::StructLit { adt, fields } => {
+                Some(self.emit_struct_lit(fx, adt, &fields))
             }
             HirExprKind::Unresolved(_) | HirExprKind::Poison => {
                 panic!("v0 codegen: poisoned expr reached codegen")
@@ -323,15 +339,116 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     ) -> BasicValueEnum<'ctx> {
         let slot = fx.locals[&lid];
         let ty = self.local_ty(lid);
-        let llty = lower_ty(self.ctx, self.typeck_results.tys(), ty);
+        let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, ty);
         self.builder.build_load(llty, slot, "load").unwrap()
     }
 
     fn lvalue(&self, fx: &FnCodegenContext<'ctx>, eid: HExprId) -> PointerValue<'ctx> {
-        match &self.hir.exprs[eid].kind {
-            HirExprKind::Local(lid) => fx.locals[lid],
+        match self.hir.exprs[eid].kind.clone() {
+            HirExprKind::Local(lid) => fx.locals[&lid],
+            HirExprKind::Field { base, name } => {
+                let base_ptr = self.lvalue(fx, base);
+                let base_ty = self.ty_of(base);
+                let base_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, base_ty);
+                let aid = match self.typeck_results.tys().kind(base_ty) {
+                    TyKind::Adt(aid) => *aid,
+                    other => panic!("Field base lvalue: non-Adt type {:?}", other),
+                };
+                let field_idx = self.field_index(aid, &name);
+                self.builder
+                    .build_struct_gep(base_ll, base_ptr, field_idx, "fld.gep")
+                    .unwrap()
+            }
             other => panic!("v0 codegen: non-lvalue assignment target {:?}", other),
         }
+    }
+
+    /// Position of `name` in `adts[aid]`'s sole variant. Typeck has
+    /// already validated the field exists; a miss here is an ICE.
+    fn field_index(&self, aid: AdtId, name: &str) -> u32 {
+        let adt = self.typeck_results.adt_def(aid);
+        adt.variants[VariantIdx::from_raw(0)]
+            .fields
+            .iter()
+            .position(|f| f.name == name)
+            .expect("typeck guaranteed field exists") as u32
+    }
+
+    fn emit_field(
+        &self,
+        fx: &mut FnCodegenContext<'ctx>,
+        base: HExprId,
+        name: &str,
+    ) -> Option<BasicValueEnum<'ctx>> {
+        let base_expr = &self.hir.exprs[base];
+        let base_ty = self.ty_of(base);
+        let aid = match self.typeck_results.tys().kind(base_ty) {
+            TyKind::Adt(aid) => *aid,
+            other => panic!("Field rvalue: non-Adt base type {:?}", other),
+        };
+        let field_idx = self.field_index(aid, name);
+        let field_ty = {
+            let adt = self.typeck_results.adt_def(aid);
+            adt.variants[VariantIdx::from_raw(0)].fields[FieldIdx::from_raw(field_idx)].ty
+        };
+        let field_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, field_ty);
+
+        if base_expr.is_place {
+            // Place path — single-field load via `getelementptr`, no whole-struct copy.
+            let base_ptr = self.lvalue(fx, base);
+            let base_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, base_ty);
+            let gep = self
+                .builder
+                .build_struct_gep(base_ll, base_ptr, field_idx, "fld.gep")
+                .unwrap();
+            Some(self.builder.build_load(field_ll, gep, "fld.load").unwrap())
+        } else {
+            // Value path — base is an rvalue aggregate; pull the field
+            // out via extractvalue, no memory traffic.
+            let agg = self.emit_expr(fx, base)?;
+            let val = self
+                .builder
+                .build_extract_value(agg.into_struct_value(), field_idx, "fld")
+                .unwrap();
+            Some(val)
+        }
+    }
+
+    /// Build a struct value as an SSA aggregate via `insertvalue`. The
+    /// HIR-side field list isn't necessarily in declaration order; we
+    /// walk the declared fields and find each provided value by name.
+    /// Typeck has already validated the field set, so missing/extra/
+    /// duplicate are unreachable at this point.
+    fn emit_struct_lit(
+        &self,
+        fx: &mut FnCodegenContext<'ctx>,
+        adt: crate::hir::HAdtId,
+        fields: &[crate::hir::HirStructLitField],
+    ) -> BasicValueEnum<'ctx> {
+        let aid = AdtId::from_raw(adt.raw());
+        let llty = self.adt_ll[aid];
+        let mut agg = llty.get_undef();
+
+        let adt_def = self.typeck_results.adt_def(aid);
+        for (i, declared) in adt_def.variants[VariantIdx::from_raw(0)]
+            .fields
+            .iter()
+            .enumerate()
+        {
+            let provided = fields
+                .iter()
+                .find(|p| p.name == declared.name)
+                .expect("typeck guaranteed all fields are provided");
+            let value = self
+                .emit_expr(fx, provided.value)
+                .expect("struct literal field produced no value");
+            let new_agg = self
+                .builder
+                .build_insert_value(agg, value, i as u32, "lit.fld")
+                .unwrap();
+            agg = new_agg.into_struct_value();
+        }
+        agg.as_basic_value_enum()
     }
 
     // ---------- unary / binary ----------
@@ -542,7 +659,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     ) {
         let slot = self.lvalue(fx, target);
         let target_ty = self.ty_of(target);
-        let llty = lower_ty(self.ctx, self.typeck_results.tys(), target_ty);
+        let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, target_ty);
 
         let r = self
             .emit_expr(fx, rhs)
@@ -690,7 +807,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         // value type. For unit / never / divergent ifs we don't.
         let if_ty = self.ty_of(eid);
         let result_slot = if !is_void_ret(self.typeck_results.tys(), if_ty) {
-            let llty = lower_ty(self.ctx, self.typeck_results.tys(), if_ty);
+            let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, if_ty);
             Some(self.alloca_in_entry(fx, llty, "if.slot"))
         } else {
             None
@@ -743,7 +860,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
         match result_slot {
             Some(slot) => {
-                let llty = lower_ty(self.ctx, self.typeck_results.tys(), if_ty);
+                let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, if_ty);
                 Some(self.builder.build_load(llty, slot, "if.val").unwrap())
             }
             None => None,
@@ -797,7 +914,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         let llty = if is_void_ret(self.typeck_results.tys(), ty) {
             panic!("void type for local {}", local.name);
         } else {
-            lower_ty(self.ctx, self.typeck_results.tys(), ty)
+            lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, ty)
         };
         let slot = self.alloca_in_entry(fx, llty, &format!("{}.{}.slot", local.name, lid.raw()));
         fx.locals.insert(lid, slot);

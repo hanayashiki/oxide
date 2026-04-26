@@ -1,0 +1,13 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `i32`, found `bool`
+   ╭─[ error_struct_lit_field_type_mismatch.ox:4:16 ]
+   │
+ 4 │     Point { x: true, y: 2 }
+   │                ──┬─  
+   │                  ╰─── type mismatch here
+───╯
+== types ==
+Fn[0] f() -> Adt(0)
+  HExprId(0) : bool
+  HExprId(1) : i32
+  HExprId(2) : Adt(0)

@@ -1,0 +1,14 @@
+== diagnostics ==
+[E0258] Error: struct `Point` has no field `z`
+   ╭─[ error_struct_lit_unknown_field.ox:4:25 ]
+   │
+ 4 │     Point { x: 1, y: 2, z: 3 }
+   │                         ──┬─  
+   │                           ╰─── unknown field
+───╯
+== types ==
+Fn[0] f() -> Adt(0)
+  HExprId(0) : i32
+  HExprId(1) : i32
+  HExprId(2) : i32
+  HExprId(3) : Adt(0)

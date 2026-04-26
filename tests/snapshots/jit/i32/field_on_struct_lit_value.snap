@@ -1,0 +1,13 @@
+== ir ==
+; ModuleID = 'jit'
+source_filename = "jit"
+
+define i32 @main() {
+allocas:
+  br label %body
+
+body:                                             ; preds = %allocas
+  ret i32 6
+}
+== result ==
+6
