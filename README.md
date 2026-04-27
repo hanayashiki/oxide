@@ -1,6 +1,6 @@
 # Oxide
 
-An educational compiler that writes like Rust, compiles like C, targeting LLVM.
+An educational compiler that writes like Rust and compiles like C, targeting LLVM.
 
 ⚠️ Currently just for recreation, and still a work in progress
 
