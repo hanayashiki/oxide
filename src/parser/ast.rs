@@ -72,6 +72,7 @@ pub struct ExternBlock {
 
 #[derive(Clone, Debug)]
 pub struct Param {
+    pub mutable: bool,
     pub name: Ident,
     pub ty: TypeId,
     pub span: Span,

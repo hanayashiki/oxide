@@ -387,10 +387,14 @@ fn param_parser<'a, I>() -> impl Parser<'a, I, Param, Extra<'a>> + Clone
 where
     I: OValueInput<'a>,
 {
-    ident_parser()
+    just(TokenKind::KwMut)
+        .or_not()
+        .map(|m| m.is_some())
+        .then(ident_parser())
         .then_ignore(just(TokenKind::Colon))
         .then(type_parser())
-        .map_with(|(name, ty), e| Param {
+        .map_with(|((mutable, name), ty), e| Param {
+            mutable,
             name,
             ty,
             span: e.lex_span(),

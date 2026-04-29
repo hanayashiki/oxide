@@ -96,12 +96,12 @@ pub fn from_typeck_error(err: &TypeError, file: FileId, tys: &TyArena) -> Diagno
                 MutateOp::BorrowMut => (
                     "cannot take a mutable pointer to an immutable place",
                     "cannot borrow as `&mut`",
-                    "declare the binding as `let mut` to allow `&mut` borrows",
+                    "declare the binding `mut` (e.g. `let mut x` or `fn f(mut x: T)`) to allow `&mut` borrows",
                 ),
                 MutateOp::Assign => (
                     "cannot assign to an immutable place",
                     "cannot assign to this",
-                    "declare the binding as `let mut` to allow assignment",
+                    "declare the binding `mut` (e.g. `let mut x` or `fn f(mut x: T)`) to allow assignment",
                 ),
             };
             Diagnostic::error("E0263", msg)

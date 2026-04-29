@@ -77,7 +77,7 @@ pub struct FnDecl {
     pub ret_ty: Option<TypeId>,            // None ⇒ unit
     pub body: BlockId,
 }
-pub struct Param  { pub name: Ident, pub ty: TypeId, pub span: Span }
+pub struct Param  { pub mutable: bool, pub name: Ident, pub ty: TypeId, pub span: Span }
 pub struct Ident  { pub name: String, pub span: Span }
 
 pub struct Block {
@@ -178,7 +178,7 @@ of truth. Italicized non-terminals (`*Expr*`) refer to AST nodes via their
 Module     ::= Item*
 Item       ::= FnDecl
 FnDecl     ::= 'fn' Ident '(' (Param (',' Param)*)? ','? ')' ('->' Type)? Block
-Param      ::= Ident ':' Type
+Param      ::= 'mut'? Ident ':' Type
 Type       ::= Ident                                  // v0: named only
 
 Block      ::= '{' BlockItem* Expr? '}'               // optional tail expr

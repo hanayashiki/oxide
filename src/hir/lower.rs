@@ -235,22 +235,16 @@ impl<'a> Lowerer<'a> {
         // own sub-scope on top.
         self.scopes.push(HashMap::new());
 
-        let param_specs: Vec<_> = fn_decl
-            .params
-            .iter()
-            .map(|p| (p.name.clone(), p.ty, p.span.clone()))
-            .collect();
-
-        let mut params = Vec::with_capacity(param_specs.len());
-        for (name, ty_id, span) in param_specs {
-            let ty = self.lower_ty(ty_id);
+        let mut params = Vec::with_capacity(fn_decl.params.len());
+        for p in &fn_decl.params {
+            let ty = self.lower_ty(p.ty);
             let lid = self.locals.push(HirLocal {
-                name: name.name.clone(),
-                mutable: false,
+                name: p.name.name.clone(),
+                mutable: p.mutable,
                 ty: Some(ty),
-                span,
+                span: p.span.clone(),
             });
-            self.scopes.last_mut().unwrap().insert(name.name, lid);
+            self.scopes.last_mut().unwrap().insert(p.name.name.clone(), lid);
             params.push(lid);
         }
 

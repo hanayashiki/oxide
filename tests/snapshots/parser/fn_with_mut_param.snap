@@ -1,0 +1,5 @@
+Module
+  Fn f(mut x: i32, y: i32) -> i32
+    Block
+      ExprStmt Assign(Eq, Ident("x"), Ident("y"))
+      tail: Ident("x")

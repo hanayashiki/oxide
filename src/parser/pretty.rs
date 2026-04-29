@@ -63,6 +63,9 @@ impl<'a> Printer<'a> {
             if i > 0 {
                 header.push_str(", ");
             }
+            if p.mutable {
+                header.push_str("mut ");
+            }
             write!(header, "{}: {}", p.name.name, type_str(self.m, p.ty)).unwrap();
         }
         header.push(')');

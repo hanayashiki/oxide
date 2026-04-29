@@ -80,6 +80,9 @@ impl<'a> Printer<'a> {
                 header.push_str(", ");
             }
             let local = &self.m.locals[lid];
+            if local.mutable {
+                header.push_str("mut ");
+            }
             write!(header, "{}[Local({})]", local.name, lid.raw()).unwrap();
             if let Some(ty) = &local.ty {
                 write!(header, ": {}", ty_str(ty)).unwrap();

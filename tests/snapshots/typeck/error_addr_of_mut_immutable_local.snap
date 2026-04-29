@@ -6,7 +6,7 @@
    │                ┬  
    │                ╰── cannot borrow as `&mut`
    │ 
-   │ Help: declare the binding as `let mut` to allow `&mut` borrows
+   │ Help: declare the binding `mut` (e.g. `let mut x` or `fn f(mut x: T)`) to allow `&mut` borrows
 ───╯
 == types ==
 Fn[0] reset(p[Local(0)]: *mut Adt(0)) -> ()

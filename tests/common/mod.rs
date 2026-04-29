@@ -271,9 +271,12 @@ pub fn render_typeck(file_name: &str, src: &str) -> String {
             .iter()
             .zip(&sig.params)
             .map(|(&lid, &ty)| {
+                let local = &hir.locals[lid];
+                let mut_kw = if local.mutable { "mut " } else { "" };
                 format!(
-                    "{}[Local({})]: {}",
-                    hir.locals[lid].name,
+                    "{}{}[Local({})]: {}",
+                    mut_kw,
+                    local.name,
                     lid.raw(),
                     results.tys.render(ty)
                 )
