@@ -797,6 +797,21 @@ and only typeck would see through them to `[T]`. Typeck checks
 the resolved type at every value-type slot (let-binding
 annotation, fn parameter, fn return, struct field).
 
+E0261 fires from the `Sized` obligation discharge — see
+spec/05_TYPE_CHECKER.md "Obligations". The obligation is enqueued
+at each value position during signature resolution
+(`decl::resolve_decls`) and during body inference at let-bindings;
+discharge runs at module level after every fn has been checked,
+inspects the fully-resolved type, and emits the diagnostic if the
+type is `TyKind::Array(_, None)`.
+
+**Status note.** As of this writing, full Array typeck (HirTy
+lowering for `[T]` / `[T; N]`) is not yet wired through; no current
+code path produces `TyKind::Array(_, None)`, so today every Sized
+discharge is a no-op. The infrastructure is in place so that when
+arrays activate (Step 4/5 below), the check fires correctly without
+an architectural change.
+
 E0262 is **reserved** (defer flag). v0 allows zero-length arrays
 (`[i32; 0]`); the code is reserved in case a future iteration
 forbids them.

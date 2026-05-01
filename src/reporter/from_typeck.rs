@@ -1,6 +1,6 @@
 use super::diagnostic::{Diagnostic, Label};
 use super::source_map::FileId;
-use crate::typeck::{MutateOp, TyArena, TypeError};
+use crate::typeck::{MutateOp, SizedPos, TyArena, TypeError};
 
 /// Map a typeck error to a structured diagnostic. Needs the `TyArena` to
 /// render type names (`expected: i32, found: bool`).
@@ -107,6 +107,32 @@ pub fn from_typeck_error(err: &TypeError, file: FileId, tys: &TyArena) -> Diagno
             Diagnostic::error("E0263", msg)
                 .with_label(Label::primary(file, span.clone(), label))
                 .with_help(help)
+        }
+
+        // Per spec/09_ARRAY.md "E0261". Note: today's reporter uses
+        // E0261 for `NoFieldOnAdt` as well; the spec reserves E0261
+        // for the array case. Resolving the doc discrepancy is out of
+        // scope here — the rendered text is unambiguous either way.
+        TypeError::UnsizedArrayAsValue { pos, span } => {
+            let pos_str = match pos {
+                SizedPos::Param => "function parameter",
+                SizedPos::Return => "function return",
+                SizedPos::Field => "struct field",
+                SizedPos::LetBinding => "let-binding",
+            };
+            Diagnostic::error(
+                "E0261",
+                format!("unsized array `[T]` cannot appear by value at a {pos_str}"),
+            )
+            .with_label(Label::primary(
+                file,
+                span.clone(),
+                "unsized type at value position",
+            ))
+            .with_help(
+                "use a pointer (`*const [T]` / `*mut [T]`) for runtime-sized buffers, \
+                 or a sized array `[T; N]` if the length is known at compile time",
+            )
         }
     }
 }

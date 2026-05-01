@@ -67,6 +67,14 @@ pub enum TypeError {
     /// says which operation triggered it; the diagnostic message
     /// renders accordingly. See spec/10_ADDRESS_OF.md. E0263.
     MutateImmutable { op: MutateOp, span: Span },
+    /// Unsized array `[T]` (`TyKind::Array(_, None)`) appearing at a
+    /// value-type position — fn parameter, fn return, struct field, or
+    /// let-binding. `[T]` is `[T; ∞]`-shaped; it has no statically known
+    /// stride and therefore can't be allocated, copied, or passed by
+    /// value. The fix is to use a pointer (`*const [T]` / `*mut [T]`)
+    /// or a sized form (`[T; N]`). See spec/09_ARRAY.md "E0261".
+    /// E0261.
+    UnsizedArrayAsValue { pos: SizedPos, span: Span },
 }
 
 /// Discriminator on `MutateImmutable` so the diagnostic can phrase
@@ -75,6 +83,19 @@ pub enum TypeError {
 pub enum MutateOp {
     BorrowMut,
     Assign,
+}
+
+/// Discriminator on `UnsizedArrayAsValue` (and the `Sized` obligation
+/// kind in `obligation.rs`) so the diagnostic can name the offending
+/// position. Mirrors the four value-type positions where an unsized
+/// type is forbidden: fn parameter, fn return, struct field,
+/// let-binding. See spec/09_ARRAY.md.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SizedPos {
+    Param,
+    Return,
+    Field,
+    LetBinding,
 }
 
 impl TypeError {
@@ -90,7 +111,8 @@ impl TypeError {
             | Self::StructLitUnknownField { span, .. }
             | Self::NoFieldOnAdt { span, .. }
             | Self::TypeNotFieldable { span, .. }
-            | Self::MutateImmutable { span, .. } => span,
+            | Self::MutateImmutable { span, .. }
+            | Self::UnsizedArrayAsValue { span, .. } => span,
             Self::StructLitMissingField { lit_span, .. } => lit_span,
             Self::StructLitDuplicateField { dup, .. } => dup,
         }

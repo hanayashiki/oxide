@@ -3,6 +3,8 @@
 // `return` are all expression kinds. The grammar restricts `let` to
 // block-item position; everything else is unrestricted.
 
+use std::cmp::Ordering;
+
 use crate::lexer::Span;
 use index_vec::IndexVec;
 
@@ -275,7 +277,7 @@ pub enum TypeKind {
     },
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, Hash)]
 pub enum Mutability {
     Const,
     Mut,
@@ -286,6 +288,17 @@ impl Mutability {
         match self {
             Mutability::Const => "const",
             Mutability::Mut => "mut",
+        }
+    }
+}
+
+impl PartialOrd for Mutability {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        use Mutability::*;
+        match (self, other) {
+            (Const, Const) | (Mut, Mut) => Some(Ordering::Equal),
+            (Mut, Const) => Some(Ordering::Less),
+            (Const, Mut) => Some(Ordering::Greater),
         }
     }
 }

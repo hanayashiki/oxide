@@ -24,8 +24,10 @@ use index_vec::IndexVec;
 
 use crate::hir::HAdtId;
 
+use super::super::error::SizedPos;
 use super::super::ty::{AdtDef, AdtId, FieldDef, FnSig, TyKind, VariantDef};
 use super::Checker;
+use super::obligation::Obligation;
 
 pub(super) fn resolve_decls(cx: &mut Checker<'_>) {
     alloc_partial_adts(cx);
@@ -45,7 +47,7 @@ fn alloc_partial_adts(cx: &mut Checker<'_>) {
             variants: IndexVec::new(),
             partial: true,
         });
-        // Pre-intern the identity so resolve_named_ty in phase 0.5 / 1 hits.
+        // Pre-intern the identity so resolve_ty in phase 0.5 / 1 hits.
         let _ = cx.tys.intern(TyKind::Adt(aid));
     }
 }
@@ -69,9 +71,17 @@ fn resolve_adt_fields(cx: &mut Checker<'_>) {
             let mut fields: IndexVec<_, FieldDef> = IndexVec::new();
             for field in variant.fields.iter() {
                 // Clone the field's HirTy so we don't keep a borrow on
-                // cx.hir while we call resolve_named_ty (which takes
+                // cx.hir while we call resolve_ty (which takes
                 // &mut cx.tys / &mut cx.errors).
-                let ty = Checker::resolve_named_ty(&mut cx.tys, &mut cx.errors, &field.ty);
+                let ty = Checker::resolve_ty(&mut cx.tys, &mut cx.errors, &field.ty);
+                // Field types are concrete; push the Sized obligation
+                // with the resolved TyId. Discharged at `finish()`. See
+                // spec/09_ARRAY.md "E0261".
+                cx.decl_obligations.push(Obligation::Sized {
+                    ty,
+                    pos: SizedPos::Field,
+                    span: field.ty.span.clone(),
+                });
                 fields.push(FieldDef {
                     name: field.name.clone(),
                     ty,
@@ -103,10 +113,30 @@ fn resolve_fn_sigs(cx: &mut Checker<'_>) {
             );
             cx.local_tys[lid] = ty;
             params.push(ty);
+            // Sized check at param position. Always enqueue: a missing
+            // annotation resolves to `tys.error`, and discharge is a
+            // no-op on `Error`. Diagnostic span is the whole local
+            // declaration. See spec/09_ARRAY.md "E0261".
+            cx.decl_obligations.push(Obligation::Sized {
+                ty,
+                pos: SizedPos::Param,
+                span: local.span.clone(),
+            });
         }
         let ret = match &hir_fn.ret_ty {
-            Some(t) => Checker::resolve_named_ty(&mut cx.tys, &mut cx.errors, t),
-            None => cx.tys.unit, // Rust-style: implicit unit
+            Some(t) => {
+                let span = t.span.clone();
+                let ty = Checker::resolve_ty(&mut cx.tys, &mut cx.errors, t);
+                cx.decl_obligations.push(Obligation::Sized {
+                    ty,
+                    pos: SizedPos::Return,
+                    span,
+                });
+                ty
+            }
+            // Rust-style implicit unit return — Unit is sized; no
+            // obligation needed.
+            None => cx.tys.unit,
         };
         cx.fn_sigs[fid] = FnSig {
             params,

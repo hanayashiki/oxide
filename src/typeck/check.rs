@@ -22,6 +22,7 @@
 //! never raw `?Tn` placeholders.
 
 mod decl;
+mod obligation;
 
 use index_vec::IndexVec;
 
@@ -32,7 +33,8 @@ use crate::hir::{
 use crate::lexer::Span;
 use crate::parser::ast::{AssignOp, BinOp, Mutability, UnOp};
 
-use super::error::{MutateOp, TypeError};
+use self::obligation::Obligation;
+use super::error::{MutateOp, SizedPos, TypeError};
 use super::ty::{AdtDef, AdtId, FnSig, InferId, TyArena, TyId, TyKind};
 
 #[derive(Clone, Debug)]
@@ -76,6 +78,13 @@ pub fn check(hir: &HirModule) -> (TypeckResults, Vec<TypeError>) {
     for (fid, _) in hir.fns.iter_enumerated() {
         cx.check_fn(fid);
     }
+    // Body-phase obligations have already been discharged per-fn inside
+    // `Checker::finalize`. Decl-phase Sized obligations carry concrete
+    // TyIds (no Inferer needed); drain them here.
+    let pending = std::mem::take(&mut cx.decl_obligations);
+    for obl in pending {
+        cx.discharge_obligation(obl, None);
+    }
     cx.finish()
 }
 
@@ -87,6 +96,12 @@ struct Checker<'hir> {
     local_tys: IndexVec<LocalId, TyId>,
     expr_tys: IndexVec<HExprId, TyId>,
     errors: Vec<TypeError>,
+    /// Decl-phase Sized obligations (param / return / struct field).
+    /// All have concrete TyIds — `resolve_ty` never produces `Infer`.
+    /// Drained once at the end of `check`. Body-phase obligations live
+    /// in `Inferer.obligations` and discharge per-fn at `finalize`;
+    /// they never enter this queue.
+    decl_obligations: Vec<Obligation>,
 }
 
 struct Inferer {
@@ -96,6 +111,12 @@ struct Inferer {
     /// inside may still point at unresolved `Infer` vars; `Checker::finalize`
     /// resolves them post-defaulting before flushing into `Checker.errors`.
     errors: Vec<TypeError>,
+    /// Check-only obligations enqueued during this fn body's inference.
+    /// Drained at `Checker::finalize` after int-defaulting and side-table
+    /// resolution have settled — see `obligation.rs` for the discipline.
+    /// TyIds inside captured obligations may reference Infer vars at push
+    /// time; `discharge` resolves them through the Inferer before reading.
+    obligations: Vec<Obligation>,
     /// Expected return type of the fn whose body is being inferred. Read
     /// by the `Return` arm of `infer_expr`; doesn't change for the
     /// lifetime of this Inferer.
@@ -108,6 +129,7 @@ impl Inferer {
             bindings: IndexVec::new(),
             int_default: IndexVec::new(),
             errors: Vec::new(),
+            obligations: Vec::new(),
             cur_ret,
         }
     }
@@ -143,6 +165,7 @@ impl<'hir> Checker<'hir> {
             local_tys,
             expr_tys,
             errors: Vec::new(),
+            decl_obligations: Vec::new(),
         }
     }
 
@@ -200,6 +223,93 @@ impl<'hir> Checker<'hir> {
             self.resolve_error_tys(&inf, &mut err);
             self.errors.push(err);
         }
+
+        // Per-fn discharge: the Inferer is still alive, so obligations
+        // resolve their captured TyIds against this fn's bindings
+        // (post int-default) before observing. Body-phase obligations
+        // never escape into the Checker queue — each fn cleans up its
+        // own. See spec/05_TYPE_CHECKER.md "Obligations".
+        let pending_obls = std::mem::take(&mut inf.obligations);
+        for obl in pending_obls {
+            self.discharge_obligation(obl, Some(&inf));
+        }
+    }
+
+    /// Run one obligation against the (now frozen) type universe.
+    /// `inf` is `Some` for body-phase discharge — captured TyIds may
+    /// contain Infer vars that need resolution through that fn's
+    /// bindings — and `None` for decl-phase discharge where TyIds are
+    /// already concrete. Pure observation: never unifies, never binds.
+    fn discharge_obligation(&mut self, obl: Obligation, inf: Option<&Inferer>) {
+        match obl {
+            Obligation::Coerce {
+                actual,
+                expected,
+                span,
+            } => {
+                let a = match inf {
+                    Some(i) => self.resolve_fully(i, actual),
+                    None => actual,
+                };
+                let e = match inf {
+                    Some(i) => self.resolve_fully(i, expected),
+                    None => expected,
+                };
+                self.discharge_coerce(a, e, span);
+            }
+            Obligation::Sized { ty, pos, span } => {
+                let t = match inf {
+                    Some(i) => self.resolve_fully(i, ty),
+                    None => ty,
+                };
+                if matches!(self.tys.kind(t), TyKind::Array(_, None)) {
+                    self.errors
+                        .push(TypeError::UnsizedArrayAsValue { pos, span });
+                }
+            }
+        }
+    }
+
+    /// Pointer-mutability validation for a coercion site. Top-level
+    /// rule: `actual_mut ≤ expected_mut` (`*mut → *const` allowed,
+    /// reverse rejected). Inner positions: strict mutability equality
+    /// (recursive). Non-Ptr-Ptr inputs are no-ops — `unify`'s
+    /// shape-mismatch diagnostic has already fired during the eager
+    /// half of `coerce`. See spec/07_POINTER.md.
+    fn discharge_coerce(&mut self, actual: TyId, expected: TyId, span: Span) {
+        let (a_pt, a_mut, e_pt, e_mut) = match (self.tys.kind(actual), self.tys.kind(expected)) {
+            (&TyKind::Ptr(ap, am), &TyKind::Ptr(ep, em)) => (ap, am, ep, em),
+            _ => return,
+        };
+        if a_mut > e_mut {
+            self.errors.push(TypeError::PointerMutabilityMismatch {
+                expected,
+                actual,
+                span,
+            });
+            return;
+        }
+        self.discharge_ptr_inner_eq(a_pt, e_pt, span);
+    }
+
+    /// Recursive strict-mutability equality at every inner pointer
+    /// position. Shape mismatches under here have already been caught
+    /// by the eager `unify` body of `coerce`; this only emits errors
+    /// for mutability divergence at inner layers.
+    fn discharge_ptr_inner_eq(&mut self, a: TyId, b: TyId, span: Span) {
+        if let (&TyKind::Ptr(a_pt, a_mut), &TyKind::Ptr(b_pt, b_mut)) =
+            (self.tys.kind(a), self.tys.kind(b))
+        {
+            if a_mut != b_mut {
+                self.errors.push(TypeError::PointerMutabilityMismatch {
+                    expected: b,
+                    actual: a,
+                    span,
+                });
+                return;
+            }
+            self.discharge_ptr_inner_eq(a_pt, b_pt, span);
+        }
     }
 
     fn resolve_error_tys(&mut self, inf: &Inferer, err: &mut TypeError) {
@@ -230,7 +340,8 @@ impl<'hir> Checker<'hir> {
             | TypeError::StructLitMissingField { .. }
             | TypeError::StructLitDuplicateField { .. }
             | TypeError::NoFieldOnAdt { .. }
-            | TypeError::MutateImmutable { .. } => {}
+            | TypeError::MutateImmutable { .. }
+            | TypeError::UnsizedArrayAsValue { .. } => {}
         }
     }
 
@@ -261,7 +372,7 @@ impl<'hir> Checker<'hir> {
     /// arena and error sink explicitly so the same routine can serve
     /// both phases — sig phase points `errors` at `Checker.errors`,
     /// body phase points it at the active `Inferer.errors`.
-    fn resolve_named_ty(tys: &mut TyArena, errors: &mut Vec<TypeError>, ty: &HirTy) -> TyId {
+    fn resolve_ty(tys: &mut TyArena, errors: &mut Vec<TypeError>, ty: &HirTy) -> TyId {
         match &ty.kind {
             HirTyKind::Named(name) => match tys.from_prim_name(name) {
                 Some(id) => id,
@@ -286,7 +397,7 @@ impl<'hir> Checker<'hir> {
                 mutability,
                 pointee,
             } => {
-                let pointee = Self::resolve_named_ty(tys, errors, pointee);
+                let pointee = Self::resolve_ty(tys, errors, pointee);
                 tys.intern(TyKind::Ptr(pointee, *mutability))
             }
             // Phase A Step 2 stub: full Array typeck lands in Step 4
@@ -295,7 +406,7 @@ impl<'hir> Checker<'hir> {
             // resolved/error-reported, but produce `tys.error` since we
             // don't have a TyKind::Array yet.
             HirTyKind::Array(elem, _len) => {
-                let _ = Self::resolve_named_ty(tys, errors, elem);
+                let _ = Self::resolve_ty(tys, errors, elem);
                 tys.error
             }
             HirTyKind::Error => tys.error,
@@ -312,7 +423,7 @@ impl<'hir> Checker<'hir> {
         _span: &Span,
     ) -> TyId {
         match ty {
-            Some(t) => Self::resolve_named_ty(tys, errors, t),
+            Some(t) => Self::resolve_ty(tys, errors, t),
             None => tys.error,
         }
     }
@@ -424,79 +535,55 @@ impl<'hir> Checker<'hir> {
         }
     }
 
-    /// Use-site coercion check. Runs `unify` (shape + inference), then
-    /// validates pointer mutability per the subtype rule:
-    ///   - outermost: `mut → const` allowed; `const → mut` rejected.
-    ///   - every inner position: exact mutability match.
-    /// All non-pointer types fall through to plain unify.
-    /// Directional check: an expression of type `actual` is being placed
-    /// where the context demands `expected`. Two asymmetries live here
-    /// (and only here, by design — `unify` stays symmetric HM):
+    /// Use-site coercion. Splits into two halves:
     ///
-    /// 1. **Never absorbs.** If `actual` is `!`, it can flow into any
-    ///    `expected` — divergent expressions never produce a value, so
-    ///    the type they don't produce is irrelevant. The reverse is not
-    ///    true: a non-divergent value cannot satisfy a `Never` slot.
-    /// 2. **Pointer outer-mutability subtype.** `*mut T → *const T` is
-    ///    allowed at the outer layer (see `check_ptr_outer_compat`).
+    /// 1. **Eager unify body.** Runs `unify(actual, expected)` immediately
+    ///    so type information propagates through the union-find as the
+    ///    walk continues — `unify` is permissive on outer Ptr mut bits
+    ///    (see check.rs:405) so it computes structural equivalence even
+    ///    when mutabilities differ. `Never`/`Error` actuals absorb here
+    ///    without engaging unify (`unify(!, T)` would mismatch).
+    /// 2. **Deferred check obligation.** Enqueues `Obligation::Coerce`
+    ///    so the directional `*mut → *const` rule and inner strict
+    ///    mut-equality fire at finalize, against fully-resolved types.
+    ///    See spec/05_TYPE_CHECKER.md "Obligations" and
+    ///    spec/07_POINTER.md.
+    ///
+    /// `expect_unit` used to live nearby — that role is now subsumed by
+    /// `coerce(ty, Unit)`: there's no Ptr-Ptr branch to fire when the
+    /// expected side is `Unit`, so the obligation discharge is a no-op
+    /// and the eager unify enforces the constraint.
     fn coerce(&mut self, inf: &mut Inferer, actual: TyId, expected: TyId, span: Span) {
-        if matches!(self.tys.kind(self.resolve(inf, actual)), TyKind::Never) {
+        let resolved_a = self.resolve(inf, actual);
+        if matches!(self.tys.kind(resolved_a), TyKind::Never | TyKind::Error) {
             return;
         }
         self.unify(inf, actual, expected, span.clone());
-        self.check_ptr_outer_compat(inf, actual, expected, span);
-    }
-
-    /// Outer-layer coercion check. If both sides are pointers, verify
-    /// `actual_mut ≤ expected_mut`, then recurse into the pointee with
-    /// **strict** mutability equality (`check_ptr_inner_eq`).
-    fn check_ptr_outer_compat(
-        &mut self,
-        inf: &mut Inferer,
-        actual: TyId,
-        expected: TyId,
-        span: Span,
-    ) {
-        let actual = self.resolve(inf, actual);
-        let expected = self.resolve(inf, expected);
-        let (a_pt, a_mut, e_pt, e_mut) = match (
-            self.tys.kind(actual).clone(),
-            self.tys.kind(expected).clone(),
-        ) {
-            (TyKind::Ptr(ap, am), TyKind::Ptr(ep, em)) => (ap, am, ep, em),
-            _ => return,
-        };
-        if !mut_le(a_mut, e_mut) {
-            inf.errors.push(TypeError::PointerMutabilityMismatch {
-                expected,
-                actual,
-                span: span.clone(),
-            });
+        // Skip the obligation when neither side can participate in a
+        // directional coercion check (today only Ptr-Ptr mut-compat;
+        // future variance rules would extend this predicate). Common
+        // skip case: `coerce(_, Unit)` from former `expect_unit` sites
+        // and primitive-targeted let-init / call-arg paths.
+        if !self.is_coercible(inf, actual) || !self.is_coercible(inf, expected) {
             return;
         }
-        self.check_ptr_inner_eq(inf, a_pt, e_pt, span);
+        inf.obligations.push(Obligation::Coerce {
+            actual,
+            expected,
+            span,
+        });
     }
 
-    /// Inner positions must match mutability exactly. Used by coerce after
-    /// the outer layer has been checked. Shape mismatches under here are
-    /// already caught by `unify`, so this method only emits errors for
-    /// mutability divergence.
-    fn check_ptr_inner_eq(&mut self, inf: &mut Inferer, a: TyId, b: TyId, span: Span) {
-        let a = self.resolve(inf, a);
-        let b = self.resolve(inf, b);
-        if let (TyKind::Ptr(a_pt, a_mut), TyKind::Ptr(b_pt, b_mut)) =
-            (self.tys.kind(a).clone(), self.tys.kind(b).clone())
-        {
-            if a_mut != b_mut {
-                inf.errors.push(TypeError::PointerMutabilityMismatch {
-                    expected: b,
-                    actual: a,
-                    span: span.clone(),
-                });
-                return;
-            }
-            self.check_ptr_inner_eq(inf, a_pt, b_pt, span);
-        }
+    /// Is `ty` a kind that could participate in a non-trivial coercion
+    /// (one that requires a directional check beyond what `unify`
+    /// already enforces)? Today: pointers (mut-compat at outer; strict
+    /// equality at inner). `Infer` is included because it might still
+    /// resolve to a pointer.
+    fn is_coercible(&self, inf: &Inferer, ty: TyId) -> bool {
+        matches!(
+            self.tys.kind(self.resolve(inf, ty)),
+            TyKind::Ptr(_, _) | TyKind::Infer(_)
+        )
     }
 
     /// Bind an Infer var to a concrete type, but reject if doing so would
@@ -536,35 +623,6 @@ impl<'hir> Checker<'hir> {
             }
         }
         inf.bind(id, target);
-    }
-
-    /// One-way "this expression's type must be unit at this use site"
-    /// check. Resolves and reports a mismatch if the type isn't
-    /// `()`/`!`/error. Crucially does **not** unify against unit —
-    /// that would bind any leading int-infer var to unit, poisoning
-    /// literals inside the expression (`1 + 2` collapsing to `{error}`
-    /// instead of `i32`). Unbound int infers stay free here and get
-    /// defaulted to `i32` at fn finalize, which is also where the
-    /// captured `found` TyId in this error gets resolved for the
-    /// renderer.
-    ///
-    /// Used at: mid-block non-tail items without `;`, and the then-arm
-    /// of an else-less `if`. Both are positions where the expression's
-    /// value is discarded and the surrounding context demands `()`,
-    /// with no two-way flow into inference.
-    fn expect_unit(&mut self, inf: &mut Inferer, ty: TyId, span: Span) {
-        let resolved = self.resolve(inf, ty);
-        match self.tys.kind(resolved) {
-            TyKind::Unit | TyKind::Never | TyKind::Error => {}
-            _ => {
-                let unit = self.tys.unit;
-                inf.errors.push(TypeError::TypeMismatch {
-                    expected: unit,
-                    found: resolved,
-                    span,
-                });
-            }
-        }
     }
 
     // ---------- walk ----------
@@ -608,7 +666,8 @@ impl<'hir> Checker<'hir> {
             let ty = self.infer_expr(inf, item.expr);
             if Some(i) != last_idx && !item.has_semi {
                 let span = self.hir.exprs[item.expr].span.clone();
-                self.expect_unit(inf, ty, span);
+                let unit = self.tys.unit;
+                self.coerce(inf, ty, unit, span);
             }
         }
         match block.items.last() {
@@ -667,7 +726,7 @@ impl<'hir> Checker<'hir> {
             }
             HirExprKind::Cast { expr: inner, ty } => {
                 let _ = self.infer_expr(inf, inner);
-                Self::resolve_named_ty(&mut self.tys, &mut inf.errors, &ty)
+                Self::resolve_ty(&mut self.tys, &mut inf.errors, &ty)
             }
             HirExprKind::AddrOf {
                 mutability,
@@ -1020,9 +1079,13 @@ impl<'hir> Checker<'hir> {
         match else_arm {
             None => {
                 // No else: then-arm is in tail-discard position — must be
-                // `()` (or `!`/error). One-way check, no two-way flow.
+                // `()` (or `!`/error). Routed through `coerce` (the
+                // unit-position rule is `coerce(_, Unit)`), which handles
+                // Never absorption and unifies the int-flagged Infer case
+                // through `bind_infer_checked`.
                 let span = self.hir.blocks[then_block].span.clone();
-                self.expect_unit(inf, then_ty, span);
+                let unit = self.tys.unit;
+                self.coerce(inf, then_ty, unit, span);
                 self.tys.unit
             }
             Some(HElseArm::Block(bid)) => {
@@ -1081,11 +1144,27 @@ impl<'hir> Checker<'hir> {
         _span: &Span,
     ) -> TyId {
         let local_data: &HirLocal = &self.hir.locals[local];
-        let local_ty = match &local_data.ty {
-            Some(t) => Self::resolve_named_ty(&mut self.tys, &mut inf.errors, t),
-            None => self.fresh_infer(inf, false),
+        let (local_ty, sized_span) = match &local_data.ty {
+            Some(t) => {
+                let ty_span = t.span.clone();
+                (
+                    Self::resolve_ty(&mut self.tys, &mut inf.errors, t),
+                    ty_span,
+                )
+            }
+            None => (self.fresh_infer(inf, false), local_data.span.clone()),
         };
         self.local_tys[local] = local_ty;
+        // Sized check at let-binding position. Even when the type comes
+        // from a fresh Infer (no annotation), enqueue the obligation —
+        // discharge resolves through the Inferer at fn finalize. See
+        // spec/09_ARRAY.md "E0261" and spec/05_TYPE_CHECKER.md
+        // "Obligations".
+        inf.obligations.push(Obligation::Sized {
+            ty: local_ty,
+            pos: SizedPos::LetBinding,
+            span: sized_span,
+        });
         if let Some(init_id) = init {
             let init_ty = self.infer_expr(inf, init_id);
             let init_span = self.hir.exprs[init_id].span.clone();
@@ -1093,12 +1172,4 @@ impl<'hir> Checker<'hir> {
         }
         self.tys.unit
     }
-}
-
-/// Pointer mutability subtype: `mut ≤ const`, `mut ≤ mut`, `const ≤ const`,
-/// `const ≰ mut`. Dropping write permission (`mut → const`) is safe; gaining
-/// it (`const → mut`) is not.
-fn mut_le(actual: Mutability, expected: Mutability) -> bool {
-    use Mutability::*;
-    matches!((actual, expected), (Mut, _) | (Const, Const))
 }

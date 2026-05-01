@@ -108,7 +108,17 @@ pub fn check(hir: &HirModule) -> (TypeckResults, Vec<TypeError>) {
 4. `finalize_fn` — defaults unconstrained int vars to `i32`, replaces
    any other still-unresolved `Infer` with `Error`, walks
    `expr_tys`/`local_tys` and substitutes through resolved binding
-   chains so no `Infer(_)` leaks into module-level results.
+   chains so no `Infer(_)` leaks into module-level results, and
+   **discharges this fn's body-phase check-only obligations** against
+   the just-finalized Inferer (each captured TyId is resolved through
+   the live bindings; non-trivial diagnostics are emitted in place).
+
+Decl-phase obligations (Sized at param / return / struct field) carry
+concrete TyIds from the start. They live in `Checker.decl_obligations`
+and discharge once at the end of `check`, after every fn body has been
+processed. Discharge is **pure observation** — it never unifies, binds,
+or otherwise touches inference state. By the time any obligation runs,
+the relevant types are frozen.
 
 ## Per-expression rules
 
@@ -136,7 +146,7 @@ responsible for unifying with whatever they expected.
 | `Index/Field` | `Error`; emit `UnsupportedFeature` (E0255) — no arrays in v0; field access pending ADT support |
 | `StructLit { adt, fields }` | walk field exprs for inner diagnostics; emit `UnsupportedFeature` (E0255); result = `Error` |
 | `Cast { expr, ty }` | result = resolved `ty` (no compat check in v0) |
-| `If { cond, then, else? }` | cond unified with `bool`; then/else go through `unify_arms` + `join_never` (or `expect_unit` on then-arm if no else) |
+| `If { cond, then, else? }` | cond unified with `bool`; then/else go through `unify_arms` + `join_never` (or `coerce(then, Unit)` on then-arm if no else — a degenerate coercion) |
 | `Block(bid)` | recurse `infer_block` |
 | `Return(val)` | `coerce(val, cur_ret)` (or `coerce(Unit, cur_ret)` if no val); result = `Never` |
 | `Let { local, init }` | local's annotated ty (or fresh `Infer`); `coerce(init, local_ty)`; result = `Unit` |
@@ -172,22 +182,98 @@ After resolving both sides through any `Infer` chains:
 `coerce(actual, expected, span)` is the **directional** check used
 where the context dictates a slot type that an expression's value
 must fit (fn body vs declared return, `Return(val)`, call args, let
-init, assignment rhs). It runs in two steps:
+init, assignment rhs, mid-block expression-statement, else-less `if`
+then-arm). It splits into two halves — one eager, one deferred:
 
-1. If `actual` is `Never`, accept unconditionally. A divergent
-   expression produces no value, so the type it doesn't produce
-   cannot conflict with the slot. The reverse (`expected` is
-   `Never`, `actual` is some concrete `T`) is *not* accepted —
-   that is exactly the case "this fn declared `-> never` but
-   returns a value", which must error.
-2. Otherwise, `unify(actual, expected)` plus the pointer outer-layer
-   subtype check (`*mut T` → `*const T` allowed; inner positions
-   must match exactly).
+**Eager half (runs at the call site):**
+
+1. If `actual` is `Never` or `Error`, accept unconditionally. A
+   divergent expression produces no value, so the type it doesn't
+   produce cannot conflict with the slot. The reverse (`expected` is
+   `Never`, `actual` is some concrete `T`) is *not* accepted — that
+   is exactly the case "this fn declared `-> never` but returns a
+   value", which must error.
+2. Otherwise, `unify(actual, expected)` immediately. This propagates
+   type information through the union-find as the walk continues,
+   binding any Infer vars on either side.
+3. Enqueue `Obligation::Coerce { actual, expected, span }`.
+
+**Deferred half (runs at module-level discharge after all inference
+and integer-defaulting):** the obligation's discharge handler
+re-resolves both sides with `resolve_fully` and runs the pointer
+outer-layer subtype check (`*mut T` → `*const T` allowed at the
+outermost layer; inner positions must match exactly). Non-Ptr-Ptr
+inputs are no-ops here — the `unify` from the eager half has already
+fired any shape-mismatch diagnostic.
+
+**Why split?** `unify` is structurally permissive on outer Ptr
+mutability (it discards the mut bits and recurses on inner types),
+so the directional `*mut → *const` rule cannot live inside `unify`;
+it's a separate post-hoc validation. Deferring that validation to a
+frozen type universe means every check sees fully-resolved outer
+constructors — the check is honest by construction. See
+`obligation.rs`.
+
+**On `expect_unit`:** there is no separate `expect_unit` rule — the
+unit-position constraint at mid-block expression statements and
+else-less `if` then-arms is exactly `coerce(expr_ty, Unit)`. The
+Ptr-Ptr branch never fires (Unit isn't Ptr), so the obligation
+discharge is a no-op and the eager `unify(_, Unit)` enforces the
+constraint. Int-flagged Infer being unified with Unit is rejected by
+`bind_infer_checked` with the same diagnostic shape as before.
 
 Branch unification in `if` (then vs else) is symmetric, not a
 coercion — but it shares the Never-absorbs spirit. Implemented as
 `unify_arms`: if either arm is `Never`, skip unify entirely; the
 non-divergent arm decides the if-expr's type via `join_never`.
+
+## Obligations
+
+Some validations are **directional** or **layout-sensitive** — they
+cannot be folded into HM unification (which is symmetric and
+shape-only) without breaking unification's algebraic properties. We
+defer these to a check-only post-pass via a queue of obligations.
+
+Two obligation kinds today:
+
+- **`Coerce { actual, expected, span }`** — pointer mut-compat at
+  every level (outer subtype, inner strict equality). Enqueued from
+  every `coerce` call site after the eager `unify` body runs.
+- **`Sized { ty, pos, span }`** — `TyKind::Array(_, None)` (the
+  unsized form, see spec/09_ARRAY.md) is rejected at every value
+  position (fn parameter, fn return, struct field, let-binding).
+  `pos` discriminates the position for diagnostics. Enqueued during
+  HirTy resolution at decl phase (param/return/field) and at
+  `infer_let` (let-binding).
+
+**Discharge is pure observation.** Each obligation calls
+`resolve_fully` on its captured TyIds, inspects the resolved kind,
+and emits a diagnostic if the rule fails. **It never unifies, binds,
+or introduces new type variables.** All inference happens in the
+eager half during the AST walk; obligations only validate.
+
+**Two queues, two timings:**
+
+- **Body-phase** obligations live in `Inferer.obligations` and
+  discharge inside `Checker::finalize` while the Inferer is still
+  alive. Captured TyIds may carry Infer references that need
+  resolution against this fn's bindings; the live Inferer makes
+  that direct.
+- **Decl-phase** Sized obligations live in `Checker.decl_obligations`
+  and discharge once at the end of `check`. They carry concrete
+  TyIds (decl resolution never produces Infer), so no Inferer is
+  needed.
+
+Both feed the same `Checker::discharge_obligation` handler, which
+takes `Option<&Inferer>` for the resolution step. Because discharge
+is read-only, the order across obligations doesn't affect
+acceptance/rejection — push order is preserved for deterministic
+diagnostic ordering within each queue.
+
+**Future-proofing.** The framework extends without redesign for
+generics: a `T: Sized` obligation will be enqueued at instantiation
+sites and discharged the same way. See spec/09_ARRAY.md "Sized
+trait-ification".
 
 ## Errors
 
@@ -201,6 +287,7 @@ pub enum TypeError {
     UnsupportedFeature        { feature: &'static str, span: Span },           // E0255
     CannotInfer               { span: Span },                                  // E0256
     PointerMutabilityMismatch { expected: TyId, actual: TyId, span: Span },    // E0257
+    UnsizedArrayAsValue       { pos: SizedPos, span: Span },                   // E0261 (per spec/09_ARRAY.md)
 }
 ```
 
