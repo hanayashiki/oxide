@@ -24,12 +24,24 @@ struct Printer<'a> {
 }
 
 impl<'a> Printer<'a> {
-    fn write_line(&mut self, s: &str) {
+    fn begin_line(&mut self) {
         for _ in 0..self.indent {
             self.out.push_str("  ");
         }
+    }
+
+    fn write(&mut self, s: &str) {
         self.out.push_str(s);
+    }
+
+    fn end_line(&mut self) {
         self.out.push('\n');
+    }
+
+    fn write_line(&mut self, s: &str) {
+        self.begin_line();
+        self.write(s);
+        self.end_line();
     }
 
     fn print_item(&mut self, iid: ItemId) {
@@ -37,7 +49,10 @@ impl<'a> Printer<'a> {
         match &item.kind {
             ItemKind::Fn(f) => self.print_fn(f),
             ItemKind::ExternBlock(b) => {
-                self.write_line(&format!("ExternBlock {:?}", b.abi));
+                self.begin_line();
+                self.write("ExternBlock ");
+                write!(self.out, "{:?}", b.abi).unwrap();
+                self.end_line();
                 self.indent += 1;
                 for f in &b.items {
                     self.print_fn(f);
@@ -49,39 +64,52 @@ impl<'a> Printer<'a> {
     }
 
     fn print_struct(&mut self, s: &StructDecl) {
-        self.write_line(&format!("Struct {}", s.name.name));
+        self.begin_line();
+        self.write("Struct ");
+        self.write(&s.name.name);
+        self.end_line();
         self.indent += 1;
         for f in &s.fields {
-            self.write_line(&format!("{}: {}", f.name.name, type_str(self.m, f.ty)));
+            self.begin_line();
+            self.write(&f.name.name);
+            self.write(": ");
+            self.write_type(f.ty);
+            self.end_line();
         }
         self.indent -= 1;
     }
 
     fn print_fn(&mut self, f: &FnDecl) {
-        let mut header = format!("Fn {}(", f.name.name);
+        self.begin_line();
+        self.write("Fn ");
+        self.write(&f.name.name);
+        self.write("(");
         for (i, p) in f.params.iter().enumerate() {
             if i > 0 {
-                header.push_str(", ");
+                self.write(", ");
             }
             if p.mutable {
-                header.push_str("mut ");
+                self.write("mut ");
             }
-            write!(header, "{}: {}", p.name.name, type_str(self.m, p.ty)).unwrap();
+            self.write(&p.name.name);
+            self.write(": ");
+            self.write_type(p.ty);
         }
-        header.push(')');
+        self.write(")");
         if let Some(rt) = f.ret_ty {
-            write!(header, " -> {}", type_str(self.m, rt)).unwrap();
+            self.write(" -> ");
+            self.write_type(rt);
         }
         match f.body {
             Some(bid) => {
-                self.write_line(&header);
+                self.end_line();
                 self.indent += 1;
                 self.print_block(bid);
                 self.indent -= 1;
             }
             None => {
-                header.push_str(";");
-                self.write_line(&header);
+                self.write(";");
+                self.end_line();
             }
         }
     }
@@ -120,9 +148,9 @@ impl<'a> Printer<'a> {
                 }
             }
             ExprKind::Let { .. } | ExprKind::Return(_) => {
-                let mut buf = String::new();
-                self.append_expr(&mut buf, eid);
-                self.write_line(&buf);
+                self.begin_line();
+                self.append_expr(eid);
+                self.end_line();
             }
             _ => {
                 let prefix = if is_value_producing {
@@ -132,9 +160,10 @@ impl<'a> Printer<'a> {
                 } else {
                     "ExprStmt "
                 };
-                let mut buf = String::from(prefix);
-                self.append_expr(&mut buf, eid);
-                self.write_line(&buf);
+                self.begin_line();
+                self.write(prefix);
+                self.append_expr(eid);
+                self.end_line();
             }
         }
     }
@@ -147,185 +176,191 @@ impl<'a> Printer<'a> {
     }
 
     fn print_expr(&mut self, eid: ExprId) {
-        let expr = &self.m.exprs[eid];
-        match &expr.kind {
+        let kind = &self.m.exprs[eid];
+        match &kind.kind {
             ExprKind::If { cond, then_block, else_arm } => {
-                let mut buf = String::from("If ");
-                self.append_expr(&mut buf, *cond);
-                self.write_line(&buf);
+                let cond = *cond;
+                let then_block = *then_block;
+                let else_arm = else_arm.clone();
+                self.begin_line();
+                self.write("If ");
+                self.append_expr(cond);
+                self.end_line();
                 self.indent += 1;
                 self.write_line("then:");
                 self.indent += 1;
-                self.print_block(*then_block);
+                self.print_block(then_block);
                 self.indent -= 1;
                 if let Some(arm) = else_arm {
                     self.write_line("else:");
                     self.indent += 1;
-                    self.print_else_arm(arm);
+                    self.print_else_arm(&arm);
                     self.indent -= 1;
                 }
                 self.indent -= 1;
             }
-            ExprKind::Block(bid) => self.print_block(*bid),
+            ExprKind::Block(bid) => {
+                let bid = *bid;
+                self.print_block(bid);
+            }
             _ => {
-                let mut buf = String::new();
-                self.append_expr(&mut buf, eid);
-                self.write_line(&buf);
+                self.begin_line();
+                self.append_expr(eid);
+                self.end_line();
             }
         }
     }
 
-    fn append_expr(&self, buf: &mut String, eid: ExprId) {
-        let expr = &self.m.exprs[eid];
-        match &expr.kind {
-            ExprKind::IntLit(n) => write!(buf, "Int({n})").unwrap(),
-            ExprKind::BoolLit(b) => write!(buf, "Bool({b})").unwrap(),
-            ExprKind::CharLit(c) => write!(buf, "Char({c:?})").unwrap(),
-            ExprKind::StrLit(s) => write!(buf, "Str({s:?})").unwrap(),
-            ExprKind::Ident(id) => write!(buf, "Ident({:?})", id.name).unwrap(),
+    fn append_expr(&mut self, eid: ExprId) {
+        let kind = self.m.exprs[eid].kind.clone();
+        match &kind {
+            ExprKind::IntLit(n) => write!(self.out, "Int({n})").unwrap(),
+            ExprKind::BoolLit(b) => write!(self.out, "Bool({b})").unwrap(),
+            ExprKind::CharLit(c) => write!(self.out, "Char({c:?})").unwrap(),
+            ExprKind::StrLit(s) => write!(self.out, "Str({s:?})").unwrap(),
+            ExprKind::Ident(id) => write!(self.out, "Ident({:?})", id.name).unwrap(),
             ExprKind::Paren(inner) => {
-                buf.push('(');
-                self.append_expr(buf, *inner);
-                buf.push(')');
+                self.write("(");
+                self.append_expr(*inner);
+                self.write(")");
             }
             ExprKind::Unary { op, expr } => {
-                write!(buf, "Unary({op:?}, ").unwrap();
-                self.append_expr(buf, *expr);
-                buf.push(')');
+                write!(self.out, "Unary({op:?}, ").unwrap();
+                self.append_expr(*expr);
+                self.write(")");
             }
             ExprKind::Binary { op, lhs, rhs } => {
-                write!(buf, "Binary({op:?}, ").unwrap();
-                self.append_expr(buf, *lhs);
-                buf.push_str(", ");
-                self.append_expr(buf, *rhs);
-                buf.push(')');
+                write!(self.out, "Binary({op:?}, ").unwrap();
+                self.append_expr(*lhs);
+                self.write(", ");
+                self.append_expr(*rhs);
+                self.write(")");
             }
             ExprKind::Assign { op, lhs, rhs } => {
-                write!(buf, "Assign({op:?}, ").unwrap();
-                self.append_expr(buf, *lhs);
-                buf.push_str(", ");
-                self.append_expr(buf, *rhs);
-                buf.push(')');
+                write!(self.out, "Assign({op:?}, ").unwrap();
+                self.append_expr(*lhs);
+                self.write(", ");
+                self.append_expr(*rhs);
+                self.write(")");
             }
             ExprKind::Call { callee, args } => {
-                self.append_expr(buf, *callee);
-                buf.push('(');
+                self.append_expr(*callee);
+                self.write("(");
                 for (i, a) in args.iter().enumerate() {
                     if i > 0 {
-                        buf.push_str(", ");
+                        self.write(", ");
                     }
-                    self.append_expr(buf, *a);
+                    self.append_expr(*a);
                 }
-                buf.push(')');
+                self.write(")");
             }
             ExprKind::Index { base, index } => {
-                self.append_expr(buf, *base);
-                buf.push('[');
-                self.append_expr(buf, *index);
-                buf.push(']');
+                self.append_expr(*base);
+                self.write("[");
+                self.append_expr(*index);
+                self.write("]");
             }
             ExprKind::Field { base, name } => {
-                self.append_expr(buf, *base);
-                write!(buf, ".{}", name.name).unwrap();
+                self.append_expr(*base);
+                self.write(".");
+                self.write(&name.name);
             }
             ExprKind::StructLit { name, fields } => {
-                write!(buf, "StructLit {} {{", name.name).unwrap();
+                self.write("StructLit ");
+                self.write(&name.name);
+                self.write(" {");
                 for (i, f) in fields.iter().enumerate() {
                     if i > 0 {
-                        buf.push_str(", ");
+                        self.write(", ");
                     }
-                    write!(buf, " {}: ", f.name.name).unwrap();
-                    self.append_expr(buf, f.value);
+                    self.write(" ");
+                    self.write(&f.name.name);
+                    self.write(": ");
+                    self.append_expr(f.value);
                 }
                 if !fields.is_empty() {
-                    buf.push(' ');
+                    self.write(" ");
                 }
-                buf.push('}');
+                self.write("}");
             }
             ExprKind::ArrayLit(lit) => match lit {
                 ArrayLit::Elems(es) => {
-                    buf.push('[');
+                    self.write("[");
                     for (i, eid) in es.iter().enumerate() {
                         if i > 0 {
-                            buf.push_str(", ");
+                            self.write(", ");
                         }
-                        self.append_expr(buf, *eid);
+                        self.append_expr(*eid);
                     }
-                    buf.push(']');
+                    self.write("]");
                 }
                 ArrayLit::Repeat { init, len } => {
-                    buf.push('[');
-                    self.append_expr(buf, *init);
-                    buf.push_str("; ");
-                    self.append_expr(buf, *len);
-                    buf.push(']');
+                    self.write("[");
+                    self.append_expr(*init);
+                    self.write("; ");
+                    self.append_expr(*len);
+                    self.write("]");
                 }
             },
             ExprKind::Cast { expr, ty } => {
-                self.append_expr(buf, *expr);
-                write!(buf, " as {}", type_str(self.m, *ty)).unwrap();
+                self.append_expr(*expr);
+                self.write(" as ");
+                self.write_type(*ty);
             }
             ExprKind::AddrOf { mutability, expr } => {
-                buf.push('&');
+                self.write("&");
                 if *mutability == Mutability::Mut {
-                    buf.push_str("mut ");
+                    self.write("mut ");
                 }
-                self.append_expr(buf, *expr);
+                self.append_expr(*expr);
             }
             ExprKind::Let { mutable, name, ty, init } => {
-                buf.push_str("Let ");
+                self.write("Let ");
                 if *mutable {
-                    buf.push_str("mut ");
+                    self.write("mut ");
                 }
-                buf.push_str(&name.name);
+                self.write(&name.name);
                 if let Some(t) = ty {
-                    write!(buf, ": {}", type_str(self.m, *t)).unwrap();
+                    self.write(": ");
+                    self.write_type(*t);
                 }
                 if let Some(init) = init {
-                    buf.push_str(" = ");
-                    self.append_expr(buf, *init);
+                    self.write(" = ");
+                    self.append_expr(*init);
                 }
             }
             ExprKind::Return(val) => {
-                buf.push_str("Return");
+                self.write("Return");
                 if let Some(eid) = val {
-                    buf.push(' ');
-                    self.append_expr(buf, *eid);
+                    self.write(" ");
+                    self.append_expr(*eid);
                 }
             }
-            ExprKind::If { .. } => buf.push_str("If(…)"),
-            ExprKind::Block(_) => buf.push_str("Block(…)"),
-            ExprKind::Poison => buf.push_str("<poison>"),
+            ExprKind::If { .. } => self.write("If(…)"),
+            ExprKind::Block(_) => self.write("Block(…)"),
+            ExprKind::Poison => self.write("<poison>"),
         }
     }
-}
 
-fn type_str(m: &Module, tid: TypeId) -> String {
-    let t = &m.types[tid];
-    match &t.kind {
-        TypeKind::Named(id) => id.name.clone(),
-        TypeKind::Ptr { mutability, pointee } => {
-            format!("*{} {}", mutability.as_str(), type_str(m, *pointee))
-        }
-        TypeKind::Array { elem, len } => match len {
-            None => format!("[{}]", type_str(m, *elem)),
-            Some(eid) => {
-                let mut buf = format!("[{}; ", type_str(m, *elem));
-                append_expr_to_buf(m, &mut buf, *eid);
-                buf.push(']');
-                buf
+    fn write_type(&mut self, tid: TypeId) {
+        let kind = self.m.types[tid].kind.clone();
+        match &kind {
+            TypeKind::Named(id) => self.write(&id.name),
+            TypeKind::Ptr { mutability, pointee } => {
+                self.write("*");
+                self.write(mutability.as_str());
+                self.write(" ");
+                self.write_type(*pointee);
             }
-        },
+            TypeKind::Array { elem, len } => {
+                self.write("[");
+                self.write_type(*elem);
+                if let Some(eid) = len {
+                    self.write("; ");
+                    self.append_expr(*eid);
+                }
+                self.write("]");
+            }
+        }
     }
-}
-
-/// Render an expression for the type-printer's needs (used by `[T; N]` length
-/// rendering). Re-uses Printer's `append_expr` shape but is standalone since
-/// `type_str` is a free function. The `Printer::out` is unused by
-/// `append_expr` (it writes to the passed `buf`), so we give it a sink
-/// `String` to satisfy the borrow.
-fn append_expr_to_buf(m: &Module, buf: &mut String, eid: ExprId) {
-    let mut sink = String::new();
-    let p = Printer { out: &mut sink, m, indent: 0 };
-    p.append_expr(buf, eid);
 }
