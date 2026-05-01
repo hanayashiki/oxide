@@ -1,0 +1,12 @@
+== diagnostics ==
+[E0264] Error: sized array `[u8; 4]` cannot appear by value at an `extern "C"` return
+   ╭─[ error_extern_c_array_by_value_return.ox:2:18 ]
+   │
+ 2 │     fn make() -> [u8; 4];
+   │                  ───┬───  
+   │                     ╰───── array-by-value at C boundary
+   │ 
+   │ Help: C has no calling convention for arrays-by-value; wrap in a pointer (`*const [T; N]` / `*mut [T; N]`) or use an unsized-array pointer (`*const [T]`)
+───╯
+== types ==
+Fn[0] make() -> [u8; 4]

@@ -1,0 +1,7 @@
+== diagnostics ==
+== types ==
+Fn[0] make() -> i32
+  HExprId(0) : u8
+  HExprId(1) : [u8; 1024]
+  HExprId(2) : ()
+  HExprId(3) : i32

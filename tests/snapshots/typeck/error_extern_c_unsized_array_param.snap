@@ -1,0 +1,12 @@
+== diagnostics ==
+[E0269] Error: unsized array `[T]` cannot appear by value at a function parameter
+   ╭─[ error_extern_c_unsized_array_param.ox:2:12 ]
+   │
+ 2 │     fn bad(a: [i32]) -> i32;
+   │            ────┬───  
+   │                ╰───── unsized type at value position
+   │ 
+   │ Help: use a pointer (`*const [T]` / `*mut [T]`) for runtime-sized buffers, or a sized array `[T; N]` if the length is known at compile time
+───╯
+== types ==
+Fn[0] bad(a[Local(0)]: [i32]) -> i32

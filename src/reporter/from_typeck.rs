@@ -1,6 +1,6 @@
 use super::diagnostic::{Diagnostic, Label};
 use super::source_map::FileId;
-use crate::typeck::{MutateOp, SizedPos, TyArena, TypeError};
+use crate::typeck::{MutateOp, ParamOrReturn, SizedPos, TyArena, TypeError};
 
 /// Map a typeck error to a structured diagnostic. Needs the `TyArena` to
 /// render type names (`expected: i32, found: bool`).
@@ -109,10 +109,83 @@ pub fn from_typeck_error(err: &TypeError, file: FileId, tys: &TyArena) -> Diagno
                 .with_help(help)
         }
 
-        // Per spec/09_ARRAY.md "E0261". Note: today's reporter uses
-        // E0261 for `NoFieldOnAdt` as well; the spec reserves E0261
-        // for the array case. Resolving the doc discrepancy is out of
-        // scope here — the rendered text is unambiguous either way.
+        TypeError::ArrayByValueAtExternC { which, ty, span } => {
+            let where_str = match which {
+                ParamOrReturn::Param => "parameter",
+                ParamOrReturn::Return => "return",
+            };
+            Diagnostic::error(
+                "E0264",
+                format!(
+                    "sized array `{}` cannot appear by value at an `extern \"C\"` {where_str}",
+                    tys.render(*ty)
+                ),
+            )
+            .with_label(Label::primary(
+                file,
+                span.clone(),
+                "array-by-value at C boundary",
+            ))
+            .with_help(
+                "C has no calling convention for arrays-by-value; wrap in a pointer \
+                 (`*const [T; N]` / `*mut [T; N]`) or use an unsized-array pointer \
+                 (`*const [T]`)",
+            )
+        }
+
+        TypeError::ArrayLengthMismatch {
+            expected,
+            found,
+            span,
+        } => Diagnostic::error(
+            "E0265",
+            format!(
+                "array length mismatch: expected `{}`, found `{}`",
+                tys.render(*expected),
+                tys.render(*found)
+            ),
+        )
+        .with_label(Label::primary(file, span.clone(), "length mismatch")),
+
+        TypeError::NotIndexable { ty, span } => Diagnostic::error(
+            "E0266",
+            format!("type `{}` cannot be indexed", tys.render(*ty)),
+        )
+        .with_label(Label::primary(file, span.clone(), "not indexable"))
+        .with_help(
+            "indexing requires an array type `[T; N]` / `[T]` or a pointer to one \
+             (`*const [T; N]`, `*mut [T]`, etc.)",
+        ),
+
+        TypeError::IndexNotUsize { found, span } => Diagnostic::error(
+            "E0267",
+            format!(
+                "array index must be `usize`, found `{}`",
+                tys.render(*found)
+            ),
+        )
+        .with_label(Label::primary(file, span.clone(), "index not `usize`"))
+        .with_help("convert with `as usize` if you have an integer of another type"),
+
+        TypeError::ArrayLitElementMismatch {
+            i,
+            expected,
+            found,
+            span,
+        } => Diagnostic::error(
+            "E0268",
+            format!(
+                "array literal element {i} has type `{}`, expected `{}`",
+                tys.render(*found),
+                tys.render(*expected)
+            ),
+        )
+        .with_label(Label::primary(
+            file,
+            span.clone(),
+            "element type differs from element 0",
+        )),
+
         TypeError::UnsizedArrayAsValue { pos, span } => {
             let pos_str = match pos {
                 SizedPos::Param => "function parameter",
@@ -121,7 +194,7 @@ pub fn from_typeck_error(err: &TypeError, file: FileId, tys: &TyArena) -> Diagno
                 SizedPos::LetBinding => "let-binding",
             };
             Diagnostic::error(
-                "E0261",
+                "E0269",
                 format!("unsized array `[T]` cannot appear by value at a {pos_str}"),
             )
             .with_label(Label::primary(

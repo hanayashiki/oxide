@@ -1,0 +1,5 @@
+== diagnostics ==
+== types ==
+Fn[0] get_x(s[Local(0)]: *const Adt(0)) -> i32
+  HExprId(0) : *const Adt(0)
+  HExprId(1) : i32

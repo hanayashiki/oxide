@@ -1,0 +1,16 @@
+== diagnostics ==
+[E0268] Error: array literal element 1 has type `u8`, expected `i32`
+   ╭─[ error_array_lit_element_mismatch.ox:2:27 ]
+   │
+ 2 │     let a = [(1 as i32), (2 as u8)];
+   │                           ───┬───  
+   │                              ╰───── element type differs from element 0
+───╯
+== types ==
+Fn[0] make() -> ()
+  HExprId(0) : i32
+  HExprId(1) : i32
+  HExprId(2) : i32
+  HExprId(3) : u8
+  HExprId(4) : [i32; 2]
+  HExprId(5) : ()

@@ -1,0 +1,6 @@
+== diagnostics ==
+== types ==
+Fn[0] at(p[Local(0)]: *const [i32], i[Local(1)]: usize) -> i32
+  HExprId(0) : *const [i32]
+  HExprId(1) : usize
+  HExprId(2) : i32

@@ -1,0 +1,5 @@
+== diagnostics ==
+== types ==
+Fn[0] make() -> ()
+  HExprId(0) : [(); 0]
+  HExprId(1) : ()

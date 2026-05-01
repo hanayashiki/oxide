@@ -1,0 +1,23 @@
+== diagnostics ==
+[E0265] Error: array length mismatch: expected `[i32; 3]`, found `[i32; 4]`
+   ╭─[ error_array_length_mismatch.ox:5:11 ]
+   │
+ 5 │     want3(a)
+   │           ┬  
+   │           ╰── length mismatch
+───╯
+== types ==
+Fn[0] want3(a[Local(0)]: [i32; 3]) -> i32
+  HExprId(0) : [i32; 3]
+  HExprId(1) : usize
+  HExprId(2) : i32
+  HExprId(3) : i32
+  HExprId(4) : i32
+  HExprId(5) : i32
+  HExprId(6) : i32
+  HExprId(7) : [i32; 4]
+  HExprId(8) : ()
+  HExprId(9) : fn([i32; 3]) -> i32
+  HExprId(10) : [i32; 4]
+  HExprId(11) : i32
+Fn[1] caller() -> i32

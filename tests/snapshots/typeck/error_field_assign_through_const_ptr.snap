@@ -1,0 +1,16 @@
+== diagnostics ==
+[E0263] Error: cannot assign to an immutable place
+   ╭─[ error_field_assign_through_const_ptr.ox:4:5 ]
+   │
+ 4 │     s.x = 1;
+   │     ─┬─  
+   │      ╰─── cannot assign to this
+   │ 
+   │ Help: declare the binding `mut` (e.g. `let mut x` or `fn f(mut x: T)`) to allow assignment
+───╯
+== types ==
+Fn[0] write(s[Local(0)]: *const Adt(0)) -> ()
+  HExprId(0) : *const Adt(0)
+  HExprId(1) : i32
+  HExprId(2) : i32
+  HExprId(3) : ()

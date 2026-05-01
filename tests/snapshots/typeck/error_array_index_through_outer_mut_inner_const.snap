@@ -1,0 +1,17 @@
+== diagnostics ==
+[E0263] Error: cannot assign to an immutable place
+   ╭─[ error_array_index_through_outer_mut_inner_const.ox:2:5 ]
+   │
+ 2 │     p[0] = 1;
+   │     ──┬─  
+   │       ╰─── cannot assign to this
+   │ 
+   │ Help: declare the binding `mut` (e.g. `let mut x` or `fn f(mut x: T)`) to allow assignment
+───╯
+== types ==
+Fn[0] write(p[Local(0)]: *mut *const [i32; 3]) -> ()
+  HExprId(0) : *mut *const [i32; 3]
+  HExprId(1) : usize
+  HExprId(2) : i32
+  HExprId(3) : i32
+  HExprId(4) : ()

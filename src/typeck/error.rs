@@ -72,9 +72,63 @@ pub enum TypeError {
     /// let-binding. `[T]` is `[T; ∞]`-shaped; it has no statically known
     /// stride and therefore can't be allocated, copied, or passed by
     /// value. The fix is to use a pointer (`*const [T]` / `*mut [T]`)
-    /// or a sized form (`[T; N]`). See spec/09_ARRAY.md "E0261".
-    /// E0261.
+    /// or a sized form (`[T; N]`). See spec/09_ARRAY.md.
+    /// E0269.
     UnsizedArrayAsValue { pos: SizedPos, span: Span },
+
+    /// Sized array `[T; N]` appearing by value at an `extern "C"` fn
+    /// parameter or return slot. C has no calling convention for
+    /// arrays-by-value (`int[10] f();` is a syntax error in C, and
+    /// `void f(int arr[10])` silently decays to a pointer). Wrap the
+    /// array in a pointer (`*const [T; N]` / `*mut [T; N]`) or use an
+    /// unsized-array pointer (`*const [T]`). See spec/09_ARRAY.md.
+    /// E0264.
+    ArrayByValueAtExternC {
+        which: ParamOrReturn,
+        ty: TyId,
+        span: Span,
+    },
+
+    /// Two array types with different lengths flowing into the same
+    /// slot (e.g. `let a: [i32; 4] = [1, 2, 3]`, or passing a `[i32; 4]`
+    /// to a parameter expecting `[i32; 3]`). Fired by `unify` when both
+    /// sides are `Array(T, Some(_))` with mismatched length values.
+    /// See spec/09_ARRAY.md. E0265.
+    ArrayLengthMismatch {
+        expected: TyId,
+        found: TyId,
+        span: Span,
+    },
+
+    /// `e[i]` where `e`'s type is not indexable — neither an array
+    /// (`[T; N]` / `[T]`) nor a pointer to one. See spec/09_ARRAY.md.
+    /// E0266.
+    NotIndexable { ty: TyId, span: Span },
+
+    /// `a[i]` where `i`'s type is not `usize`. The index slot is
+    /// strict-`usize`; user must convert with `as usize` (or use an
+    /// untyped int literal, which defaults to `usize` here via the
+    /// int-flagged Infer path). See spec/09_ARRAY.md. E0267.
+    IndexNotUsize { found: TyId, span: Span },
+
+    /// An element in a list array literal `[e0, e1, ..., en]` has a
+    /// type that doesn't unify with the first element's type.
+    /// `i` is the 0-based index of the offending element (≥ 1, since
+    /// element 0 establishes the type). See spec/09_ARRAY.md. E0268.
+    ArrayLitElementMismatch {
+        i: usize,
+        expected: TyId,
+        found: TyId,
+        span: Span,
+    },
+}
+
+/// Discriminator on `ArrayByValueAtExternC` so the diagnostic can
+/// name the offending position.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ParamOrReturn {
+    Param,
+    Return,
 }
 
 /// Discriminator on `MutateImmutable` so the diagnostic can phrase
@@ -112,7 +166,12 @@ impl TypeError {
             | Self::NoFieldOnAdt { span, .. }
             | Self::TypeNotFieldable { span, .. }
             | Self::MutateImmutable { span, .. }
-            | Self::UnsizedArrayAsValue { span, .. } => span,
+            | Self::UnsizedArrayAsValue { span, .. }
+            | Self::ArrayByValueAtExternC { span, .. }
+            | Self::ArrayLengthMismatch { span, .. }
+            | Self::NotIndexable { span, .. }
+            | Self::IndexNotUsize { span, .. }
+            | Self::ArrayLitElementMismatch { span, .. } => span,
             Self::StructLitMissingField { lit_span, .. } => lit_span,
             Self::StructLitDuplicateField { dup, .. } => dup,
         }

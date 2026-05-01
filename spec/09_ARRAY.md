@@ -46,7 +46,7 @@ extern "C" {
 fn read_first(fd: i32) -> u8 {
     let buf: *mut u8 = malloc(64);
     read(fd, buf, 64);
-    // buf[0]    — E0258 (*mut T is not indexable; T isn't an array)
+    // buf[0]    — E0266 (*mut T is not indexable; T isn't an array)
     // *buf      — deferred per 07
     // *(buf+0)  — both deref AND ptr-arith deferred
     // The buffer is genuinely unreachable.
@@ -223,8 +223,7 @@ Source ─▶ tokens ─▶ AST ─▶ HIR ─▶ typeck ─▶ codegen
                                     • HirConst { Lit(u64), Error }
                                     • HirExprKind::ArrayLit
                                     • PrimTy::Usize | PrimTy::Isize
-                                    • ConstArena + ConstId + ConstKind
-                                    • TyKind::Array(_, Option<ConstId>)
+                                    • TyKind::Array(_, Option<u64>)
                                     • Codegen for Array, Index, ArrayLit (incl. llvm.trap guard)
 ```
 
@@ -287,10 +286,25 @@ element list. The parser does **not** reject it. The "needs
 context type to infer the element type" question is a *semantic*
 issue (typeck has to fall back to the let-annotation / fn-arg
 slot type to know `T` in `[T; 0]`), not a syntactic one. Typeck
-handles it: with a context type like `let a: [i32; 0] = [];`,
-the literal types as `[i32; 0]`; without a context type
-(`let a = [];`), typeck emits its standard `cannot infer a type`
-diagnostic, the same as for any unannotated empty container.
+handles it:
+
+- With a context type like `let a: [i32; 0] = [];`, the literal
+  types as `[i32; 0]` via standard unification.
+- Without a context type (`let a = [];`), the elem stays an
+  unbound infer var; finalize defaults it to `()`, yielding
+  `[(); 0]`. Honest default — zero runtime cost (`[(); 0]` is
+  zero bytes; length is zero so no element ever materializes).
+
+The unit-default behavior is an **intentional v0 deviation** from
+Rust, which emits `E0282` "type annotations needed" for `let a =
+[]`. Defaulting to `()` is more ergonomic and unambiguous in the
+empty-length case (the only types that distinguish `[T; 0]` from
+`[U; 0]` are types whose stride matters, and stride is zero either
+way). The typeck-side machinery is a parallel `unit_default`
+BitVec on `Inferer` flipped only by the empty-`[]` arm of
+`infer_array_lit` — see `Inferer.unit_default` in
+`src/typeck/check.rs`. Re-evaluate when bidirectional inference
+lands or if real users want the Rust diagnostic back.
 
 ### Parser ambiguity: array literal in cond position
 
@@ -420,27 +434,44 @@ Pass-3 (lower fn bodies) gains:
 
 ### Place rule
 
-`HirExprKind::Index { base, index }` is a **place expression** when:
+`HirExprKind::Index { base, index }` and `HirExprKind::Field {
+base, name }` are **place expressions** when, after walking through
+any number of outer `Ptr` layers on `base`'s type, the underlying
+type is `Array(_, _)` (for Index) or `Adt(_)` (for Field).
 
-- `base` is a place expression of array type (`Array(_, _)`), OR
-- `base` is a value of pointer type whose pointee is array type
-  (`Ptr(Array(_, _), _)`).
+This is the **recursive auto-deref through Index/Field** rule.
+v0 supports any depth of `Ptr`-wrapping above the array/struct
+because `*p` deref is deferred (`07_POINTER.md` §5); without
+recursive auto-deref, multi-pointer cases like `**[T; N]` /
+`**Struct` would be unreachable. Once `*p` lands, `p[i]` becomes
+`(*p)[i]` and the recursive case falls out of the standard place
+rule. The implementation lives in `Checker::auto_deref_ptr` in
+`src/typeck/check.rs` and is shared between Index typing, Field
+access, and `place_mutability`.
 
-The latter is the **auto-deref through Index** rule — required in
-v0 because `*p` deref is deferred (`07_POINTER.md` §5). Once `*p`
-lands, `p[i]` becomes equivalent to `(*p)[i]` and the auto-deref
-falls out of the standard place rule.
+Mutability of the resulting place:
 
-Mutability of the resulting place inherits from the base:
-
-- Place from `let arr` → read-only place (per the upcoming
-  mut-enforcement in `11_MUTABILITY.md`).
-- Place from `let mut arr` → read-write place.
-- Auto-deref through `*const [T; N]` / `*const [T]` → read-only.
-- Auto-deref through `*mut [T; N]` / `*mut [T]` → read-write.
+- Place from `let arr` / `let s` → read-only place (per
+  `11_MUTABILITY.md`).
+- Place from `let mut arr` / `let mut s` → read-write place.
+- After ≥ 1 `Ptr` peel: the **innermost** `Ptr`'s mut wins —
+  `let p: *mut [T; N]` (immutable binding, mut pointer) makes
+  `p[i] = x` allowed; `let mut p: *const [T; N]` (mut binding,
+  const pointer) does NOT make `p[i] = x` allowed because the
+  innermost pointer is the one addressing the storage.
+  Symmetrically `let q: *mut *const [T; N]` makes `q[i] = x`
+  rejected (innermost is `*const`).
 
 `ArrayLit` is **not** a place — it's a fresh value (allocated to
 a temporary slot at codegen time).
+
+**Divergence from Rust.** Rust does not auto-deref raw pointers
+at all (`*p` deref is unsafe; `(*p).a` is required for `s.a`
+through a raw pointer). We diverge for ergonomics — the C-ish
+stance in `07_POINTER.md` already makes raw pointers a
+first-class everyday tool in Oxide, and forcing explicit deref
+for every field/index access through a pointer would be tedious
+without buying any safety.
 
 ### New errors
 
@@ -454,7 +485,7 @@ spec previously slotted into HIR have moved:
   the first non-`Int` token.
 
 - **Unsized array `[T]` in a value-type position** is rejected at
-  **typeck** (E0261 `UnsizedArrayAsValue`), not HIR. HIR doesn't
+  **typeck** (E0269 `UnsizedArrayAsValue`), not HIR. HIR doesn't
   fully resolve types: a future `type Buf = [i32]` alias would be
   `Named("Buf")` at HIR with the unsized shape only visible after
   typeck resolves the alias. Putting the check at HIR would catch
@@ -491,7 +522,7 @@ HIR adds no new diagnostic arms for arrays — `from_hir_error` in
   reject at HIR.
 - **Length-mismatch in `[T; N]` unify.** Two array types with
   different lengths flowing into the same slot is a typeck error
-  (E0257), not HIR.
+  (E0265), not HIR.
 
 ## Type system changes (`src/typeck/ty.rs`)
 
@@ -535,43 +566,25 @@ nothing changes.
 (`E0250 TypeMismatch`); user must write `some_usize as u64`. Same
 for the other direction.
 
-### ConstArena
+### Length representation
 
-A new hash-cons interner parallel to `TyArena`:
+v0 stores array length **inline** as `Option<u64>` on
+`TyKind::Array`. An earlier draft of this spec introduced a
+`ConstArena` / `ConstId` / `ConstKind` interner parallel to
+`TyArena` for forward-compatibility with const generics. That
+layer was **dropped**: it added plumbing through every
+type-resolution call site (`resolve_ty`, the reporter, the test
+renderer, `Checker` / `TypeckResults` fields) for **zero v0
+benefit** — lengths come straight from `IntLit` parser tokens, and
+`TyArena` already hash-conses `TyKind::Array(_, Option<u64>)` for
+identity (so `[i32; 3]` and `[i32; 3]` collapse to the same
+`TyId`).
 
-```rust
-index_vec::define_index_type! { pub struct ConstId = u32; }
-
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub enum ConstKind {
-    Value(u64),
-    Error,
-}
-
-pub struct ConstArena {
-    arena: IndexVec<ConstId, ConstKind>,
-    interner: HashMap<ConstKind, ConstId>,
-    pub error: ConstId,
-}
-
-impl ConstArena {
-    pub fn new() -> Self;
-    pub fn intern(&mut self, kind: ConstKind) -> ConstId;
-    pub fn kind(&self, id: ConstId) -> &ConstKind;
-    pub fn value_of(&self, id: ConstId) -> Option<u64>;  // None for Error
-    pub fn render(&self, id: ConstId) -> String;
-}
-```
-
-The `u64` stored in `ConstKind::Value` is the **physical bag** for
-type-level integers regardless of whether the source-level slot
-type is `usize`, `u64`, or anything else. Today every length slot
-uses `usize` semantically; the `u64` storage is an implementation
-detail.
-
-Future extension: `ConstKind::Param(ConstParamIdx)` for const
-generics. Adding it is purely additive — the v0 code's pattern
-matches stay correct, just gain a new arm to handle.
+Const generics will introduce a richer length representation
+(param indices, const inference vars, an evaluator) when that
+spec lands; refactoring `Option<u64>` into the new shape is a
+bounded mechanical change. Until then, the inline representation
+is the honest design.
 
 ### TyKind extension
 
@@ -582,46 +595,25 @@ pub enum TyKind {
     Never,
     Fn(Vec<TyId>, TyId),
     Ptr(TyId, Mutability),
-    Array(TyId, Option<ConstId>),                // NEW — None = [T]; Some(c) = [T; c]
+    Array(TyId, Option<u64>),                    // NEW — None = [T]; Some(n) = [T; n]
     Infer(InferId),
     Error,
 }
 ```
 
 `Array(elem, None)` is unified-array-kind for `[T]`; `Array(elem,
-Some(cid))` is `[T; consts.kind(cid)]`. Hash-cons interns by the
-pair, so `[i32; 3]` and `[i32; 3]` collapse to the same `TyId`
-once both `i32`'s `TyId` and the `ConstId` for `Value(3)` are
-themselves interned.
-
-### TypeckResults extension
-
-```rust
-pub struct TypeckResults {
-    pub tys: TyArena,
-    pub consts: ConstArena,                      // NEW
-    pub adts: IndexVec<HAdtId, AdtDef>,
-    pub fn_sigs: IndexVec<FnId, FnSig>,
-    pub local_tys: IndexVec<LocalId, TyId>,
-    pub expr_tys: IndexVec<HExprId, TyId>,
-}
-```
-
-`consts` lives next to `adts` for the same reason `adts` lives
-on `TypeckResults` rather than `TyArena`: structural per-id data
-keyed by an interner, distinct from the hash-cons identity layer.
+Some(n))` is `[T; n]`. Hash-cons interns by the pair, so
+`[i32; 3]` and `[i32; 3]` collapse to the same `TyId` once `i32`'s
+`TyId` is itself interned.
 
 ### Render
 
 `TyArena::render` for `Array(elem, len_opt)`:
 
 - If `len_opt == None`: `[<elem>]`
-- If `len_opt == Some(cid)` and `ConstArena` is in scope:
-  `[<elem>; <consts.render(cid)>]`
-- Fallback (no `ConstArena` in scope): `[<elem>; ?N]`
+- If `len_opt == Some(n)`: `[<elem>; <n>]`
 
-The `?N` fallback mirrors `08_ADT.md`'s `Adt(N)` fallback. Full
-rendering goes through a `TypeckResults::render(ty)` helper.
+No `ConstArena` indirection — the length is right there.
 
 ## Typeck rules (`src/typeck/check.rs`)
 
@@ -632,11 +624,11 @@ One arm covers both array variants via the inner `Option`:
 ```rust
 HirTyKind::Array(elem, hconst_opt) => {
     let elem_id = resolve_named_ty(elem, ...);
-    let cid_opt = hconst_opt.as_ref().map(|hc| match hc {
-        HirConst::Lit(n) => consts.intern(ConstKind::Value(*n)),
-        HirConst::Error  => consts.error,
+    let len_opt = hconst_opt.as_ref().map(|hc| match hc {
+        HirConst::Lit(n) => *n,
+        HirConst::Error  => unreachable!("parser+lower guarantee Lit"),
     });
-    tys.intern(TyKind::Array(elem_id, cid_opt))
+    tys.intern(TyKind::Array(elem_id, len_opt))
 }
 ```
 
@@ -646,43 +638,53 @@ HirTyKind::Array(elem, hconst_opt) => {
 infer_index(base, idx) -> TyId:
     base_ty = infer_expr(base)
     idx_ty  = infer_expr(idx)
-    coerce_or_unify(idx_ty, tys.usize)              // strict usize, see note below
-    match base_ty:
+    unify_with(MismatchCtx::IndexNotUsize, idx_ty, tys.usize)   // strict usize
+    (peeled, _) = auto_deref_ptr(resolve(base_ty))               // recursive auto-deref
+    match peeled:
         Array(elem, _)                                  -> elem
-        Ptr(inner, _) where kind(inner) is Array(_,_)   -> elem of inner    // auto-deref
-        _                                                -> emit E0258 NotIndexable; Error
+        _                                                -> emit E0266 NotIndexable; Error
 ```
 
-Two arms handle four call shapes (sized vs unsized × direct vs
-pointer-base) — the `Some(N)` vs `None` distinction defers to
-codegen.
+The `auto_deref_ptr` helper peels arbitrarily many `Ptr` layers
+(see "Place rule" below for the rationale and innermost-mut rule).
+Sized vs unsized array (`Some(N)` vs `None`) doesn't affect the
+type result; the distinction defers to codegen for the bounds
+check.
 
 **Note on "strict usize":** the index type must be exactly `usize`
 (no implicit widening from `i32` etc.). Users write
 `some_i32 as usize` to convert. This mirrors Rust verbatim and
 keeps the typeck rule trivial. Diagnostic on mismatch is
-`E0259 IndexNotUsize`.
+`E0267 IndexNotUsize` — emitted via the `MismatchCtx::IndexNotUsize`
+arm of `unify_with` rather than a separate pre-unify check, so
+unbound int-flagged Infer indices (the IntLit case) bind to
+`usize` cleanly via `bind_infer_checked` and only concrete
+non-usize ints (`let i: i32 = 0; a[i]`) hit the diagnostic.
 
 ### Array literal typing rule
 
 ```text
 infer_array_lit(lit) -> TyId:
     match lit:
-        Elems([])       -> /* parser already rejected; defensive Error */
+        Elems([])       -> elem = fresh_infer_with_unit_default()
+                           tys.intern(Array(elem, Some(0)))   /* see "empty []" above */
         Elems(es) where es.len() == n:
             t = infer_expr(es[0])
-            for e in es[1..]:
-                unify(infer_expr(e), t) or emit E0260 ArrayLitElementMismatch
-            cid = consts.intern(ConstKind::Value(n as u64))
-            tys.intern(Array(t, Some(cid)))
+            for (i, e) in es[1..].iter().enumerate():
+                unify_with(MismatchCtx::ArrayLitElement{i+1}, infer_expr(e), t)
+                /* mismatch fires E0268 ArrayLitElementMismatch */
+            tys.intern(Array(t, Some(n as u64)))
         Repeat { init, len: HirConst::Lit(n) }:
             t = infer_expr(init)
-            cid = consts.intern(ConstKind::Value(n))
-            tys.intern(Array(t, Some(cid)))
+            tys.intern(Array(t, Some(n)))
         Repeat { init, len: HirConst::Error }:
-            t = infer_expr(init)
-            tys.intern(Array(t, Some(consts.error)))
+            unreachable!  /* parser+lower guarantee Lit; reserved for future const-eval */
 ```
+
+Element-mismatch diagnostics route through `unify_with`'s
+`MismatchCtx::ArrayLitElement { i }` arm rather than dup-ing
+`unify`'s body or post-hoc swapping `TypeMismatch` errors. See
+`MismatchCtx` in `src/typeck/check.rs`.
 
 ### Coercions (extending `07_POINTER.md`)
 
@@ -701,10 +703,19 @@ and the existing mutability subtype passes, the inner step
 Reverse direction is **not** offered as a coerce — users must use
 an explicit `as` cast.
 
-`unify` is unchanged. Equality of array types is structural:
-`Array(T1, c1) ~ Array(T2, c2)` succeeds iff `T1 ~ T2` and
-`c1 == c2` (interned ConstId equality). Length mismatch is
-`E0257 ArrayLengthMismatch`.
+`unify` gains an Array arm. Equality of array types is
+structural: `Array(T1, c1) ~ Array(T2, c2)` recurses on elem
+(strict, no element variance) and on length:
+
+- both `None` → OK.
+- both `Some(n)` and `n1 == n2` → OK.
+- both `Some(_)` and lengths differ → `E0265 ArrayLengthMismatch`
+  (fires from unify directly).
+- mixed `Some/None` → silently passes at unify (this case only
+  arises when recursion descends from a Ptr-Ptr coerce site;
+  bare arrays of type `[T]` never reach unify because `[T]` can't
+  be a value, per the Sized obligation). The directional
+  length-erasure judgement is then made at coerce discharge.
 
 ### ABI: array-by-value across `extern "C"` boundaries
 
@@ -717,10 +728,10 @@ TBD-T7) and applies the **same rule to arrays**:
 
 | Position | `Array(_, Some(N))` | `Array(_, None)` |
 |---|---|---|
-| Internal fn parameter | ✓ — LLVM internal ABI | ✗ — not a value type anywhere (E0261) |
+| Internal fn parameter | ✓ — LLVM internal ABI | ✗ — not a value type anywhere (E0269) |
 | Internal fn return | ✓ — LLVM internal ABI (memcpy / sret) | ✗ |
-| `extern "C"` fn parameter | ✗ — E0264 ArrayByValueAtExternC | ✗ — already E0261 |
-| `extern "C"` fn return | ✗ — E0264 ArrayByValueAtExternC | ✗ — already E0261 |
+| `extern "C"` fn parameter | ✗ — E0264 ArrayByValueAtExternC | ✗ — already E0269 |
+| `extern "C"` fn return | ✗ — E0264 ArrayByValueAtExternC | ✗ — already E0269 |
 | `let` binding init / `=` rhs | ✓ — Model 2 copy via memcpy | n/a |
 
 Internal-ABI rationale: we have value semantics for whole-array
@@ -750,7 +761,7 @@ extern "C" {
 E0264 fires at typeck-time; the check walks every `extern "C"`
 fn signature and rejects `Array(_, Some(_))` at parameter or
 return positions. Unsized arrays are already rejected at value
-positions everywhere (E0261), so E0264 only specifically
+positions everywhere (E0269), so E0264 only specifically
 targets the sized form at the C boundary.
 
 ### Mutability composition
@@ -777,27 +788,25 @@ present at the source.
 ```rust
 pub enum TypeError {
     ...
-    ArrayLengthMismatch       { expected: u64, got: u64, span: Span },     // E0257
-    NotIndexable              { ty: TyId, span: Span },                     // E0258
-    IndexNotUsize             { got: TyId, span: Span },                    // E0259
-    ArrayLitElementMismatch   { i: usize, expected: TyId, got: TyId, span: Span }, // E0260
-    UnsizedArrayAsValue       { span: Span },                               // E0261
-    ArrayLenZeroForbidden     { span: Span },                               // E0262 (reserved)
-    /* E0263 reserved by 10_ADDRESS_OF for MutateImmutable */
-    ArrayByValueAtExternC     { which: ParamOrReturn, span: Span },         // E0264
+    ArrayByValueAtExternC     { which: ParamOrReturn, ty: TyId, span: Span }, // E0264
+    ArrayLengthMismatch       { expected: TyId, found: TyId, span: Span },    // E0265
+    NotIndexable              { ty: TyId, span: Span },                       // E0266
+    IndexNotUsize             { found: TyId, span: Span },                    // E0267
+    ArrayLitElementMismatch   { i: usize, expected: TyId, found: TyId, span: Span }, // E0268
+    UnsizedArrayAsValue       { pos: SizedPos, span: Span },                  // E0269
 }
 
 pub enum ParamOrReturn { Param, Return }
 ```
 
-E0261 is the **single source of truth** for "unsized array in
+E0269 is the **single source of truth** for "unsized array in
 value position." HIR doesn't reject this — it can't, because
 type aliases (a future feature) would produce `Named(_)` at HIR
 and only typeck would see through them to `[T]`. Typeck checks
 the resolved type at every value-type slot (let-binding
 annotation, fn parameter, fn return, struct field).
 
-E0261 fires from the `Sized` obligation discharge — see
+E0269 fires from the `Sized` obligation discharge — see
 spec/05_TYPE_CHECKER.md "Obligations". The obligation is enqueued
 at each value position during signature resolution
 (`decl::resolve_decls`) and during body inference at let-bindings;
@@ -805,19 +814,8 @@ discharge runs at module level after every fn has been checked,
 inspects the fully-resolved type, and emits the diagnostic if the
 type is `TyKind::Array(_, None)`.
 
-**Status note.** As of this writing, full Array typeck (HirTy
-lowering for `[T]` / `[T; N]`) is not yet wired through; no current
-code path produces `TyKind::Array(_, None)`, so today every Sized
-discharge is a no-op. The infrastructure is in place so that when
-arrays activate (Step 4/5 below), the check fires correctly without
-an architectural change.
-
-E0262 is **reserved** (defer flag). v0 allows zero-length arrays
-(`[i32; 0]`); the code is reserved in case a future iteration
-forbids them.
-
 E0264 specifically fires for sized arrays at the C boundary;
-unsized arrays at the boundary are already caught by E0261
+unsized arrays at the boundary are already caught by E0269
 since they aren't value types.
 
 ## Codegen (`src/codegen/`)
@@ -827,13 +825,12 @@ since they aren't value types.
 ```rust
 match ty.kind() {
     ...
-    TyKind::Array(elem, Some(cid)) => {
-        let n = consts.value_of(cid).expect("array length must be Value(_)");
-        elem_ll.array_type(n as u32).into()
+    TyKind::Array(elem, Some(n)) => {
+        elem_ll.array_type(*n as u32).into()
     }
     TyKind::Array(_, None) => {
         unreachable!("[T] (Array(_, None)) is not a value type; \
-                      typeck E0261 should have rejected before codegen")
+                      typeck E0269 should have rejected before codegen")
     }
     TyKind::Prim(PrimTy::Usize) | TyKind::Prim(PrimTy::Isize) => {
         ctx.i64_type().into()         // target-fixed at 64-bit; future target awareness
@@ -847,18 +844,16 @@ match ty.kind() {
 ```text
 codegen_index(base_id, idx_id) -> BasicValueEnum:
     match base_ty:
-        Array(T, Some(cid)):
+        Array(T, Some(n)):
             base_ptr = lvalue(base_id)              # alloca for the array
             idx_v    = codegen_expr(idx_id)         # i64 (usize == i64)
-            n        = consts.value_of(cid).unwrap()
             emit_bounds_guard(idx_v, n)             # llvm.trap on OOB
             elt_ptr  = GEP [N x T] base_ptr, 0, idx_v
             load T from elt_ptr
 
-        Ptr(Array(T, Some(cid)), _):
+        Ptr(Array(T, Some(n)), _):
             base_ptr = codegen_expr(base_id)        # the pointer value
             idx_v    = codegen_expr(idx_id)
-            n        = consts.value_of(cid).unwrap()
             emit_bounds_guard(idx_v, n)
             elt_ptr  = GEP [N x T] base_ptr, 0, idx_v
             load T from elt_ptr
@@ -870,7 +865,7 @@ codegen_index(base_id, idx_id) -> BasicValueEnum:
             load T from elt_ptr
 
         Array(T, None):
-            unreachable!("rejected by typeck E0261")
+            unreachable!("rejected by typeck E0269")
 ```
 
 `emit_bounds_guard`:
@@ -1024,7 +1019,7 @@ main locals: a (LocalId 0), b (LocalId 1)
 first locals: a (LocalId 0)
 
 Types:
-  [i32; 3] = TyKind::Array(i32_id, Some(consts.intern(Value(3))))
+  [i32; 3] = TyKind::Array(i32_id, Some(3))
 ```
 
 LLVM IR sketch (main):
@@ -1149,7 +1144,7 @@ fn want3(a: [i32; 3]) -> i32 { a[0] }
 
 fn caller() -> i32 {
     let a: [i32; 4] = [1, 2, 3, 4];
-    want3(a)                                     // E0257 ArrayLengthMismatch
+    want3(a)                                     // E0265 ArrayLengthMismatch
 }
 ```
 
@@ -1196,15 +1191,24 @@ Diagnostic: *"sized array `[i32; 3]` cannot appear by value at an
 | Code | Variant | Layer |
 |---|---|---|
 | E0101 | `UnexpectedToken` — non-`IntLit` in `[T; N]` / `[init; N]` length slot lands on the existing generic parse-error code | parser |
-| E0257 | `ArrayLengthMismatch` | typeck |
-| E0258 | `NotIndexable` | typeck |
-| E0259 | `IndexNotUsize` | typeck |
-| E0260 | `ArrayLitElementMismatch` | typeck |
-| E0261 | `UnsizedArrayAsValue` | typeck |
-| E0262 | `ArrayLenZeroForbidden` (reserved) | typeck |
 | E0264 | `ArrayByValueAtExternC` | typeck |
+| E0265 | `ArrayLengthMismatch` | typeck |
+| E0266 | `NotIndexable` | typeck |
+| E0267 | `IndexNotUsize` | typeck |
+| E0268 | `ArrayLitElementMismatch` | typeck |
+| E0269 | `UnsizedArrayAsValue` | typeck |
 
-E0263 is reserved by `10_ADDRESS_OF.md` for `MutateImmutable`.
+**Code allocation note.** Earlier drafts of this spec assumed the
+array errors would land at E0257–E0261. By the time array typeck
+went in, those slots had been claimed by pointer + struct-lit
+errors that landed first (E0257 `PointerMutabilityMismatch`,
+E0258 `StructLitUnknownField`, E0259 `StructLitMissingField`,
+E0260 `StructLitDuplicateField`, E0261 `NoFieldOnAdt`). The array
+errors moved to E0264–E0269, and `UnsizedArrayAsValue`
+specifically moved from E0261 to E0269 (older `NoFieldOnAdt`
+keeps E0261). E0263 is reserved by `10_ADDRESS_OF.md` for
+`MutateImmutable`. E0262 is unallocated and reserved for future
+use (`ArrayLenZeroForbidden` was a planned-but-unused defer flag).
 
 ## Out of scope
 

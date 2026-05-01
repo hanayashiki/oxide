@@ -1,0 +1,17 @@
+== diagnostics ==
+[E0267] Error: array index must be `usize`, found `i32`
+   ╭─[ error_index_not_usize.ox:3:5 ]
+   │
+ 3 │     a[i]
+   │     ──┬─  
+   │       ╰─── index not `usize`
+   │ 
+   │ Help: convert with `as usize` if you have an integer of another type
+───╯
+== types ==
+Fn[0] f(a[Local(0)]: [i32; 3]) -> i32
+  HExprId(0) : i32
+  HExprId(1) : ()
+  HExprId(2) : [i32; 3]
+  HExprId(3) : i32
+  HExprId(4) : i32

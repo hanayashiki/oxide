@@ -19,12 +19,6 @@ index_vec::define_index_type! { pub struct InferId = u32; }
 // the indirection leaves room for future generic-instantiation
 // many-to-one without renaming every `Adt(_)` site.
 index_vec::define_index_type! { pub struct AdtId   = u32; }
-// Type-level constants — interned identity for length expressions in
-// `TyKind::Array(_, Some(ConstId))`. Today only `ConstKind::Value(u64)`
-// and `ConstKind::Error` are produced; future const-generics work adds
-// `Param(idx)` / `Infer(_)` variants without reshaping callers. See
-// spec/09_ARRAY.md "ConstArena".
-index_vec::define_index_type! { pub struct ConstId = u32; }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum TyKind {
@@ -44,31 +38,19 @@ pub enum TyKind {
     /// lives in `TypeckResults.adts[aid]`; equality is `aid == aid`.
     /// See `spec/08_ADT.md` "Typeck phase ordering and ADT vocabulary".
     Adt(AdtId),
-    /// `[T; N]` (sized — `Some(c)`) or `[T]` (unsized — `None`). The
+    /// `[T; N]` (sized — `Some(n)`) or `[T]` (unsized — `None`). The
     /// unified shape mirrors the `[T] ≡ [T; ∞]` mental model directly.
-    /// `Array(_, None)` is rejected as a value type at typeck (E0261);
+    /// `Array(_, None)` is rejected as a value type at typeck (E0269);
     /// HIR carries the shape through unchanged so typeck can see
-    /// through type aliases (future). See spec/09_ARRAY.md.
-    Array(TyId, Option<ConstId>),
+    /// through type aliases (future). Length is stored inline as `u64`
+    /// — earlier draft used a `ConstArena` interner but that layer was
+    /// dropped (zero v0 benefit; const generics will reintroduce a
+    /// richer length representation when that spec lands). See
+    /// spec/09_ARRAY.md.
+    Array(TyId, Option<u64>),
     /// Unification variable; resolved via the per-fn `Inferer`.
     Infer(InferId),
     /// Poison; absorbs without further errors.
-    Error,
-}
-
-/// Type-level constant value (today, only u64 lengths).
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub enum ConstKind {
-    /// Concrete `u64` value. Our analog to Rust's `usize` const value —
-    /// we don't have `usize` as a separate type-level integer, so the
-    /// physical bag is `u64` regardless of whether the source-level slot
-    /// is rendered as `usize` or `u64`.
-    Value(u64),
-    /// Recovery placeholder. Absorbs cleanly downstream so a failed
-    /// length extraction doesn't poison unrelated checks. v0 never
-    /// produces this — the parser rejects non-`IntLit` lengths — but
-    /// the variant is retained for forward-compatibility with a
-    /// future ICE evaluator.
     Error,
 }
 
@@ -178,61 +160,6 @@ pub struct TyArena {
     pub unit: TyId,
     pub never: TyId,
     pub error: TyId,
-}
-
-/// Hash-cons interner for type-level constants. Parallel to `TyArena`.
-/// Equal `ConstKind`s share a `ConstId`. See spec/09_ARRAY.md.
-#[derive(Clone, Debug)]
-pub struct ConstArena {
-    arena: IndexVec<ConstId, ConstKind>,
-    interner: HashMap<ConstKind, ConstId>,
-    pub error: ConstId,
-}
-
-impl Default for ConstArena {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ConstArena {
-    pub fn new() -> Self {
-        let mut arena = IndexVec::<ConstId, ConstKind>::new();
-        let mut interner = HashMap::new();
-        let error_kind = ConstKind::Error;
-        let error = arena.push(error_kind.clone());
-        interner.insert(error_kind, error);
-        Self { arena, interner, error }
-    }
-
-    pub fn intern(&mut self, kind: ConstKind) -> ConstId {
-        if let Some(&id) = self.interner.get(&kind) {
-            return id;
-        }
-        let id = self.arena.push(kind.clone());
-        self.interner.insert(kind, id);
-        id
-    }
-
-    pub fn kind(&self, id: ConstId) -> &ConstKind {
-        &self.arena[id]
-    }
-
-    /// Resolved `u64` value, or `None` for `Error`.
-    pub fn value_of(&self, id: ConstId) -> Option<u64> {
-        match self.kind(id) {
-            ConstKind::Value(n) => Some(*n),
-            ConstKind::Error => None,
-        }
-    }
-
-    /// Render for diagnostics. `Error` renders as `?`.
-    pub fn render(&self, id: ConstId) -> String {
-        match self.kind(id) {
-            ConstKind::Value(n) => n.to_string(),
-            ConstKind::Error => "?".to_string(),
-        }
-    }
 }
 
 impl Default for TyArena {
@@ -350,13 +277,8 @@ impl TyArena {
             // print just the identity. A future `TypeckResults`-aware
             // Printer can resolve the name. See spec/08_ADT.md "Render".
             TyKind::Adt(aid) => format!("Adt({})", aid.raw()),
-            // Bare arena rendering also doesn't have access to `ConstArena`.
-            // Print `[T]` for unsized; for sized, print the raw ConstId
-            // index — a `TypeckResults`-aware printer can render the value.
             TyKind::Array(elem, None) => format!("[{}]", self.render(*elem)),
-            TyKind::Array(elem, Some(cid)) => {
-                format!("[{}; ?C{}]", self.render(*elem), cid.raw())
-            }
+            TyKind::Array(elem, Some(n)) => format!("[{}; {}]", self.render(*elem), n),
             TyKind::Infer(id) => format!("?T{}", id.raw()),
             TyKind::Error => "{error}".to_string(),
         }

@@ -1,0 +1,6 @@
+== diagnostics ==
+== types ==
+Fn[0] f(p[Local(0)]: *const [i32; 3]) -> i32
+  HExprId(0) : *const [i32; 3]
+  HExprId(1) : usize
+  HExprId(2) : i32

@@ -1,0 +1,17 @@
+== diagnostics ==
+[E0266] Error: type `i32` cannot be indexed
+   ╭─[ error_index_non_array.ox:3:5 ]
+   │
+ 3 │     x[0]
+   │     ──┬─  
+   │       ╰─── not indexable
+   │ 
+   │ Help: indexing requires an array type `[T; N]` / `[T]` or a pointer to one (`*const [T; N]`, `*mut [T]`, etc.)
+───╯
+== types ==
+Fn[0] f() -> i32
+  HExprId(0) : i32
+  HExprId(1) : ()
+  HExprId(2) : i32
+  HExprId(3) : usize
+  HExprId(4) : {error}

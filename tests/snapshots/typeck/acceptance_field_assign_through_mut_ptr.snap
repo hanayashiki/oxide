@@ -1,0 +1,7 @@
+== diagnostics ==
+== types ==
+Fn[0] set_x(s[Local(0)]: *mut Adt(0)) -> ()
+  HExprId(0) : *mut Adt(0)
+  HExprId(1) : i32
+  HExprId(2) : i32
+  HExprId(3) : ()

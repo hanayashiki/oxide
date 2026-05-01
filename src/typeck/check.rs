@@ -27,8 +27,8 @@ mod obligation;
 use index_vec::IndexVec;
 
 use crate::hir::{
-    FnId, HBlockId, HElseArm, HExprId, HirArrayLit, HirExpr, HirExprKind, HirLocal, HirModule,
-    HirStructLitField, HirTy, HirTyKind, LocalId, VariantIdx,
+    FnId, HBlockId, HElseArm, HExprId, HirArrayLit, HirConst, HirExpr, HirExprKind, HirLocal,
+    HirModule, HirStructLitField, HirTy, HirTyKind, LocalId, VariantIdx,
 };
 use crate::lexer::Span;
 use crate::parser::ast::{AssignOp, BinOp, Mutability, UnOp};
@@ -36,6 +36,43 @@ use crate::parser::ast::{AssignOp, BinOp, Mutability, UnOp};
 use self::obligation::Obligation;
 use super::error::{MutateOp, SizedPos, TypeError};
 use super::ty::{AdtDef, AdtId, FnSig, InferId, TyArena, TyId, TyKind};
+
+/// Context for diagnostic construction at a `unify` mismatch site.
+/// Passed through `unify_with` so the same recursive `unify` body can
+/// produce different `TypeError` variants depending on the calling
+/// context (array-literal-element check, index-must-be-usize, etc.)
+/// without duplicating the `unify` body or doing post-hoc error swap.
+///
+/// Recursive `unify` calls inside the body propagate the same `ctx`,
+/// so structured types (Fn-Fn, Ptr-Ptr, Array-Array) terminating in a
+/// primitive mismatch still emit the contextualized error. Slightly
+/// imprecise for nested types (e.g. `[fn() -> i32, fn() -> u8]` reports
+/// `ArrayLitElementMismatch` with the inner i32-vs-u8 pair), but the
+/// alternative — resetting `ctx` at recursion boundaries — would lose
+/// the array-element framing entirely on a generic `TypeMismatch`.
+#[derive(Clone, Copy)]
+pub(super) enum MismatchCtx {
+    Default,
+    ArrayLitElement { i: usize },
+    IndexNotUsize,
+}
+
+fn build_mismatch(ctx: MismatchCtx, expected: TyId, found: TyId, span: Span) -> TypeError {
+    match ctx {
+        MismatchCtx::Default => TypeError::TypeMismatch {
+            expected,
+            found,
+            span,
+        },
+        MismatchCtx::ArrayLitElement { i } => TypeError::ArrayLitElementMismatch {
+            i,
+            expected,
+            found,
+            span,
+        },
+        MismatchCtx::IndexNotUsize => TypeError::IndexNotUsize { found, span },
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct TypeckResults {
@@ -107,6 +144,13 @@ struct Checker<'hir> {
 struct Inferer {
     bindings: IndexVec<InferId, Option<TyId>>,
     int_default: IndexVec<InferId, bool>,
+    /// Parallel to `int_default`. Set on the elem var of an empty array
+    /// literal `[]` so finalize defaults the unbound var to `unit`
+    /// (yielding `[(); 0]`) instead of `error`. Honest default for
+    /// "an empty container of nothing" — zero runtime cost (`[(); 0]`
+    /// is zero bytes; length is 0). Intentional v0 deviation from
+    /// Rust's E0282; see spec/09_ARRAY.md.
+    unit_default: IndexVec<InferId, bool>,
     /// Errors emitted while this fn body was being inferred. TyId fields
     /// inside may still point at unresolved `Infer` vars; `Checker::finalize`
     /// resolves them post-defaulting before flushing into `Checker.errors`.
@@ -128,6 +172,7 @@ impl Inferer {
         Self {
             bindings: IndexVec::new(),
             int_default: IndexVec::new(),
+            unit_default: IndexVec::new(),
             errors: Vec::new(),
             obligations: Vec::new(),
             cur_ret,
@@ -136,6 +181,16 @@ impl Inferer {
     fn new_var(&mut self, int_default: bool) -> InferId {
         let id = self.bindings.push(None);
         let _ = self.int_default.push(int_default);
+        let _ = self.unit_default.push(false);
+        id
+    }
+    /// Allocate a fresh infer var that defaults to `()` if unbound at
+    /// finalize time (vs. `i32` for int-flagged vars and `error` for
+    /// plain ones). Used by the empty-`[]` arm of `infer_array_lit`.
+    fn new_var_unit_default(&mut self) -> InferId {
+        let id = self.bindings.push(None);
+        let _ = self.int_default.push(false);
+        let _ = self.unit_default.push(true);
         id
     }
     fn bind(&mut self, id: InferId, ty: TyId) {
@@ -187,16 +242,21 @@ impl<'hir> Checker<'hir> {
     }
 
     fn finalize(&mut self, mut inf: Inferer) {
-        // Default unconstrained int vars to i32; bind anything else still
-        // unresolved to error (silent — we get implicit "{error}" propagation
-        // and any cascading mismatches will already have been reported).
+        // Default unconstrained vars per their flagged-default precedence:
+        // int_default → i32 (most numeric literals); unit_default → ()
+        // (empty `[]` elem, see spec/09_ARRAY.md); else → error (silent
+        // — implicit "{error}" propagation; cascading mismatches were
+        // already reported).
         let i32_id = self.tys.i32;
+        let unit_id = self.tys.unit;
         let error_id = self.tys.error;
         for raw in 0..inf.bindings.len() {
             let id = InferId::from_raw(raw as u32);
             if inf.bindings[id].is_none() {
                 inf.bindings[id] = Some(if inf.int_default[id] {
                     i32_id
+                } else if inf.unit_default[id] {
+                    unit_id
                 } else {
                     error_id
                 });
@@ -276,6 +336,13 @@ impl<'hir> Checker<'hir> {
     /// (recursive). Non-Ptr-Ptr inputs are no-ops — `unify`'s
     /// shape-mismatch diagnostic has already fired during the eager
     /// half of `coerce`. See spec/07_POINTER.md.
+    ///
+    /// Array length erasure under outer Ptr: after the mut subtype
+    /// passes, an inner `Array(T, Some(_))` on actual / `Array(T, None)`
+    /// on expected is accepted (length erasure — `*M [T; N] → *M [T]`).
+    /// Reverse direction (`None → Some`) is rejected as a shape
+    /// mismatch — explicit `as` cast required. See spec/09_ARRAY.md
+    /// "Coercions".
     fn discharge_coerce(&mut self, actual: TyId, expected: TyId, span: Span) {
         let (a_pt, a_mut, e_pt, e_mut) = match (self.tys.kind(actual), self.tys.kind(expected)) {
             (&TyKind::Ptr(ap, am), &TyKind::Ptr(ep, em)) => (ap, am, ep, em),
@@ -296,7 +363,34 @@ impl<'hir> Checker<'hir> {
     /// position. Shape mismatches under here have already been caught
     /// by the eager `unify` body of `coerce`; this only emits errors
     /// for mutability divergence at inner layers.
+    ///
+    /// Special case: under outer Ptr, `Array(T, Some(_))` on actual /
+    /// `Array(T, None)` on expected is the length-erasure coercion —
+    /// accept silently. The reverse direction is a shape mismatch
+    /// requiring explicit `as`; emit `PointerMutabilityMismatch` as
+    /// the closest existing diagnostic (TODO: dedicated message).
     fn discharge_ptr_inner_eq(&mut self, a: TyId, b: TyId, span: Span) {
+        // Length erasure: actual `Array(T, Some(_))` → expected `Array(T, None)`
+        // (under the outer Ptr we just peeled). Accept silently.
+        if let (TyKind::Array(_, Some(_)), TyKind::Array(_, None)) =
+            (self.tys.kind(a), self.tys.kind(b))
+        {
+            return;
+        }
+        // Reverse direction: actual unsized, expected sized.
+        // Shape mismatch requiring explicit `as`. Emit a diagnostic
+        // so the user gets a concrete signal (`unify`'s mixed Some/None
+        // arm passes silently to give discharge a chance to judge).
+        if let (TyKind::Array(_, None), TyKind::Array(_, Some(_))) =
+            (self.tys.kind(a), self.tys.kind(b))
+        {
+            self.errors.push(TypeError::TypeMismatch {
+                expected: b,
+                found: a,
+                span,
+            });
+            return;
+        }
         if let (&TyKind::Ptr(a_pt, a_mut), &TyKind::Ptr(b_pt, b_mut)) =
             (self.tys.kind(a), self.tys.kind(b))
         {
@@ -331,6 +425,27 @@ impl<'hir> Checker<'hir> {
             }
             TypeError::TypeNotFieldable { ty, .. } => {
                 *ty = self.resolve_fully(inf, *ty);
+            }
+            TypeError::ArrayByValueAtExternC { ty, .. } => {
+                *ty = self.resolve_fully(inf, *ty);
+            }
+            TypeError::ArrayLengthMismatch {
+                expected, found, ..
+            } => {
+                *expected = self.resolve_fully(inf, *expected);
+                *found = self.resolve_fully(inf, *found);
+            }
+            TypeError::NotIndexable { ty, .. } => {
+                *ty = self.resolve_fully(inf, *ty);
+            }
+            TypeError::IndexNotUsize { found, .. } => {
+                *found = self.resolve_fully(inf, *found);
+            }
+            TypeError::ArrayLitElementMismatch {
+                expected, found, ..
+            } => {
+                *expected = self.resolve_fully(inf, *expected);
+                *found = self.resolve_fully(inf, *found);
             }
             TypeError::UnknownType { .. }
             | TypeError::WrongArgCount { .. }
@@ -400,14 +515,15 @@ impl<'hir> Checker<'hir> {
                 let pointee = Self::resolve_ty(tys, errors, pointee);
                 tys.intern(TyKind::Ptr(pointee, *mutability))
             }
-            // Phase A Step 2 stub: full Array typeck lands in Step 4
-            // (TyKind::Array + ConstArena) and Step 5 (resolve + coerce).
-            // For now, recurse into the elem so nested type names get
-            // resolved/error-reported, but produce `tys.error` since we
-            // don't have a TyKind::Array yet.
-            HirTyKind::Array(elem, _len) => {
-                let _ = Self::resolve_ty(tys, errors, elem);
-                tys.error
+            HirTyKind::Array(elem, hconst_opt) => {
+                let elem_id = Self::resolve_ty(tys, errors, elem);
+                let len_opt = hconst_opt.as_ref().map(|hc| match hc {
+                    HirConst::Lit(n) => *n,
+                    HirConst::Error => unreachable!(
+                        "parser+lower guarantee Lit; HirConst::Error reserved for future const-eval"
+                    ),
+                });
+                tys.intern(TyKind::Array(elem_id, len_opt))
             }
             HirTyKind::Error => tys.error,
         }
@@ -435,6 +551,14 @@ impl<'hir> Checker<'hir> {
         self.tys.intern(TyKind::Infer(id))
     }
 
+    /// Like `fresh_infer(false)` but flags the var to default to `()`
+    /// at finalize if unbound — used for the elem of an empty array
+    /// literal `[]`. See `Inferer.unit_default`.
+    fn fresh_infer_with_unit_default(&mut self, inf: &mut Inferer) -> TyId {
+        let id = inf.new_var_unit_default();
+        self.tys.intern(TyKind::Infer(id))
+    }
+
     /// Walk `Infer` chains until we hit a concrete kind or an unbound var.
     fn resolve(&self, inf: &Inferer, ty: TyId) -> TyId {
         let mut cur = ty;
@@ -445,6 +569,36 @@ impl<'hir> Checker<'hir> {
                     None => return cur,
                 },
                 _ => return cur,
+            }
+        }
+    }
+
+    /// Walk through outer `Ptr` layers (auto-deref) until we hit a
+    /// non-`Ptr` type. Returns `(peeled_ty, innermost_ptr_mut)`.
+    /// `innermost_ptr_mut` is `None` when the input was already a
+    /// non-`Ptr` (no auto-deref happened), `Some(m)` when at least
+    /// one `Ptr` was peeled — `m` is the mut of the *innermost* `Ptr`
+    /// (the one directly above the underlying type). The innermost
+    /// pointer is the one that addresses the actual storage; its mut
+    /// determines whether the resulting place is writable.
+    ///
+    /// Used by Index typing, Field access, and `place_mutability` to
+    /// enable `p[i]` / `s.a` for `p: *const [T; N]` / `s: *mut Struct`
+    /// (and arbitrarily-deep nestings like `*const *mut [T; N]`).
+    /// Recursive auto-deref is a v0 expedient until `*p` deref lands
+    /// per `07_POINTER.md` §5; once explicit deref is available,
+    /// `(*p)[i]` / `(*p).a` becomes the canonical form. See
+    /// spec/09_ARRAY.md.
+    fn auto_deref_ptr(&self, ty: TyId) -> (TyId, Option<Mutability>) {
+        let mut cur = ty;
+        let mut innermost_mut: Option<Mutability> = None;
+        loop {
+            match self.tys.kind(cur) {
+                TyKind::Ptr(pointee, m) => {
+                    innermost_mut = Some(*m);
+                    cur = *pointee;
+                }
+                _ => return (cur, innermost_mut),
             }
         }
     }
@@ -464,6 +618,10 @@ impl<'hir> Checker<'hir> {
                 let inner = self.resolve_fully(inf, inner);
                 self.tys.intern(TyKind::Ptr(inner, m))
             }
+            TyKind::Array(elem, len) => {
+                let elem = self.resolve_fully(inf, elem);
+                self.tys.intern(TyKind::Array(elem, len))
+            }
             // Adt is identity-only — nothing to substitute.
             TyKind::Adt(_) => resolved,
             _ => resolved,
@@ -482,6 +640,19 @@ impl<'hir> Checker<'hir> {
     /// against `Never` is a mismatch. The "expression-of-type-`!`-can-flow-
     /// anywhere" rule lives in `coerce`, not in `unify`.
     fn unify(&mut self, inf: &mut Inferer, found: TyId, expected: TyId, span: Span) {
+        self.unify_with(inf, found, expected, span, MismatchCtx::Default);
+    }
+
+    /// Single-body unify with a `MismatchCtx` that controls how the
+    /// terminal-mismatch diagnostic is built. See `MismatchCtx`.
+    fn unify_with(
+        &mut self,
+        inf: &mut Inferer,
+        found: TyId,
+        expected: TyId,
+        span: Span,
+        ctx: MismatchCtx,
+    ) {
         let found = self.resolve(inf, found);
         let expected = self.resolve(inf, expected);
         if found == expected {
@@ -498,39 +669,48 @@ impl<'hir> Checker<'hir> {
             (TyKind::Unit, TyKind::Unit) => {}
             (TyKind::Fn(params_f, ret_f), TyKind::Fn(params_e, ret_e)) => {
                 if params_f.len() != params_e.len() {
-                    inf.errors.push(TypeError::TypeMismatch {
-                        expected,
-                        found,
-                        span,
-                    });
+                    inf.errors.push(build_mismatch(ctx, expected, found, span));
                     return;
                 }
                 for (pf, pe) in params_f.iter().zip(&params_e) {
-                    self.unify(inf, *pf, *pe, span.clone());
+                    self.unify_with(inf, *pf, *pe, span.clone(), ctx);
                 }
-                self.unify(inf, ret_f, ret_e, span);
+                self.unify_with(inf, ret_f, ret_e, span, ctx);
             }
             // Loose on mutability — unify is shape-only (per spec/07_POINTER.md).
             // The mutability subtype rule (`*mut → *const` OK at the outer
             // layer, exact match below) is enforced by `coerce` at use sites.
-            (TyKind::Ptr(fi, _), TyKind::Ptr(ei, _)) => self.unify(inf, fi, ei, span),
+            (TyKind::Ptr(fi, _), TyKind::Ptr(ei, _)) => self.unify_with(inf, fi, ei, span, ctx),
+            // Array-Array: recurse on elem; length is strict on Some/Some
+            // (E0265 on mismatch), and mixed Some/None passes silently —
+            // the only path that reaches mixed Some/None is recursion from
+            // the Ptr-Ptr arm during a coerce site, which `discharge_coerce`
+            // validates directionally. Bare arrays of unsized form `[T]`
+            // never reach this arm because `[T]` can't be a value.
+            (TyKind::Array(fe, fc), TyKind::Array(ee, ec)) => {
+                self.unify_with(inf, fe, ee, span.clone(), ctx);
+                match (fc, ec) {
+                    (None, None) => {}
+                    (Some(c1), Some(c2)) if c1 == c2 => {}
+                    (Some(_), Some(_)) => {
+                        inf.errors.push(TypeError::ArrayLengthMismatch {
+                            expected,
+                            found,
+                            span,
+                        });
+                    }
+                    (Some(_), None) | (None, Some(_)) => {}
+                }
+            }
             // ADTs unify by pure nominal identity — no structural recursion
             // into fields. The `found == expected` short-circuit above
             // already covers a == b; reaching this arm means a != b.
             // See spec/08_ADT.md "Unification".
             (TyKind::Adt(_), TyKind::Adt(_)) => {
-                inf.errors.push(TypeError::TypeMismatch {
-                    expected,
-                    found,
-                    span,
-                });
+                inf.errors.push(build_mismatch(ctx, expected, found, span));
             }
             _ => {
-                inf.errors.push(TypeError::TypeMismatch {
-                    expected,
-                    found,
-                    span,
-                });
+                inf.errors.push(build_mismatch(ctx, expected, found, span));
             }
         }
     }
@@ -711,13 +891,36 @@ impl<'hir> Checker<'hir> {
             }
             HirExprKind::Call { callee, args } => self.infer_call(inf, callee, args, &span),
             HirExprKind::Index { base, index } => {
-                let _ = self.infer_expr(inf, base);
-                let _ = self.infer_expr(inf, index);
-                inf.errors.push(TypeError::UnsupportedFeature {
-                    feature: "indexing",
-                    span: span.clone(),
-                });
-                self.tys.error
+                let base_ty = self.infer_expr(inf, base);
+                let idx_ty = self.infer_expr(inf, index);
+
+                // Strict-usize for index. Eager unify_with binds Infer
+                // int-flagged vars to usize via bind_infer_checked
+                // (default IntLit indices type cleanly), and emits
+                // E0267 directly on a concrete-non-usize-int mismatch
+                // instead of the generic E0250.
+                let usize_ty = self.tys.usize;
+                self.unify_with(
+                    inf,
+                    idx_ty,
+                    usize_ty,
+                    span.clone(),
+                    MismatchCtx::IndexNotUsize,
+                );
+
+                let base_resolved = self.resolve(inf, base_ty);
+                let (peeled, _ptr_mut) = self.auto_deref_ptr(base_resolved);
+                match self.tys.kind(peeled).clone() {
+                    TyKind::Array(elem, _) => elem,
+                    TyKind::Error | TyKind::Infer(_) => self.tys.error,
+                    _ => {
+                        inf.errors.push(TypeError::NotIndexable {
+                            ty: base_resolved,
+                            span: span.clone(),
+                        });
+                        self.tys.error
+                    }
+                }
             }
             HirExprKind::Field { base, name } => self.infer_field(inf, base, &name, &span),
             HirExprKind::StructLit { adt, fields } => {
@@ -752,27 +955,7 @@ impl<'hir> Checker<'hir> {
             }
             HirExprKind::Let { local, init } => self.infer_let(inf, local, init, &span),
             HirExprKind::Poison => self.tys.error,
-            // Phase A Step 2 stub: full ArrayLit typeck lands in Step 5.
-            // For now, recurse into sub-expressions so they get typed
-            // (and any errors reported), but emit UnsupportedFeature so
-            // we don't pretend the literal has a type.
-            HirExprKind::ArrayLit(lit) => {
-                match &lit {
-                    HirArrayLit::Elems(es) => {
-                        for &e in es {
-                            let _ = self.infer_expr(inf, e);
-                        }
-                    }
-                    HirArrayLit::Repeat { init, len: _ } => {
-                        let _ = self.infer_expr(inf, *init);
-                    }
-                }
-                inf.errors.push(TypeError::UnsupportedFeature {
-                    feature: "array literal",
-                    span: span.clone(),
-                });
-                self.tys.error
-            }
+            HirExprKind::ArrayLit(lit) => self.infer_array_lit(inf, lit, &span),
         };
         self.expr_tys[eid] = ty;
         ty
@@ -850,19 +1033,23 @@ impl<'hir> Checker<'hir> {
 
     /// Type `base.name` as a value (rvalue). Place-vs-value distinction is
     /// already in HIR (`HirExpr::is_place`); this rule only inspects the
-    /// type of `base`. Per spec/08_ADT.md "TBD-T6":
+    /// type of `base`. Per spec/08_ADT.md "TBD-T6" + spec/09_ARRAY.md
+    /// auto-deref:
     ///
-    ///   - `base: Adt(aid)` — look up the field, return its type. Unknown
-    ///     name → `NoFieldOnAdt`, return `error`.
-    ///   - `base: Infer(_)` — receiver type unresolved at this point.
+    ///   - `base` auto-derefs through any number of outer `Ptr` layers
+    ///     (`s.a` works for `s: *const Struct`, `*const *mut Struct`, etc.).
+    ///   - After auto-deref, `Adt(aid)` — look up the field, return its
+    ///     type. Unknown name → `NoFieldOnAdt`, return `error`.
+    ///   - After auto-deref, `Infer(_)` — receiver type unresolved.
     ///     `CannotInfer`, return `error`.
     ///   - `base: Never` — propagate `Never`.
     ///   - `base: Error` — propagate `Error` silently.
-    ///   - anything else (Prim/Unit/Fn/Ptr) — `TypeNotFieldable`.
+    ///   - anything else (Prim/Unit/Fn/Array/...) — `TypeNotFieldable`.
     fn infer_field(&mut self, inf: &mut Inferer, base: HExprId, name: &str, span: &Span) -> TyId {
         let base_ty = self.infer_expr(inf, base);
         let resolved = self.resolve(inf, base_ty);
-        match self.tys.kind(resolved).clone() {
+        let (peeled, _ptr_mut) = self.auto_deref_ptr(resolved);
+        match self.tys.kind(peeled).clone() {
             TyKind::Adt(aid) => {
                 let adt_def = &self.adts[aid];
                 match adt_def.variants[VariantIdx::from_raw(0)]
@@ -888,16 +1075,64 @@ impl<'hir> Checker<'hir> {
             }
             TyKind::Never => self.tys.never,
             TyKind::Error => self.tys.error,
-            TyKind::Prim(_)
-            | TyKind::Unit
-            | TyKind::Fn(_, _)
-            | TyKind::Ptr(_, _)
-            | TyKind::Array(_, _) => {
+            TyKind::Prim(_) | TyKind::Unit | TyKind::Fn(_, _) | TyKind::Array(_, _) => {
                 inf.errors.push(TypeError::TypeNotFieldable {
                     ty: resolved,
                     span: span.clone(),
                 });
                 self.tys.error
+            }
+            // After auto_deref_ptr, `peeled` is never Ptr — but the
+            // exhaustiveness checker insists on the arm.
+            TyKind::Ptr(_, _) => unreachable!("auto_deref_ptr drains Ptr layers"),
+        }
+    }
+
+    /// Type an array literal expression. See spec/09_ARRAY.md
+    /// "Array literal typing rule".
+    ///
+    /// - Empty `[]` — fresh elem var (unit-defaulted; see
+    ///   `fresh_infer_with_unit_default`); length `0`. Context (e.g.
+    ///   `let a: [i32; 0] = []`) binds `?T → i32`; without context,
+    ///   finalize defaults `?T → ()` for `[(); 0]`.
+    /// - Elems list — first element's type is the canonical elem
+    ///   type; subsequent elements unify against it via
+    ///   `MismatchCtx::ArrayLitElement` so a mismatch reports E0268
+    ///   instead of the generic E0250.
+    /// - Repeat `[init; N]` — elem type is `init`'s type; length is
+    ///   the parser-extracted `HirConst::Lit(n)` (Error variant is
+    ///   unreachable in v0).
+    fn infer_array_lit(&mut self, inf: &mut Inferer, lit: HirArrayLit, _span: &Span) -> TyId {
+        match lit {
+            HirArrayLit::Elems(es) if es.is_empty() => {
+                let elem = self.fresh_infer_with_unit_default(inf);
+                self.tys.intern(TyKind::Array(elem, Some(0)))
+            }
+            HirArrayLit::Elems(es) => {
+                let n = es.len() as u64;
+                let t0 = self.infer_expr(inf, es[0]);
+                for (i, &eid) in es.iter().enumerate().skip(1) {
+                    let ti = self.infer_expr(inf, eid);
+                    let elem_span = self.hir.exprs[eid].span.clone();
+                    self.unify_with(
+                        inf,
+                        ti,
+                        t0,
+                        elem_span,
+                        MismatchCtx::ArrayLitElement { i },
+                    );
+                }
+                self.tys.intern(TyKind::Array(t0, Some(n)))
+            }
+            HirArrayLit::Repeat { init, len } => {
+                let t = self.infer_expr(inf, init);
+                let n = match len {
+                    HirConst::Lit(n) => n,
+                    HirConst::Error => unreachable!(
+                        "parser+lower guarantee Lit; HirConst::Error reserved for future const-eval"
+                    ),
+                };
+                self.tys.intern(TyKind::Array(t, Some(n)))
             }
         }
     }
@@ -1005,8 +1240,12 @@ impl<'hir> Checker<'hir> {
     /// here, HIR already reported InvalidAssignTarget / AddrOfNonPlace."
     /// `Some(Mut)` / `Some(Const)` for places, where:
     ///   - `Local(lid)` → the local's `mutable` flag.
-    ///   - `Field { base, _ }` / `Index { base, _ }` → inherits from base
-    ///     (writing through a struct field requires the owner be mutable).
+    ///   - `Field { base, _ }` / `Index { base, _ }` → if `base`'s type
+    ///     auto-derefs through at least one `Ptr` (i.e. `s.a` /  `p[i]`
+    ///     for `s: *mut Struct` / `p: *const [T; N]`), the **innermost**
+    ///     pointer's mut wins (it's the one that addresses the actual
+    ///     storage). Otherwise (bare ADT / Array place), inherit from
+    ///     `base` recursively.
     ///   - everything else → `None`.
     ///
     /// `Unary { Deref, _ }` will join the place producers under
@@ -1020,7 +1259,17 @@ impl<'hir> Checker<'hir> {
                 Mutability::Const
             }),
             HirExprKind::Field { base, .. } | HirExprKind::Index { base, .. } => {
-                self.place_mutability(*base)
+                let base_ty = self.expr_tys[*base];
+                let (_, ptr_mut) = self.auto_deref_ptr(base_ty);
+                match ptr_mut {
+                    // ≥1 Ptr peeled: the innermost ptr-mut governs the
+                    // resulting place. The base binding's mut is
+                    // irrelevant — `let p: *mut [i32; 3]` (immutable
+                    // binding, mut pointer) makes `p[i] = x` allowed.
+                    Some(m) => Some(m),
+                    // Bare ADT / Array place: inherit from base.
+                    None => self.place_mutability(*base),
+                }
             }
             _ => None,
         }

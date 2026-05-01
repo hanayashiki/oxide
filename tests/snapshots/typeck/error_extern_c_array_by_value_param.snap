@@ -1,0 +1,12 @@
+== diagnostics ==
+[E0264] Error: sized array `[i32; 3]` cannot appear by value at an `extern "C"` parameter
+   ╭─[ error_extern_c_array_by_value_param.ox:2:12 ]
+   │
+ 2 │     fn bad(a: [i32; 3]) -> i32;
+   │            ─────┬─────  
+   │                 ╰─────── array-by-value at C boundary
+   │ 
+   │ Help: C has no calling convention for arrays-by-value; wrap in a pointer (`*const [T; N]` / `*mut [T; N]`) or use an unsized-array pointer (`*const [T]`)
+───╯
+== types ==
+Fn[0] bad(a[Local(0)]: [i32; 3]) -> i32

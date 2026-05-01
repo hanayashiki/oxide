@@ -1,0 +1,8 @@
+== diagnostics ==
+== types ==
+Fn[0] write_first(p[Local(0)]: *mut [i32; 3]) -> ()
+  HExprId(0) : *mut [i32; 3]
+  HExprId(1) : usize
+  HExprId(2) : i32
+  HExprId(3) : i32
+  HExprId(4) : ()

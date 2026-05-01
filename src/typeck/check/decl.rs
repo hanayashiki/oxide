@@ -24,7 +24,7 @@ use index_vec::IndexVec;
 
 use crate::hir::HAdtId;
 
-use super::super::error::SizedPos;
+use super::super::error::{ParamOrReturn, SizedPos, TypeError};
 use super::super::ty::{AdtDef, AdtId, FieldDef, FnSig, TyKind, VariantDef};
 use super::Checker;
 use super::obligation::Obligation;
@@ -102,6 +102,7 @@ fn resolve_adt_fields(cx: &mut Checker<'_>) {
 /// Phase 1 — resolve fn signatures. Bodies aren't touched; that's phase 2.
 fn resolve_fn_sigs(cx: &mut Checker<'_>) {
     for (fid, hir_fn) in cx.hir.fns.iter_enumerated() {
+        let is_extern = hir_fn.is_extern;
         let mut params = Vec::with_capacity(hir_fn.params.len());
         for &lid in &hir_fn.params {
             let local = &cx.hir.locals[lid];
@@ -116,12 +117,23 @@ fn resolve_fn_sigs(cx: &mut Checker<'_>) {
             // Sized check at param position. Always enqueue: a missing
             // annotation resolves to `tys.error`, and discharge is a
             // no-op on `Error`. Diagnostic span is the whole local
-            // declaration. See spec/09_ARRAY.md "E0261".
+            // declaration. See spec/09_ARRAY.md.
             cx.decl_obligations.push(Obligation::Sized {
                 ty,
                 pos: SizedPos::Param,
                 span: local.span.clone(),
             });
+            // E0264: sized array by value at `extern "C"` boundary.
+            // Unsized arrays are caught by the Sized obligation above
+            // (E0269), so this only fires for `Array(_, Some(_))`.
+            // See spec/09_ARRAY.md "ABI: array-by-value across extern C".
+            if is_extern && matches!(cx.tys.kind(ty), TyKind::Array(_, Some(_))) {
+                cx.errors.push(TypeError::ArrayByValueAtExternC {
+                    which: ParamOrReturn::Param,
+                    ty,
+                    span: local.span.clone(),
+                });
+            }
         }
         let ret = match &hir_fn.ret_ty {
             Some(t) => {
@@ -130,8 +142,15 @@ fn resolve_fn_sigs(cx: &mut Checker<'_>) {
                 cx.decl_obligations.push(Obligation::Sized {
                     ty,
                     pos: SizedPos::Return,
-                    span,
+                    span: span.clone(),
                 });
+                if is_extern && matches!(cx.tys.kind(ty), TyKind::Array(_, Some(_))) {
+                    cx.errors.push(TypeError::ArrayByValueAtExternC {
+                        which: ParamOrReturn::Return,
+                        ty,
+                        span,
+                    });
+                }
                 ty
             }
             // Rust-style implicit unit return — Unit is sized; no
