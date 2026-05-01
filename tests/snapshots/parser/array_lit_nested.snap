@@ -1,0 +1,5 @@
+Module
+  Fn matrix() -> i32
+    Block
+      Let m: [[i32; Int(2)]; Int(2)] = [[Int(1), Int(2)], [Int(3), Int(4)]]
+      tail: Int(0)

@@ -1,0 +1,2 @@
+HirModule
+  ExternFn[0] use_buf(p[Local(0)]: *const [i32])

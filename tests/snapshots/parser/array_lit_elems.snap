@@ -1,0 +1,5 @@
+Module
+  Fn make() -> i32
+    Block
+      Let a: [i32; Int(3)] = [Int(1), Int(2), Int(3)]
+      tail: Int(0)

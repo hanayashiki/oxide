@@ -1,0 +1,15 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `i64`, found `isize`
+   ╭─[ isize_distinct_from_i64.ox:6:18 ]
+   │
+ 6 │     let x: i64 = make_offset();
+   │                  ──────┬──────  
+   │                        ╰──────── type mismatch here
+───╯
+== types ==
+Fn[0] make_offset() -> isize
+  HExprId(0) : fn() -> isize
+  HExprId(1) : isize
+  HExprId(2) : ()
+  HExprId(3) : i32
+Fn[1] f() -> i32

@@ -1,0 +1,5 @@
+Module
+  Fn idx() -> i32
+    Block
+      Let x = [Int(10), Int(20), Int(30)][Int(1)]
+      tail: Int(0)

@@ -150,6 +150,11 @@ pub enum ExprKind {
         name: Ident,
         fields: Vec<StructLitField>,
     },
+    /// `[a, b, c]` (Elems) or `[init; N]` (Repeat). See `ArrayLit`.
+    /// Length validation (must be `IntLit`) is enforced at parse time
+    /// (parser-level E0101) — see `spec/09_ARRAY.md` "Length literal
+    /// extraction".
+    ArrayLit(ArrayLit),
     /// `&expr` / `&mut expr` — produces `*const T` / `*mut T` where
     /// `T` is the operand's type. Operand must be a place expression
     /// (HIR enforces; see spec/10_ADDRESS_OF.md).
@@ -192,6 +197,15 @@ pub struct StructLitField {
     pub name: Ident,
     pub value: ExprId,
     pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum ArrayLit {
+    /// `[a, b, c]` — element list. Length is `elems.len()`. Empty `[]` is
+    /// supported as `Elems(vec![])`.
+    Elems(Vec<ExprId>),
+    /// `[init; N]` — repeat the value of `init` N times. `N` must be IntLit.
+    Repeat { init: ExprId, len: ExprId },
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -249,7 +263,16 @@ pub enum TypeKind {
     Named(Ident),
     /// `*const T` or `*mut T`. Pointee is recursive — `*const *mut u8`
     /// nests another `Ptr` inside.
-    Ptr { mutability: Mutability, pointee: TypeId },
+    Ptr {
+        mutability: Mutability,
+        pointee: TypeId,
+    },
+    /// `[T; N]` (sized — `len: Some(expr)`) or `[T]` (unsized —
+    /// `len: None`). `N` must be an `IntLit`.
+    Array {
+        elem: TypeId,
+        len: Option<ExprId>,
+    },
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]

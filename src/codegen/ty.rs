@@ -64,6 +64,13 @@ pub fn lower_ty<'ctx>(
             panic!("lower_ty called on non-value type {}", tcx.render(ty))
         }
         TyKind::Fn(_, _) => panic!("lower_ty called on Fn — use lower_fn_type"),
+        // Phase A Step 4: TyKind::Array exists but isn't produced by
+        // typeck yet (Step 5 wires `resolve_named_ty`). Real codegen
+        // lowering (LLVM `[N x T]` for sized; reject for unsized as a
+        // value type) is Phase B.
+        TyKind::Array(_, _) => {
+            panic!("v0 codegen: Array types should not reach codegen until Phase B")
+        }
         TyKind::Infer(_) | TyKind::Error => {
             panic!("post-typeck type is unresolved: {}", tcx.render(ty))
         }
@@ -77,7 +84,10 @@ pub fn lower_prim<'ctx>(ctx: &'ctx Context, p: PrimTy) -> inkwell::types::IntTyp
         PrimTy::I8 | PrimTy::U8 => ctx.i8_type(),
         PrimTy::I16 | PrimTy::U16 => ctx.i16_type(),
         PrimTy::I32 | PrimTy::U32 => ctx.i32_type(),
-        PrimTy::I64 | PrimTy::U64 => ctx.i64_type(),
+        // `usize` / `isize` are target-fixed at 64-bit in v0. The day
+        // we add 32-bit-target awareness, this single arm flips per the
+        // target's pointer width (`DataLayout::get_pointer_size`).
+        PrimTy::I64 | PrimTy::U64 | PrimTy::Usize | PrimTy::Isize => ctx.i64_type(),
         PrimTy::Bool => ctx.bool_type(),
     }
 }
@@ -110,7 +120,10 @@ pub fn is_void_ret(tcx: &TyArena, ty: TyId) -> bool {
 /// Whether a primitive participates in *signed* integer ops (sdiv, ashr,
 /// icmp slt, etc.).
 pub fn is_signed_prim(p: PrimTy) -> bool {
-    matches!(p, PrimTy::I8 | PrimTy::I16 | PrimTy::I32 | PrimTy::I64)
+    matches!(
+        p,
+        PrimTy::I8 | PrimTy::I16 | PrimTy::I32 | PrimTy::I64 | PrimTy::Isize
+    )
 }
 
 /// Resolve a `TyId` to its `PrimTy`. Used by binary-op codegen to pick

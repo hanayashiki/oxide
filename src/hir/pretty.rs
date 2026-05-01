@@ -285,6 +285,14 @@ impl<'a> Printer<'a> {
             HirExprKind::AddrOf { mutability, expr: sub } => {
                 vec![mutability.as_str().to_string(), self.render_expr(*sub)]
             }
+            HirExprKind::ArrayLit(lit) => match lit {
+                HirArrayLit::Elems(es) => {
+                    es.iter().map(|eid| self.render_expr(*eid)).collect()
+                }
+                HirArrayLit::Repeat { init, len } => {
+                    vec![self.render_expr(*init), const_str(len)]
+                }
+            },
             HirExprKind::If { cond, then_block, else_arm } => {
                 let mut out = vec![self.render_expr(*cond), self.render_block_inline(*then_block)];
                 if let Some(arm) = else_arm {
@@ -377,6 +385,8 @@ fn expr_name(kind: &HirExprKind) -> &'static str {
         HirExprKind::StructLit { .. } => "StructLit",
         HirExprKind::Cast { .. } => "Cast",
         HirExprKind::AddrOf { .. } => "AddrOf",
+        HirExprKind::ArrayLit(HirArrayLit::Elems(_)) => "ArrayLit",
+        HirExprKind::ArrayLit(HirArrayLit::Repeat { .. }) => "ArrayRepeat",
         HirExprKind::If { .. } => "If",
         HirExprKind::Block(_) => "Block",
         HirExprKind::Return(_) => "Return",
@@ -392,6 +402,17 @@ fn ty_str(ty: &HirTy) -> String {
         HirTyKind::Ptr { mutability, pointee } => {
             format!("*{} {}", mutability.as_str(), ty_str(pointee))
         }
+        HirTyKind::Array(elem, len) => match len {
+            None => format!("[{}]", ty_str(elem)),
+            Some(c) => format!("[{}; {}]", ty_str(elem), const_str(c)),
+        },
         HirTyKind::Error => "<err>".to_string(),
+    }
+}
+
+fn const_str(c: &HirConst) -> String {
+    match c {
+        HirConst::Lit(n) => n.to_string(),
+        HirConst::Error => "<err>".to_string(),
     }
 }

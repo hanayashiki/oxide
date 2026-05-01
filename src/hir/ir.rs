@@ -184,6 +184,11 @@ pub enum HirExprKind {
         mutability: Mutability,
         expr: HExprId,
     },
+    /// `[a, b, c]` (Elems) or `[init; N]` (Repeat). N has been
+    /// extracted to a `HirConst` at HIR-lower time. The parser rejects
+    /// non-`IntLit` shapes in the length slot, so the extraction is
+    /// total. See spec/09_ARRAY.md.
+    ArrayLit(HirArrayLit),
     Cast {
         expr: HExprId,
         ty: HirTy,
@@ -221,6 +226,31 @@ pub struct HirStructLitField {
     pub span: Span,
 }
 
+/// Array literal — element list or repeat-with-length form.
+#[derive(Clone, Debug)]
+pub enum HirArrayLit {
+    /// `[a, b, c]` — element list. Length is `elems.len()`. Empty `[]`
+    /// reaches HIR as `Elems(vec![])`; typeck is responsible for the
+    /// element-type inference question (it needs a context type).
+    Elems(Vec<HExprId>),
+    /// `[init; N]` — `init` repeated N times. `N` has been extracted from
+    /// the AST length expression to a `HirConst::Lit(u64)`. Non-`IntLit`
+    /// shapes are rejected at parse time, so `HirConst::Error` is
+    /// unreachable in v0; the variant survives for forward-compatibility
+    /// with a future ICE evaluator.
+    Repeat { init: HExprId, len: HirConst },
+}
+
+/// Type-level constant value, extracted from a length-position AST
+/// expression at HIR-lower time. v0 only carries `Lit(u64)` (from a bare
+/// `IntLit` token) or `Error`. Future const-generics work adds more
+/// variants without changing the `Lit`/`Error` cases.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum HirConst {
+    Lit(u64),
+    Error,
+}
+
 #[derive(Clone, Debug)]
 pub struct HirTy {
     pub kind: HirTyKind,
@@ -241,6 +271,13 @@ pub enum HirTyKind {
         mutability: Mutability,
         pointee: Box<HirTy>, // FIXME: should intern HirTy.
     },
+    /// `[T; N]` (sized — `len: Some(_)`) or `[T]` (unsized — `len: None`).
+    /// The unified shape mirrors the `[T] ≡ [T; ∞]` mental model directly:
+    /// the `Option` discriminates length-known vs length-unknown without
+    /// introducing a separate kind. `Array(_, None)` is rejected as a
+    /// value type at typeck (E0261 `UnsizedArrayAsValue`) and is only
+    /// valid behind a pointer (`*const [T]` / `*mut [T]`).
+    Array(Box<HirTy>, Option<HirConst>),
     /// Recovery placeholder for malformed type positions.
     Error,
 }

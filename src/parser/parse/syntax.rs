@@ -57,10 +57,25 @@ where
         .labelled("identifier")
 }
 
-pub(super) fn type_parser<'a, I>() -> impl Parser<'a, I, TypeId, Extra<'a>> + Clone
+/// Build the type parser parameterized by an expression parser. The expr
+/// is threaded in only so callers outside `expr_parser` (item-level
+/// parsers like `params_parser`, `ret_ty_parser`, `struct_item_parser`)
+/// share the same recursive-expr handle. The length slot itself does
+/// **not** consume from the expression parser — see
+/// `int_lit_length_parser` for the rule.
+///
+/// Callers outside `expr_parser` construct an `expr_parser` first and
+/// pass it in via this entry point so the cast slot (`x as [T; N]`)
+/// keeps recursing through the same expression handle.
+pub(super) fn type_parser<'a, I, PE>(expr: PE) -> impl Parser<'a, I, TypeId, Extra<'a>> + Clone
 where
     I: OValueInput<'a>,
+    PE: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
 {
+    // The `expr` parameter is currently unused inside this function — kept
+    // in the signature to preserve the caller-site convention that "build
+    // an expr first, then a type". Bind to `_` to silence the warning.
+    let _ = expr;
     recursive(|ty| {
         let named = ident_parser().map_with(|name, e| e.push_type(TypeKind::Named(name)));
 
@@ -71,13 +86,47 @@ where
         ));
         let ptr = just(TokenKind::Star)
             .ignore_then(mutability)
-            .then(ty)
+            .then(ty.clone())
             .map_with(|(mutability, pointee), e| {
-                e.push_type(TypeKind::Ptr { mutability, pointee })
+                e.push_type(TypeKind::Ptr {
+                    mutability,
+                    pointee,
+                })
             });
 
-        choice((ptr, named)).labelled("type")
+        // `[T; N]` (sized) or `[T]` (unsized). The length slot accepts
+        // **only** a bare `IntLit` token — see spec/09_ARRAY.md "Length
+        // literal extraction". Anything richer (parens, casts, idents,
+        // binary ops) is a parse error here and will surface as a
+        // chumsky "expected `]`" diagnostic. `[T]` (no `;`) lowers to
+        // `Array { len: None }`.
+        let array = ty
+            .clone()
+            .then(
+                just(TokenKind::Semi)
+                    .ignore_then(int_lit_length_parser())
+                    .or_not(),
+            )
+            .delimited_by(just(TokenKind::LBracket), just(TokenKind::RBracket))
+            .map_with(|(elem, len), e| e.push_type(TypeKind::Array { elem, len }));
+
+        choice((ptr, array, named)).labelled("type")
     })
+}
+
+/// Length-slot parser used by `[T; N]` and `[init; N]`. v0 only accepts
+/// a single `Int(n)` token here — no const-expression evaluator. The
+/// captured `n` is wrapped in an `ExprKind::IntLit` so the AST shape
+/// (`Option<ExprId>` for type lengths, `ExprId` for repeat-literal
+/// lengths) is unchanged. See spec/09_ARRAY.md "Length literal
+/// extraction".
+fn int_lit_length_parser<'a, I>() -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+{
+    select! { TokenKind::Int(n) => n }
+        .map_with(|n, e| e.push_expr(ExprKind::IntLit(n)))
+        .labelled("integer literal")
 }
 
 pub(super) fn expr_parser<'a, I>() -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
@@ -85,114 +134,36 @@ where
     I: OValueInput<'a>,
 {
     recursive(|expr| {
-        // `return e?` is an expression of type `!`. We expose it at the top of
-        // the expression parser (rather than as an atom) so its operand can
-        // itself be any expression — `return e + 1` ⇒ `return (e + 1)`.
-        let return_form = just(TokenKind::KwReturn)
-            .ignore_then(expr.clone().or_not())
-            .map_with(|val, e| e.push_expr(ExprKind::Return(val)));
+        // `return e?` is an expression of type `!`. Sits above the Pratt
+        // tower so its operand can itself be any expression
+        // (`return e + 1` ⇒ `return (e + 1)`).
+        let return_form = return_expr_parser(expr.clone());
 
-        // `Ident { f: expr, ... }` — record struct literal. Tried before
+        // Atoms — tried in priority order. `struct_lit` precedes
         // `ident_expr` so the bare-ident fallback only fires when the
         // following tokens don't shape up to a field list.
-        //
-        // Known deviation from Rust: we allow struct literals in `if`/`while`
-        // cond positions (Rust forbids them there to keep the grammar
-        // unambiguous). The follow-on cleanup is to thread a "no-struct-lit-
-        // at-top" flag through the cond's expression parser; see TBD in
-        // spec/08_ADT.md.
-        let struct_lit_field = ident_parser()
-            .then_ignore(just(TokenKind::Colon))
-            .then(expr.clone())
-            .map_with(|(name, value), e| StructLitField {
-                name,
-                value,
-                span: e.lex_span(),
-            });
-        let struct_lit = ident_parser()
-            .then(
-                struct_lit_field
-                    .separated_by(just(TokenKind::Comma))
-                    .allow_trailing()
-                    .collect::<Vec<_>>()
-                    .delimited_by(just(TokenKind::LBrace), just(TokenKind::RBrace)),
-            )
-            .map_with(|(name, fields), e| e.push_expr(ExprKind::StructLit { name, fields }));
-
-        let int_lit =
-            select! { TokenKind::Int(n) => n }.map_with(|n, e| e.push_expr(ExprKind::IntLit(n)));
-        let bool_lit =
-            select! { TokenKind::Bool(b) => b }.map_with(|b, e| e.push_expr(ExprKind::BoolLit(b)));
-        let char_lit =
-            select! { TokenKind::Char(c) => c }.map_with(|c, e| e.push_expr(ExprKind::CharLit(c)));
-        let str_lit =
-            select! { TokenKind::Str(s) => s }.map_with(|s, e| e.push_expr(ExprKind::StrLit(s)));
-        let ident_expr = ident_parser().map_with(|id, e| e.push_expr(ExprKind::Ident(id)));
-
-        let paren = expr
-            .clone()
-            .delimited_by(just(TokenKind::LParen), just(TokenKind::RParen))
-            .map_with(|inner, e| e.push_expr(ExprKind::Paren(inner)))
-            .recover_with(via_parser(
-                nested_delimiters::<I, _, _, _, 2>(
-                    TokenKind::LParen,
-                    TokenKind::RParen,
-                    [
-                        (TokenKind::LBrace, TokenKind::RBrace),
-                        (TokenKind::LBracket, TokenKind::RBracket),
-                    ],
-                    |span: SimpleSpan| span,
-                )
-                .map_with(|ss: SimpleSpan, e: &mut OMapExtra<'_, '_, I>| {
-                    e.push_expr_at(ss, ExprKind::Poison)
-                }),
-            ));
-
         let block = block_parser_inner(expr.clone());
-        let block_expr = block
-            .clone()
-            .map_with(|bid, e| e.push_expr(ExprKind::Block(bid)));
-
-        let if_expr = if_parser_inner(expr.clone(), block.clone());
-
+        let if_expr = if_parser(expr.clone(), block.clone());
         let atom = choice((
-            int_lit, bool_lit, char_lit, str_lit, if_expr, block_expr, paren, struct_lit,
-            ident_expr,
+            int_lit_parser(),
+            bool_lit_parser(),
+            char_lit_parser(),
+            str_lit_parser(),
+            if_expr,
+            block_expr_parser(block),
+            paren_parser(expr.clone()),
+            array_lit_parser(expr.clone()),
+            struct_lit_parser(expr.clone()),
+            ident_expr_parser(),
         ));
 
-        let call_args = expr
-            .clone()
-            .separated_by(just(TokenKind::Comma))
-            .allow_trailing()
-            .collect::<Vec<_>>()
-            .delimited_by(just(TokenKind::LParen), just(TokenKind::RParen));
-        let index = expr
-            .clone()
-            .delimited_by(just(TokenKind::LBracket), just(TokenKind::RBracket));
-        let field = just(TokenKind::Dot).ignore_then(ident_parser());
+        // Postfix tower: call, index, field — left-folded onto `atom`.
+        let with_postfix = postfix_parser(atom, expr.clone());
 
-        #[derive(Clone)]
-        enum Postfix {
-            Call(Vec<ExprId>),
-            Index(ExprId),
-            Field(Ident),
-        }
-        let postfix_op = call_args
-            .map(Postfix::Call)
-            .or(index.map(Postfix::Index))
-            .or(field.map(Postfix::Field));
-
-        let with_postfix = atom.foldl_with(postfix_op.repeated(), |callee, op, e| {
-            let kind = match op {
-                Postfix::Call(args) => ExprKind::Call { callee, args },
-                Postfix::Index(idx) => ExprKind::Index {
-                    base: callee,
-                    index: idx,
-                },
-                Postfix::Field(name) => ExprKind::Field { base: callee, name },
-            };
-            e.push_expr(kind)
-        });
+        // Cast slot needs a type parser; build one from the recursive
+        // expr handle so array-length slots inside cast types (e.g.
+        // `x as [T; 3]`) can recurse through expr correctly.
+        let ty_in_expr = type_parser(expr.clone());
 
         let pratt_expr = with_postfix.pratt((
             prefix_level!(13,
@@ -206,18 +177,23 @@ where
             // See spec/10_ADDRESS_OF.md "Token disambiguation".
             prefix(
                 13,
-                just(TokenKind::Amp).ignore_then(
-                    just(TokenKind::KwMut)
-                        .or_not()
-                        .map(|m| if m.is_some() { Mutability::Mut } else { Mutability::Const }),
-                ),
+                just(TokenKind::Amp).ignore_then(just(TokenKind::KwMut).or_not().map(|m| {
+                    if m.is_some() {
+                        Mutability::Mut
+                    } else {
+                        Mutability::Const
+                    }
+                })),
                 |mutability: Mutability, rhs, e: &mut OMapExtra<'_, '_, I>| {
-                    e.push_expr(ExprKind::AddrOf { mutability, expr: rhs })
+                    e.push_expr(ExprKind::AddrOf {
+                        mutability,
+                        expr: rhs,
+                    })
                 },
             ),
             postfix(
                 12,
-                just(TokenKind::KwAs).ignore_then(type_parser()),
+                just(TokenKind::KwAs).ignore_then(ty_in_expr.clone()),
                 |lhs, ty, e: &mut OMapExtra<'_, '_, I>| {
                     e.push_expr(ExprKind::Cast { expr: lhs, ty })
                 },
@@ -266,6 +242,231 @@ where
         ));
 
         choice((return_form, pratt_expr)).labelled("expression")
+    })
+}
+
+// === expr_parser sub-parsers =================================================
+//
+// Each helper below contributes one piece of the expression atom layer.
+// `expr_parser`'s body reads as the structural overview; details live here.
+// Leaf literals are extracted too — they're tiny but the symmetry keeps the
+// atom alternation in `expr_parser` declarative.
+
+fn int_lit_parser<'a, I>() -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+{
+    select! { TokenKind::Int(n) => n }.map_with(|n, e| e.push_expr(ExprKind::IntLit(n)))
+}
+
+fn bool_lit_parser<'a, I>() -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+{
+    select! { TokenKind::Bool(b) => b }.map_with(|b, e| e.push_expr(ExprKind::BoolLit(b)))
+}
+
+fn char_lit_parser<'a, I>() -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+{
+    select! { TokenKind::Char(c) => c }.map_with(|c, e| e.push_expr(ExprKind::CharLit(c)))
+}
+
+fn str_lit_parser<'a, I>() -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+{
+    select! { TokenKind::Str(s) => s }.map_with(|s, e| e.push_expr(ExprKind::StrLit(s)))
+}
+
+fn ident_expr_parser<'a, I>() -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+{
+    ident_parser().map_with(|id, e| e.push_expr(ExprKind::Ident(id)))
+}
+
+/// `(expr)` — single-expression group. Has chumsky `nested_delimiters`
+/// recovery so a malformed inner expression doesn't cascade through the
+/// rest of the input; the recovery synthesizes an `ExprKind::Poison`.
+fn paren_parser<'a, I, PE>(expr: PE) -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+    PE: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
+{
+    expr.delimited_by(just(TokenKind::LParen), just(TokenKind::RParen))
+        .map_with(|inner, e| e.push_expr(ExprKind::Paren(inner)))
+        .recover_with(via_parser(
+            nested_delimiters::<I, _, _, _, 2>(
+                TokenKind::LParen,
+                TokenKind::RParen,
+                [
+                    (TokenKind::LBrace, TokenKind::RBrace),
+                    (TokenKind::LBracket, TokenKind::RBracket),
+                ],
+                |span: SimpleSpan| span,
+            )
+            .map_with(|ss: SimpleSpan, e: &mut OMapExtra<'_, '_, I>| {
+                e.push_expr_at(ss, ExprKind::Poison)
+            }),
+        ))
+}
+
+/// `{ ... }` as an expression — wraps a block in `ExprKind::Block`.
+fn block_expr_parser<'a, I, PB>(block: PB) -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+    PB: Parser<'a, I, BlockId, Extra<'a>> + Clone + 'a,
+{
+    block.map_with(|bid, e| e.push_expr(ExprKind::Block(bid)))
+}
+
+/// `return e?` — wraps an optional operand. Parsed at the top of
+/// `expr_parser` so the operand can be any expression.
+fn return_expr_parser<'a, I, PE>(expr: PE) -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+    PE: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
+{
+    just(TokenKind::KwReturn)
+        .ignore_then(expr.or_not())
+        .map_with(|val, e| e.push_expr(ExprKind::Return(val)))
+}
+
+/// `Ident { f: v, ... }` — record struct literal. Tried before
+/// `ident_expr` in the atom alternation.
+///
+/// Known deviation from Rust: we allow struct literals in `if`/`while`
+/// cond positions (Rust forbids them there to keep the grammar
+/// unambiguous). The follow-on cleanup is to thread a "no-struct-lit-
+/// at-top" flag through the cond's expression parser; see TBD in
+/// spec/08_ADT.md.
+fn struct_lit_parser<'a, I, PE>(expr: PE) -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+    PE: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
+{
+    let field = ident_parser()
+        .then_ignore(just(TokenKind::Colon))
+        .then(expr)
+        .map_with(|(name, value), e| StructLitField {
+            name,
+            value,
+            span: e.lex_span(),
+        });
+    ident_parser()
+        .then(
+            field
+                .separated_by(just(TokenKind::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(TokenKind::LBrace), just(TokenKind::RBrace)),
+        )
+        .map_with(|(name, fields), e| e.push_expr(ExprKind::StructLit { name, fields }))
+}
+
+/// Array literals: `[a, b, c]` (Elems) or `[init; N]` (Repeat).
+/// Disambiguation: parse the first expr, peek the next token —
+/// `;` → Repeat, `,` or `]` → Elems. Empty `[]` is rejected via a
+/// separate rule that emits a custom message (E0107).
+///
+/// The length slot in the Repeat form accepts only an `IntLit` token —
+/// see spec/09_ARRAY.md "Length literal extraction" and
+/// `int_lit_length_parser` above. Anything richer is a parse error
+/// (typically reported as "expected `]`").
+fn array_lit_parser<'a, I, PE>(expr: PE) -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+    PE: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
+{
+    #[derive(Clone)]
+    enum ArrayLitTail {
+        Repeat(ExprId),
+        Elems(Vec<ExprId>),
+    }
+    let tail = choice((
+        just(TokenKind::Semi)
+            .ignore_then(int_lit_length_parser())
+            .map(ArrayLitTail::Repeat),
+        just(TokenKind::Comma)
+            .ignore_then(
+                expr.clone()
+                    .separated_by(just(TokenKind::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>(),
+            )
+            .map(ArrayLitTail::Elems),
+        // No tail — single-element list: `[a]`.
+        empty().to(ArrayLitTail::Elems(Vec::new())),
+    ));
+    let nonempty = expr
+        .then(tail)
+        .delimited_by(just(TokenKind::LBracket), just(TokenKind::RBracket))
+        .map_with(|(first, tail), e| {
+            let lit = match tail {
+                ArrayLitTail::Repeat(len) => ArrayLit::Repeat { init: first, len },
+                ArrayLitTail::Elems(rest) => {
+                    let mut elems = Vec::with_capacity(1 + rest.len());
+                    elems.push(first);
+                    elems.extend(rest);
+                    ArrayLit::Elems(elems)
+                }
+            };
+            e.push_expr(ExprKind::ArrayLit(lit))
+        });
+    // Empty `[]` — grammatically valid; produces `ArrayLit::Elems(vec![])`.
+    // The "need context type to infer T" question is semantic, not
+    // syntactic; typeck handles it (when arrays land typeck-side; until
+    // then, the existing `UnsupportedFeature` ArrayLit arm catches it).
+    let empty = just(TokenKind::LBracket)
+        .ignore_then(just(TokenKind::RBracket))
+        .map_with(|_, e| e.push_expr(ExprKind::ArrayLit(ArrayLit::Elems(Vec::new()))));
+    choice((nonempty, empty))
+}
+
+/// Postfix tower: `f(args)`, `e[i]`, `e.field`, left-folded onto an atom.
+fn postfix_parser<'a, I, PA, PE>(
+    atom: PA,
+    expr: PE,
+) -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+    PA: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
+    PE: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
+{
+    let call_args = expr
+        .clone()
+        .separated_by(just(TokenKind::Comma))
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(TokenKind::LParen), just(TokenKind::RParen));
+    let index = expr
+        .clone()
+        .delimited_by(just(TokenKind::LBracket), just(TokenKind::RBracket));
+    let field = just(TokenKind::Dot).ignore_then(ident_parser());
+
+    #[derive(Clone)]
+    enum Postfix {
+        Call(Vec<ExprId>),
+        Index(ExprId),
+        Field(Ident),
+    }
+    let op = call_args
+        .map(Postfix::Call)
+        .or(index.map(Postfix::Index))
+        .or(field.map(Postfix::Field));
+
+    atom.foldl_with(op.repeated(), |callee, op, e| {
+        let kind = match op {
+            Postfix::Call(args) => ExprKind::Call { callee, args },
+            Postfix::Index(idx) => ExprKind::Index {
+                base: callee,
+                index: idx,
+            },
+            Postfix::Field(name) => ExprKind::Field { base: callee, name },
+        };
+        e.push_expr(kind)
     })
 }
 
@@ -318,10 +519,11 @@ where
     I: OValueInput<'a>,
     PE: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
 {
+    let ty = type_parser(expr.clone());
     let let_form = just(TokenKind::KwLet)
         .ignore_then(just(TokenKind::KwMut).or_not().map(|m| m.is_some()))
         .then(ident_parser())
-        .then(just(TokenKind::Colon).ignore_then(type_parser()).or_not())
+        .then(just(TokenKind::Colon).ignore_then(ty).or_not())
         .then(just(TokenKind::Eq).ignore_then(expr.clone()).or_not())
         .then_ignore(just(TokenKind::Semi))
         .map_with(|(((mutable, name), ty), init), e| {
@@ -331,7 +533,10 @@ where
                 ty,
                 init,
             });
-            Some(BlockItem { expr, has_semi: true })
+            Some(BlockItem {
+                expr,
+                has_semi: true,
+            })
         });
 
     // Any expression (incl. `if`/`block` via `expr_parser`'s atom alternation)
@@ -355,10 +560,7 @@ where
     choice((let_form, expr_item, bare_semi)).labelled("block item")
 }
 
-fn if_parser_inner<'a, I, PE, PB>(
-    expr: PE,
-    block: PB,
-) -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+fn if_parser<'a, I, PE, PB>(expr: PE, block: PB) -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
 where
     I: OValueInput<'a>,
     PE: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
@@ -383,16 +585,17 @@ where
     })
 }
 
-fn param_parser<'a, I>() -> impl Parser<'a, I, Param, Extra<'a>> + Clone
+fn param_parser<'a, I, PT>(ty: PT) -> impl Parser<'a, I, Param, Extra<'a>> + Clone
 where
     I: OValueInput<'a>,
+    PT: Parser<'a, I, TypeId, Extra<'a>> + Clone + 'a,
 {
     just(TokenKind::KwMut)
         .or_not()
         .map(|m| m.is_some())
         .then(ident_parser())
         .then_ignore(just(TokenKind::Colon))
-        .then(type_parser())
+        .then(ty)
         .map_with(|((mutable, name), ty), e| Param {
             mutable,
             name,
@@ -401,22 +604,24 @@ where
         })
 }
 
-fn params_parser<'a, I>() -> impl Parser<'a, I, Vec<Param>, Extra<'a>> + Clone
+fn params_parser<'a, I, PT>(ty: PT) -> impl Parser<'a, I, Vec<Param>, Extra<'a>> + Clone
 where
     I: OValueInput<'a>,
+    PT: Parser<'a, I, TypeId, Extra<'a>> + Clone + 'a,
 {
-    param_parser()
+    param_parser(ty)
         .separated_by(just(TokenKind::Comma))
         .allow_trailing()
         .collect::<Vec<_>>()
         .delimited_by(just(TokenKind::LParen), just(TokenKind::RParen))
 }
 
-fn ret_ty_parser<'a, I>() -> impl Parser<'a, I, Option<TypeId>, Extra<'a>> + Clone
+fn ret_ty_parser<'a, I, PT>(ty: PT) -> impl Parser<'a, I, Option<TypeId>, Extra<'a>> + Clone
 where
     I: OValueInput<'a>,
+    PT: Parser<'a, I, TypeId, Extra<'a>> + Clone + 'a,
 {
-    just(TokenKind::Arrow).ignore_then(type_parser()).or_not()
+    just(TokenKind::Arrow).ignore_then(ty).or_not()
 }
 
 /// Parse a fn signature plus either `{ block }` or `;`. The grammar is
@@ -428,13 +633,14 @@ where
     I: OValueInput<'a>,
 {
     let expr = expr_parser();
+    let ty = type_parser(expr.clone());
     let block = block_parser_inner(expr.clone());
     let body = choice((block.map(Some), just(TokenKind::Semi).to(None)));
 
     just(TokenKind::KwFn)
         .ignore_then(ident_parser())
-        .then(params_parser())
-        .then(ret_ty_parser())
+        .then(params_parser(ty.clone()))
+        .then(ret_ty_parser(ty))
         .then(body)
         .map(|(((name, params), ret_ty), body)| FnDecl {
             name,
@@ -518,9 +724,11 @@ fn struct_item_parser<'a, I>() -> impl Parser<'a, I, ItemId, Extra<'a>> + Clone
 where
     I: OValueInput<'a>,
 {
+    let expr = expr_parser();
+    let ty = type_parser(expr);
     let field_decl = ident_parser()
         .then_ignore(just(TokenKind::Colon))
-        .then(type_parser())
+        .then(ty)
         .map_with(|(name, ty), e| FieldDecl {
             name,
             ty,
@@ -547,6 +755,10 @@ pub(super) fn module_parser<'a, I>() -> impl Parser<'a, I, Vec<ItemId>, Extra<'a
 where
     I: OValueInput<'a>,
 {
-    let item = choice((extern_block_parser(), struct_item_parser(), fn_item_parser()));
+    let item = choice((
+        extern_block_parser(),
+        struct_item_parser(),
+        fn_item_parser(),
+    ));
     item.repeated().collect::<Vec<_>>().then_ignore(end())
 }

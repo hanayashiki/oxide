@@ -242,6 +242,25 @@ impl<'a> Printer<'a> {
                 }
                 buf.push('}');
             }
+            ExprKind::ArrayLit(lit) => match lit {
+                ArrayLit::Elems(es) => {
+                    buf.push('[');
+                    for (i, eid) in es.iter().enumerate() {
+                        if i > 0 {
+                            buf.push_str(", ");
+                        }
+                        self.append_expr(buf, *eid);
+                    }
+                    buf.push(']');
+                }
+                ArrayLit::Repeat { init, len } => {
+                    buf.push('[');
+                    self.append_expr(buf, *init);
+                    buf.push_str("; ");
+                    self.append_expr(buf, *len);
+                    buf.push(']');
+                }
+            },
             ExprKind::Cast { expr, ty } => {
                 self.append_expr(buf, *expr);
                 write!(buf, " as {}", type_str(self.m, *ty)).unwrap();
@@ -288,5 +307,25 @@ fn type_str(m: &Module, tid: TypeId) -> String {
         TypeKind::Ptr { mutability, pointee } => {
             format!("*{} {}", mutability.as_str(), type_str(m, *pointee))
         }
+        TypeKind::Array { elem, len } => match len {
+            None => format!("[{}]", type_str(m, *elem)),
+            Some(eid) => {
+                let mut buf = format!("[{}; ", type_str(m, *elem));
+                append_expr_to_buf(m, &mut buf, *eid);
+                buf.push(']');
+                buf
+            }
+        },
     }
+}
+
+/// Render an expression for the type-printer's needs (used by `[T; N]` length
+/// rendering). Re-uses Printer's `append_expr` shape but is standalone since
+/// `type_str` is a free function. The `Printer::out` is unused by
+/// `append_expr` (it writes to the passed `buf`), so we give it a sink
+/// `String` to satisfy the borrow.
+fn append_expr_to_buf(m: &Module, buf: &mut String, eid: ExprId) {
+    let mut sink = String::new();
+    let p = Printer { out: &mut sink, m, indent: 0 };
+    p.append_expr(buf, eid);
 }

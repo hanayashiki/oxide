@@ -1,0 +1,11 @@
+== diagnostics ==
+== types ==
+Fn[0] make_size() -> usize
+  HExprId(0) : fn() -> usize
+  HExprId(1) : usize
+  HExprId(2) : ()
+  HExprId(3) : fn(usize)
+  HExprId(4) : usize
+  HExprId(5) : ()
+Fn[1] use_size(n[Local(0)]: usize) -> ()
+Fn[2] f() -> ()

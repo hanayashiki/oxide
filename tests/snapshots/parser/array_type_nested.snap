@@ -1,0 +1,4 @@
+Module
+  Fn outer(a: [[i32; Int(2)]; Int(3)]) -> i32
+    Block
+      tail: Int(0)

@@ -1,0 +1,4 @@
+HirModule
+  Fn[0] empty()
+    Block
+      Let(0, "a", :[i32; 0], ArrayLit())

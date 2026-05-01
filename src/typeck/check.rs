@@ -26,7 +26,7 @@ mod decl;
 use index_vec::IndexVec;
 
 use crate::hir::{
-    FnId, HBlockId, HElseArm, HExprId, HirExpr, HirExprKind, HirLocal, HirModule,
+    FnId, HBlockId, HElseArm, HExprId, HirArrayLit, HirExpr, HirExprKind, HirLocal, HirModule,
     HirStructLitField, HirTy, HirTyKind, LocalId, VariantIdx,
 };
 use crate::lexer::Span;
@@ -288,6 +288,15 @@ impl<'hir> Checker<'hir> {
             } => {
                 let pointee = Self::resolve_named_ty(tys, errors, pointee);
                 tys.intern(TyKind::Ptr(pointee, *mutability))
+            }
+            // Phase A Step 2 stub: full Array typeck lands in Step 4
+            // (TyKind::Array + ConstArena) and Step 5 (resolve + coerce).
+            // For now, recurse into the elem so nested type names get
+            // resolved/error-reported, but produce `tys.error` since we
+            // don't have a TyKind::Array yet.
+            HirTyKind::Array(elem, _len) => {
+                let _ = Self::resolve_named_ty(tys, errors, elem);
+                tys.error
             }
             HirTyKind::Error => tys.error,
         }
@@ -684,6 +693,27 @@ impl<'hir> Checker<'hir> {
             }
             HirExprKind::Let { local, init } => self.infer_let(inf, local, init, &span),
             HirExprKind::Poison => self.tys.error,
+            // Phase A Step 2 stub: full ArrayLit typeck lands in Step 5.
+            // For now, recurse into sub-expressions so they get typed
+            // (and any errors reported), but emit UnsupportedFeature so
+            // we don't pretend the literal has a type.
+            HirExprKind::ArrayLit(lit) => {
+                match &lit {
+                    HirArrayLit::Elems(es) => {
+                        for &e in es {
+                            let _ = self.infer_expr(inf, e);
+                        }
+                    }
+                    HirArrayLit::Repeat { init, len: _ } => {
+                        let _ = self.infer_expr(inf, *init);
+                    }
+                }
+                inf.errors.push(TypeError::UnsupportedFeature {
+                    feature: "array literal",
+                    span: span.clone(),
+                });
+                self.tys.error
+            }
         };
         self.expr_tys[eid] = ty;
         ty
@@ -799,7 +829,11 @@ impl<'hir> Checker<'hir> {
             }
             TyKind::Never => self.tys.never,
             TyKind::Error => self.tys.error,
-            TyKind::Prim(_) | TyKind::Unit | TyKind::Fn(_, _) | TyKind::Ptr(_, _) => {
+            TyKind::Prim(_)
+            | TyKind::Unit
+            | TyKind::Fn(_, _)
+            | TyKind::Ptr(_, _)
+            | TyKind::Array(_, _) => {
                 inf.errors.push(TypeError::TypeNotFieldable {
                     ty: resolved,
                     span: span.clone(),

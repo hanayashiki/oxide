@@ -1,0 +1,5 @@
+Module
+  Fn one() -> i32
+    Block
+      Let a: [i32; Int(1)] = [Int(42)]
+      tail: Int(0)

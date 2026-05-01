@@ -390,6 +390,7 @@ impl<'a> Lowerer<'a> {
                 HirExprKind::Let { local: lid, init }
             }
             ast::ExprKind::Poison => HirExprKind::Poison,
+            ast::ExprKind::ArrayLit(lit) => self.lower_array_lit(lit),
         };
 
         let is_place = compute_is_place(&kind, &self.exprs);
@@ -403,10 +404,55 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Lower a type-position name. Looks up `Named(_)` in `ty_scopes`
-    /// (innermost first) — a hit becomes `HirTyKind::Adt(haid)`. A miss
-    /// stays `HirTyKind::Named(name)` for typeck to resolve as a primitive
-    /// or report as unknown.
+    /// Lower an array literal. Element-list form (`[a, b, c]`) lowers each
+    /// element through the normal expression pipeline. Repeat form
+    /// (`[init; N]`) lowers `init` and extracts `N` to a `HirConst` via
+    /// `extract_length_const`.
+    fn lower_array_lit(&mut self, lit: ast::ArrayLit) -> HirExprKind {
+        match lit {
+            ast::ArrayLit::Elems(es) => {
+                let elems: Vec<_> = es.into_iter().map(|e| self.lower_expr(e)).collect();
+                HirExprKind::ArrayLit(HirArrayLit::Elems(elems))
+            }
+            ast::ArrayLit::Repeat { init, len } => {
+                let init = self.lower_expr(init);
+                let len = self.extract_length_const(len);
+                HirExprKind::ArrayLit(HirArrayLit::Repeat { init, len })
+            }
+        }
+    }
+
+    /// Extract a `HirConst` from an AST length expression. Per
+    /// spec/09_ARRAY.md "Length literal extraction", v0 only accepts a
+    /// bare `IntLit` token — and the parser already enforces that
+    /// (the length slot in `[T; N]` and `[init; N]` only matches an
+    /// `Int` token). This is therefore a structural pattern match
+    /// with no error path. Future work (an ICE evaluator, `const`
+    /// items, const generics) relaxes the parser and extends this
+    /// match.
+    fn extract_length_const(&mut self, eid: ast::ExprId) -> HirConst {
+        let expr = &self.ast.exprs[eid];
+        match &expr.kind {
+            ast::ExprKind::IntLit(n) => HirConst::Lit(*n),
+            other => unreachable!(
+                "parser ensures length slot is IntLit; got {other:?}"
+            ),
+        }
+    }
+
+    /// Lower a type-position name in **value position** — the type must
+    /// be sized. Looks up `Named(_)` in `ty_scopes` (innermost first); a
+    /// hit becomes `HirTyKind::Adt(haid)`. A miss stays
+    /// `HirTyKind::Named(name)` for typeck to resolve.
+    ///
+    /// **Note:** unsized-array-in-value-position rejection happens at
+    /// **typeck**, not here. HIR doesn't fully resolve types — a future
+    /// `type Buf = [i32]` alias would be `Named("Buf")` at HIR with the
+    /// unsized shape only visible after typeck resolves the alias. So
+    /// the structural `Array(_, None)` check at HIR would catch only
+    /// the syntactic case, missing aliased ones, while typeck has to
+    /// run the check anyway. Keeping it in one place (typeck) avoids
+    /// duplicating an incomplete check.
     fn lower_ty(&mut self, tid: ast::TypeId) -> HirTy {
         let ty = &self.ast.types[tid];
         let span = ty.span.clone();
@@ -424,6 +470,11 @@ impl<'a> Lowerer<'a> {
                     mutability: *mutability,
                     pointee,
                 }
+            }
+            ast::TypeKind::Array { elem, len } => {
+                let elem = Box::new(self.lower_ty(*elem));
+                let len_const = len.map(|eid| self.extract_length_const(eid));
+                HirTyKind::Array(elem, len_const)
             }
         };
         HirTy { kind, span }

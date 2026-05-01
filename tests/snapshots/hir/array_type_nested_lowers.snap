@@ -1,0 +1,3 @@
+HirModule
+  Fn[0] matrix(m[Local(0)]: [[i32; 2]; 3])
+    Block

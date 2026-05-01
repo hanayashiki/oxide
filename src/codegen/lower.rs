@@ -285,6 +285,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             HirExprKind::Index { .. } => {
                 panic!("v0 codegen: index should have been rejected at typeck")
             }
+            HirExprKind::ArrayLit(_) => {
+                panic!("v0 codegen: array literal should have been rejected at typeck")
+            }
             HirExprKind::Field { base, name } => self.emit_field(fx, base, &name),
             HirExprKind::StructLit { adt, fields } => {
                 Some(self.emit_struct_lit(fx, adt, &fields))

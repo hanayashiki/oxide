@@ -1,0 +1,5 @@
+Module
+  Fn buf() -> i32
+    Block
+      Let b: [u8; Int(1024)] = [Int(0); Int(1024)]
+      tail: Int(0)

@@ -1,0 +1,5 @@
+Module
+  Fn empty() -> i32
+    Block
+      Let a: [i32; Int(0)] = []
+      tail: Int(0)

@@ -1,0 +1,13 @@
+Module
+  Fn weird() -> i32
+    Block
+== diagnostics ==
+[E0101] Error: unexpected token: found Star
+   ╭─[ array_repeat_non_int_lit_length_rejected.ox:2:29 ]
+   │
+ 2 │     let a: [i32; 4] = [0; 2 * 2];
+   │                             ┬  
+   │                             ╰── unexpected here
+   │ 
+   │ Note: expected: token
+───╯

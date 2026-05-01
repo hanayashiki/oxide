@@ -1,0 +1,4 @@
+HirModule
+  Fn[0] buf()
+    Block
+      Let(0, "b", ArrayRepeat(Int(0), 5))

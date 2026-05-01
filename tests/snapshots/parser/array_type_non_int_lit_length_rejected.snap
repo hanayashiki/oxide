@@ -1,0 +1,11 @@
+Module
+== diagnostics ==
+[E0101] Error: unexpected token: found Plus
+   ╭─[ array_type_non_int_lit_length_rejected.ox:1:21 ]
+   │
+ 1 │ fn weird(a: [i32; 1 + 1]) -> i32 { 0 }
+   │                     ┬  
+   │                     ╰── unexpected here
+   │ 
+   │ Note: expected: token
+───╯
