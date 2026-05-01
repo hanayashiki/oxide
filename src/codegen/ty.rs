@@ -64,12 +64,12 @@ pub fn lower_ty<'ctx>(
             panic!("lower_ty called on non-value type {}", tcx.render(ty))
         }
         TyKind::Fn(_, _) => panic!("lower_ty called on Fn — use lower_fn_type"),
-        // Phase A Step 4: TyKind::Array exists but isn't produced by
-        // typeck yet (Step 5 wires `resolve_named_ty`). Real codegen
-        // lowering (LLVM `[N x T]` for sized; reject for unsized as a
-        // value type) is Phase B.
-        TyKind::Array(_, _) => {
-            panic!("v0 codegen: Array types should not reach codegen until Phase B")
+        TyKind::Array(elem, Some(n)) => {
+            let elem_ll = lower_ty(ctx, tcx, adt_ll, *elem);
+            elem_ll.array_type(*n as u32).into()
+        }
+        TyKind::Array(_, None) => {
+            unreachable!("Array(_, None) is not a value type; typeck E0269 should have rejected")
         }
         TyKind::Infer(_) | TyKind::Error => {
             panic!("post-typeck type is unresolved: {}", tcx.render(ty))
@@ -94,6 +94,13 @@ pub fn lower_prim<'ctx>(ctx: &'ctx Context, p: PrimTy) -> inkwell::types::IntTyp
 
 /// Build a `FunctionType` from a typecheck `FnSig`. Unit/Never returns
 /// become LLVM `void`.
+///
+/// Array params lower to LLVM `ptr` (manual byval ABI per
+/// spec/09_ARRAY.md): the caller copies into a fresh slot and passes
+/// the pointer; the callee uses the incoming ptr directly as the
+/// param's storage. Array *returns* lower normally to `[N x T]` and
+/// rely on LLVM's calling-convention machinery to pick sret /
+/// register-return per target — Path A in the codegen plan.
 pub fn lower_fn_type<'ctx>(
     ctx: &'ctx Context,
     tcx: &TyArena,
@@ -103,7 +110,13 @@ pub fn lower_fn_type<'ctx>(
     let params: Vec<BasicMetadataTypeEnum<'ctx>> = sig
         .params
         .iter()
-        .map(|&p| lower_ty(ctx, tcx, adt_ll, p).into())
+        .map(|&p| {
+            if matches!(tcx.kind(p), TyKind::Array(_, Some(_))) {
+                ctx.ptr_type(inkwell::AddressSpace::default()).into()
+            } else {
+                lower_ty(ctx, tcx, adt_ll, p).into()
+            }
+        })
         .collect();
     if is_void_ret(tcx, sig.ret) {
         ctx.void_type().fn_type(&params, false)

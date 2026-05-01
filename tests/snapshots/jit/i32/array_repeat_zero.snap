@@ -1,0 +1,48 @@
+== ir ==
+; ModuleID = 'jit'
+source_filename = "jit"
+
+define i32 @main() {
+allocas:
+  %b.0.slot = alloca [4 x i32], align 4
+  %lit.slot = alloca [4 x i32], align 4
+  br label %body
+
+body:                                             ; preds = %allocas
+  br label %repeat.header
+
+repeat.header:                                    ; preds = %repeat.body, %body
+  %i = phi i64 [ 0, %body ], [ %i.next, %repeat.body ]
+  %cont = icmp ult i64 %i, 4
+  br i1 %cont, label %repeat.body, label %repeat.end
+
+repeat.body:                                      ; preds = %repeat.header
+  %rep.gep = getelementptr inbounds [4 x i32], ptr %lit.slot, i64 0, i64 %i
+  store i32 7, ptr %rep.gep, align 4
+  %i.next = add i64 %i, 1
+  br label %repeat.header
+
+repeat.end:                                       ; preds = %repeat.header
+  call void @llvm.memcpy.p0.p0.i64(ptr align 1 %b.0.slot, ptr align 1 %lit.slot, i64 ptrtoint (ptr getelementptr ([4 x i32], ptr null, i32 1) to i64), i1 false)
+  br i1 false, label %bounds.trap, label %bounds.ok
+
+bounds.trap:                                      ; preds = %repeat.end
+  call void @llvm.trap()
+  unreachable
+
+bounds.ok:                                        ; preds = %repeat.end
+  %idx.gep = getelementptr inbounds [4 x i32], ptr %b.0.slot, i64 0, i64 2
+  %idx.load = load i32, ptr %idx.gep, align 4
+  ret i32 %idx.load
+}
+
+; Function Attrs: nocallback nofree nounwind willreturn memory(argmem: readwrite)
+declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg) #0
+
+; Function Attrs: cold noreturn nounwind memory(inaccessiblemem: write)
+declare void @llvm.trap() #1
+
+attributes #0 = { nocallback nofree nounwind willreturn memory(argmem: readwrite) }
+attributes #1 = { cold noreturn nounwind memory(inaccessiblemem: write) }
+== result ==
+7

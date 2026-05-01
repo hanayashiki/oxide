@@ -1,0 +1,52 @@
+== ir ==
+; ModuleID = 'jit'
+source_filename = "jit"
+
+define [3 x i32] @make() {
+allocas:
+  %lit.slot = alloca [3 x i32], align 4
+  br label %body
+
+body:                                             ; preds = %allocas
+  %lit.gep = getelementptr inbounds [3 x i32], ptr %lit.slot, i64 0, i64 0
+  store i32 100, ptr %lit.gep, align 4
+  %lit.gep1 = getelementptr inbounds [3 x i32], ptr %lit.slot, i64 0, i64 1
+  store i32 200, ptr %lit.gep1, align 4
+  %lit.gep2 = getelementptr inbounds [3 x i32], ptr %lit.slot, i64 0, i64 2
+  store i32 300, ptr %lit.gep2, align 4
+  %ret.load = load [3 x i32], ptr %lit.slot, align 4
+  ret [3 x i32] %ret.load
+}
+
+define i32 @main() {
+allocas:
+  %a.0.slot = alloca [3 x i32], align 4
+  %call.ret.slot = alloca [3 x i32], align 4
+  br label %body
+
+body:                                             ; preds = %allocas
+  %call = call [3 x i32] @make()
+  store [3 x i32] %call, ptr %call.ret.slot, align 4
+  call void @llvm.memcpy.p0.p0.i64(ptr align 1 %a.0.slot, ptr align 1 %call.ret.slot, i64 ptrtoint (ptr getelementptr ([3 x i32], ptr null, i32 1) to i64), i1 false)
+  br i1 false, label %bounds.trap, label %bounds.ok
+
+bounds.trap:                                      ; preds = %body
+  call void @llvm.trap()
+  unreachable
+
+bounds.ok:                                        ; preds = %body
+  %idx.gep = getelementptr inbounds [3 x i32], ptr %a.0.slot, i64 0, i64 2
+  %idx.load = load i32, ptr %idx.gep, align 4
+  ret i32 %idx.load
+}
+
+; Function Attrs: nocallback nofree nounwind willreturn memory(argmem: readwrite)
+declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg) #0
+
+; Function Attrs: cold noreturn nounwind memory(inaccessiblemem: write)
+declare void @llvm.trap() #1
+
+attributes #0 = { nocallback nofree nounwind willreturn memory(argmem: readwrite) }
+attributes #1 = { cold noreturn nounwind memory(inaccessiblemem: write) }
+== result ==
+300

@@ -1,0 +1,79 @@
+== ir ==
+; ModuleID = 'jit'
+source_filename = "jit"
+
+define i32 @first(ptr %a) {
+allocas:
+  br label %body
+
+body:                                             ; preds = %allocas
+  br i1 false, label %bounds.trap, label %bounds.ok
+
+bounds.trap:                                      ; preds = %body
+  call void @llvm.trap()
+  unreachable
+
+bounds.ok:                                        ; preds = %body
+  %idx.gep = getelementptr inbounds [3 x i32], ptr %a, i64 0, i64 0
+  %idx.load = load i32, ptr %idx.gep, align 4
+  ret i32 %idx.load
+}
+
+define i32 @main() {
+allocas:
+  %a.1.slot = alloca [3 x i32], align 4
+  %lit.slot = alloca [3 x i32], align 4
+  %b.2.slot = alloca [8 x i8], align 1
+  %lit.slot3 = alloca [8 x i8], align 1
+  %call.arg.slot = alloca [3 x i32], align 4
+  br label %body
+
+body:                                             ; preds = %allocas
+  %lit.gep = getelementptr inbounds [3 x i32], ptr %lit.slot, i64 0, i64 0
+  store i32 1, ptr %lit.gep, align 4
+  %lit.gep1 = getelementptr inbounds [3 x i32], ptr %lit.slot, i64 0, i64 1
+  store i32 2, ptr %lit.gep1, align 4
+  %lit.gep2 = getelementptr inbounds [3 x i32], ptr %lit.slot, i64 0, i64 2
+  store i32 3, ptr %lit.gep2, align 4
+  call void @llvm.memcpy.p0.p0.i64(ptr align 1 %a.1.slot, ptr align 1 %lit.slot, i64 ptrtoint (ptr getelementptr ([3 x i32], ptr null, i32 1) to i64), i1 false)
+  br label %repeat.header
+
+repeat.header:                                    ; preds = %repeat.body, %body
+  %i = phi i64 [ 0, %body ], [ %i.next, %repeat.body ]
+  %cont = icmp ult i64 %i, 8
+  br i1 %cont, label %repeat.body, label %repeat.end
+
+repeat.body:                                      ; preds = %repeat.header
+  %rep.gep = getelementptr inbounds [8 x i8], ptr %lit.slot3, i64 0, i64 %i
+  store i8 0, ptr %rep.gep, align 1
+  %i.next = add i64 %i, 1
+  br label %repeat.header
+
+repeat.end:                                       ; preds = %repeat.header
+  call void @llvm.memcpy.p0.p0.i64(ptr align 1 %b.2.slot, ptr align 1 %lit.slot3, i64 ptrtoint (ptr getelementptr ([8 x i8], ptr null, i32 1) to i64), i1 false)
+  call void @llvm.memcpy.p0.p0.i64(ptr align 1 %call.arg.slot, ptr align 1 %a.1.slot, i64 ptrtoint (ptr getelementptr ([3 x i32], ptr null, i32 1) to i64), i1 false)
+  %call = call i32 @first(ptr %call.arg.slot)
+  br i1 false, label %bounds.trap, label %bounds.ok
+
+bounds.trap:                                      ; preds = %repeat.end
+  call void @llvm.trap()
+  unreachable
+
+bounds.ok:                                        ; preds = %repeat.end
+  %idx.gep = getelementptr inbounds [8 x i8], ptr %b.2.slot, i64 0, i64 0
+  %idx.load = load i8, ptr %idx.gep, align 1
+  %zext = zext i8 %idx.load to i32
+  %add = add i32 %call, %zext
+  ret i32 %add
+}
+
+; Function Attrs: cold noreturn nounwind memory(inaccessiblemem: write)
+declare void @llvm.trap() #0
+
+; Function Attrs: nocallback nofree nounwind willreturn memory(argmem: readwrite)
+declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg) #1
+
+attributes #0 = { cold noreturn nounwind memory(inaccessiblemem: write) }
+attributes #1 = { nocallback nofree nounwind willreturn memory(argmem: readwrite) }
+== result ==
+1

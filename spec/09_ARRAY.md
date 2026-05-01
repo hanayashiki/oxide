@@ -728,18 +728,48 @@ TBD-T7) and applies the **same rule to arrays**:
 
 | Position | `Array(_, Some(N))` | `Array(_, None)` |
 |---|---|---|
-| Internal fn parameter | ✓ — LLVM internal ABI | ✗ — not a value type anywhere (E0269) |
-| Internal fn return | ✓ — LLVM internal ABI (memcpy / sret) | ✗ |
+| Internal fn parameter | ✓ — caller-byval via memcpy + ptr-passed | ✗ — not a value type anywhere (E0269) |
+| Internal fn return | ✓ — `[N x T]` return value (Path A) | ✗ |
 | `extern "C"` fn parameter | ✗ — E0264 ArrayByValueAtExternC | ✗ — already E0269 |
 | `extern "C"` fn return | ✗ — E0264 ArrayByValueAtExternC | ✗ — already E0269 |
 | `let` binding init / `=` rhs | ✓ — Model 2 copy via memcpy | n/a |
 
 Internal-ABI rationale: we have value semantics for whole-array
 assignment (Model 2 — copy via `llvm.memcpy`). Forbidding
-fn-by-value while allowing let-by-value would be asymmetric. LLVM's
-`[N x T]` parameters and returns lower correctly under its
-internal calling convention; we emit straightforward IR and let
-LLVM handle the platform-specific pieces.
+fn-by-value while allowing let-by-value would be asymmetric.
+
+**Concrete codegen choice (Path A).** The internal ABI splits across
+the param and return positions:
+
+- **Parameters: manual byval via `ptr`.** `lower_fn_type` lowers each
+  `Array(_, Some(N))` param to LLVM `ptr`. At the call site, the
+  caller alloca's a fresh slot, `llvm.memcpy`s the source array into
+  it, and passes the slot pointer as the arg. The callee receives
+  the ptr and treats it as the local's storage directly (no
+  alloca+store on entry). This keeps every array-typed expression
+  uniformly place-shaped through the codegen — Locals, ArrayLits,
+  Index, Field-into-array all live in alloca'd slots, and the
+  arrival into a fn body matches that invariant.
+
+- **Return: `[N x T]` value, two thin bridges.** `lower_fn_type`
+  lowers `Array(_, Some(N))` returns to literal LLVM `[N x T]`. We
+  trust LLVM's calling convention to do the platform-specific ABI
+  rewrite (sret for large arrays on most targets, register return
+  for small ones) — we don't manage `sret` attributes manually. To
+  keep arrays-as-places consistent across the call boundary:
+  - **Inside the returning fn**, `emit_return` for an array operand
+    loads the aggregate from the operand's place ptr, then issues
+    `ret [N x T] %loaded`.
+  - **At the call site**, when the called fn returns an array,
+    `emit_call` allocates a temp slot, stores the returned
+    `[N x T]` value into it, and exposes the slot pointer as the
+    Call expression's place form. Downstream consumers (let-init,
+    Index, Field) treat it identically to any other array place.
+
+This is the design point chosen over a manual-`sret`-attribute
+approach (which would add a hidden first ptr param to array-
+returning fn signatures and write through it). Path A produces
+ABI-correct code at any opt level with materially less plumbing.
 
 Boundary rationale: at `extern "C"`, the only honest position is
 "cross via a pointer." Same as struct-by-value in 08.
@@ -933,22 +963,25 @@ codegen_array_lit_repeat(init: HExprId, len: HirConst) -> PointerValue:
     slot     = builder.alloca(arr_ll)
     init_v   = codegen_expr(init)
 
-    # Fast path: integer zero of any width → llvm.memset
-    if is_integer_zero(init_v):
-        size_bytes = data_layout.size_of(arr_ll)
-        builder.build_memset(slot, ctx.i8_type().const_zero(), size_bytes, align)
-    else:
-        # General path: explicit loop
-        for i in 0..n:
-            gep = GEP arr_ll slot, 0, i
-            store init_v at gep
+    # v0: always-emit runtime loop. No memset fast-path for `[0; N]`
+    # — see TBD in "Out of scope". 3-bb shape with phi counter,
+    # mirrors emit_short_circuit's structure.
+    repeat.header:                                   # phi i64 counter
+      cont = icmp ult i, n
+      br cont, repeat.body, repeat.end
+    repeat.body:
+      gep = GEP arr_ll slot, 0, i
+      store init_v at gep
+      i_next = add i, 1
+      br repeat.header
+    repeat.end:                                       # builder positioned here
 
     slot
 ```
 
-For very large `n` with a non-zero init, the loop is preferred over
-unrolled stores. LLVM's optimizer may unroll for small `n`. We
-don't need to make that call ourselves.
+LLVM unrolls / coalesces this to a memset at higher opt levels for
+constant-init loops. The deferred memset fast-path would shave that
+work to a single intrinsic call at `-O0`.
 
 ### Whole-array copy
 
@@ -1074,7 +1107,7 @@ ok:
 Optimizer folds the guard (`%cmp` is constant-false) and the load
 becomes `i32 1`. The runtime program prints "1" effectively.
 
-### Repeat literal with memset fast-path
+### Repeat literal in an array-returning fn (Path A)
 
 ```rust
 fn make_buf() -> [u8; 1024] {
@@ -1082,15 +1115,45 @@ fn make_buf() -> [u8; 1024] {
 }
 ```
 
-LLVM IR:
+LLVM IR (v0 codegen — runtime loop, no memset fast-path; Path A
+return ABI):
 
 ```llvm
-define void @make_buf(ptr sret([1024 x i8]) %retslot) {
-entry:
-  call void @llvm.memset.p0.i64(ptr %retslot, i8 0, i64 1024, i1 false)
-  ret void
+define [1024 x i8] @make_buf() {
+allocas:
+  %lit.slot = alloca [1024 x i8]
+  br label %body
+
+body:
+  br label %repeat.header
+
+repeat.header:
+  %i = phi i64 [0, %body], [%i.next, %repeat.body]
+  %cont = icmp ult i64 %i, 1024
+  br i1 %cont, label %repeat.body, label %repeat.end
+
+repeat.body:
+  %rep.gep = getelementptr inbounds [1024 x i8], ptr %lit.slot, i64 0, i64 %i
+  store i8 0, ptr %rep.gep
+  %i.next = add i64 %i, 1
+  br label %repeat.header
+
+repeat.end:
+  %ret.load = load [1024 x i8], ptr %lit.slot
+  ret [1024 x i8] %ret.load
 }
 ```
+
+`make_buf`'s return type is `[1024 x i8]` literally. LLVM's
+calling convention may rewrite this to an `sret`-shaped form at
+higher opt levels (a hidden `ptr sret([1024 x i8])` param plus
+`ret void`); the user-visible behavior is identical. Codegen
+stays simple: no manual `sret` attribute management.
+
+A future memset fast-path for `[0; N]` would replace the loop
+with one `llvm.memset.p0.i64(ptr %lit.slot, i8 0, i64 1024, i1
+false)` call. Deferred for v0 — see the corresponding TBD in
+the Out of scope / TBDs section.
 
 Sret because `[1024 x i8]` exceeds the register-return budget on
 typical platforms; LLVM's internal ABI handles the rewrite.
@@ -1247,6 +1310,13 @@ use (`ArrayLenZeroForbidden` was a planned-but-unused defer flag).
 
 ## TBDs and future evolution
 
+- **memset fast-path for `[0; N]`.** v0 codegen always emits a
+  runtime loop for the Repeat form, even when `init` is the integer
+  zero. LLVM coalesces small constant-init loops at higher opt
+  levels but the unoptimized IR is verbose for large `N`. Spec'd
+  fast path: detect integer-zero init, emit one `llvm.memset.p0.i64`
+  call. Easy follow-up; the codegen plan deliberately deferred this
+  to keep the initial cut tight.
 - **Bidirectional length inference** — would enable both `[init; _]`
   and `[]` literals by reading the expected type. Useful but
   non-trivial; defer.

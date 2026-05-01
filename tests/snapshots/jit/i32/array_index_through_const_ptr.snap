@@ -1,0 +1,56 @@
+== ir ==
+; ModuleID = 'jit'
+source_filename = "jit"
+
+define i32 @at(ptr %p, i64 %i) {
+allocas:
+  %p.0.slot = alloca ptr, align 8
+  %i.1.slot = alloca i64, align 8
+  br label %body
+
+body:                                             ; preds = %allocas
+  store ptr %p, ptr %p.0.slot, align 8
+  store i64 %i, ptr %i.1.slot, align 4
+  %load = load ptr, ptr %p.0.slot, align 8
+  %load1 = load i64, ptr %i.1.slot, align 4
+  %bounds.cmp = icmp uge i64 %load1, 3
+  br i1 %bounds.cmp, label %bounds.trap, label %bounds.ok
+
+bounds.trap:                                      ; preds = %body
+  call void @llvm.trap()
+  unreachable
+
+bounds.ok:                                        ; preds = %body
+  %idx.gep = getelementptr inbounds [3 x i32], ptr %load, i64 0, i64 %load1
+  %idx.load = load i32, ptr %idx.gep, align 4
+  ret i32 %idx.load
+}
+
+define i32 @main() {
+allocas:
+  %a.2.slot = alloca [3 x i32], align 4
+  %lit.slot = alloca [3 x i32], align 4
+  br label %body
+
+body:                                             ; preds = %allocas
+  %lit.gep = getelementptr inbounds [3 x i32], ptr %lit.slot, i64 0, i64 0
+  store i32 11, ptr %lit.gep, align 4
+  %lit.gep1 = getelementptr inbounds [3 x i32], ptr %lit.slot, i64 0, i64 1
+  store i32 22, ptr %lit.gep1, align 4
+  %lit.gep2 = getelementptr inbounds [3 x i32], ptr %lit.slot, i64 0, i64 2
+  store i32 33, ptr %lit.gep2, align 4
+  call void @llvm.memcpy.p0.p0.i64(ptr align 1 %a.2.slot, ptr align 1 %lit.slot, i64 ptrtoint (ptr getelementptr ([3 x i32], ptr null, i32 1) to i64), i1 false)
+  %call = call i32 @at(ptr %a.2.slot, i64 2)
+  ret i32 %call
+}
+
+; Function Attrs: cold noreturn nounwind memory(inaccessiblemem: write)
+declare void @llvm.trap() #0
+
+; Function Attrs: nocallback nofree nounwind willreturn memory(argmem: readwrite)
+declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg) #1
+
+attributes #0 = { cold noreturn nounwind memory(inaccessiblemem: write) }
+attributes #1 = { nocallback nofree nounwind willreturn memory(argmem: readwrite) }
+== result ==
+33

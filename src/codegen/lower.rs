@@ -11,14 +11,15 @@ use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
-use inkwell::types::BasicTypeEnum;
+use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::{
     BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue,
     UnnamedAddress,
 };
 
 use crate::hir::{
-    FieldIdx, FnId, HBlockId, HElseArm, HExprId, HirExprKind, HirModule, LocalId, VariantIdx,
+    FieldIdx, FnId, HBlockId, HElseArm, HExprId, HirArrayLit, HirConst, HirExprKind, HirModule,
+    LocalId, VariantIdx,
 };
 use crate::parser::ast::{AssignOp, BinOp, UnOp};
 use crate::typeck::{AdtId, TyId, TyKind, TypeckResults};
@@ -68,6 +69,7 @@ pub fn codegen<'ctx>(
         fn_decls,
         adt_ll,
         str_counter: Cell::new(0),
+        llvm_trap: Cell::new(None),
     };
 
     // Pass 2 — define. Each fn body gets a fresh FnCodegenContext on
@@ -104,6 +106,10 @@ struct Codegen<'a, 'ctx> {
     /// `@.str.1`, …). Inkwell uses interior mutability everywhere so the
     /// rest of `Codegen` lives behind `&self`; we do the same here.
     str_counter: Cell<u32>,
+    /// Cached `declare void @llvm.trap()` so each module emits the
+    /// declaration at most once. Populated lazily by
+    /// `get_or_declare_trap` on the first bounds-check site.
+    llvm_trap: Cell<Option<FunctionValue<'ctx>>>,
 }
 
 /// Per-fn transient state. Lives on the stack for the duration of one fn
@@ -164,6 +170,121 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         self.typeck_results.type_of_local(lid)
     }
 
+    /// `true` iff the resolved typeck kind is `Array(_, Some(_))`.
+    /// Used at every "is this a place-form array?" boundary
+    /// (let-init, fn-arg, fn-return, Local/Field/Index dispatch).
+    fn is_sized_array(&self, ty: TyId) -> bool {
+        matches!(self.typeck_results.tys().kind(ty), TyKind::Array(_, Some(_)))
+    }
+
+    // ---------- array helpers ----------
+
+    /// Lazily declare `void @llvm.trap()` and return its FunctionValue.
+    /// First call inserts the declaration into the module; subsequent
+    /// calls hit the cache.
+    fn get_or_declare_trap(&self) -> FunctionValue<'ctx> {
+        if let Some(fv) = self.llvm_trap.get() {
+            return fv;
+        }
+        let fn_ty = self.ctx.void_type().fn_type(&[], false);
+        let fv = self.module.add_function("llvm.trap", fn_ty, None);
+        self.llvm_trap.set(Some(fv));
+        fv
+    }
+
+    /// Bounds-check `idx` against the static length `n`. Builds:
+    ///   %cmp = icmp uge i64 %idx, N
+    ///   br %cmp, %bounds.trap, %bounds.ok
+    ///   bounds.trap: call @llvm.trap(); unreachable
+    ///   bounds.ok:  ; builder positioned here on return
+    /// Per spec/09_ARRAY.md the guard is always emitted; LLVM folds
+    /// const-known-safe cases at any opt level.
+    fn emit_bounds_check(&self, fx: &FnCodegenContext<'ctx>, idx: IntValue<'ctx>, n: u64) {
+        let i64_ty = self.ctx.i64_type();
+        let n_v = i64_ty.const_int(n, false);
+        let cmp = self
+            .builder
+            .build_int_compare(IntPredicate::UGE, idx, n_v, "bounds.cmp")
+            .unwrap();
+        let parent = fx.fn_value;
+        let trap_bb = self.ctx.append_basic_block(parent, "bounds.trap");
+        let ok_bb = self.ctx.append_basic_block(parent, "bounds.ok");
+        self.builder
+            .build_conditional_branch(cmp, trap_bb, ok_bb)
+            .unwrap();
+        self.builder.position_at_end(trap_bb);
+        let trap = self.get_or_declare_trap();
+        self.builder.build_call(trap, &[], "trap").unwrap();
+        self.builder.build_unreachable().unwrap();
+        self.builder.position_at_end(ok_bb);
+    }
+
+    /// `llvm.memcpy` of an `[N x T]` aggregate from `src` to `dst`.
+    /// Uses the LLVM type's static `size_of()` (an i64 const). Align is
+    /// 1 — soundness-safe and lets LLVM choose the actual alignment via
+    /// the operand types.
+    fn emit_memcpy_array(
+        &self,
+        dst: PointerValue<'ctx>,
+        src: PointerValue<'ctx>,
+        array_ty: TyId,
+    ) {
+        let ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, array_ty);
+        let size = ll.size_of().expect("array type has size_of");
+        self.builder
+            .build_memcpy(dst, 1, src, 1, size)
+            .expect("build_memcpy");
+    }
+
+    /// Runtime-loop fill of `slot: [N x T]` with `init_v` repeated `n`
+    /// times. Per Q2 decision: no memset fast-path for `[0; N]` —
+    /// always emit the loop and let LLVM coalesce. Three-bb shape
+    /// modeled after `emit_short_circuit`.
+    fn emit_repeat_loop(
+        &self,
+        fx: &mut FnCodegenContext<'ctx>,
+        slot: PointerValue<'ctx>,
+        arr_ll: BasicTypeEnum<'ctx>,
+        init_v: BasicValueEnum<'ctx>,
+        n: u64,
+    ) {
+        let i64_ty = self.ctx.i64_type();
+        let zero = i64_ty.const_zero();
+        let one = i64_ty.const_int(1, false);
+        let n_v = i64_ty.const_int(n, false);
+        let parent = fx.fn_value;
+        let entry_bb = self.builder.get_insert_block().unwrap();
+        let header_bb = self.ctx.append_basic_block(parent, "repeat.header");
+        let body_bb = self.ctx.append_basic_block(parent, "repeat.body");
+        let end_bb = self.ctx.append_basic_block(parent, "repeat.end");
+        self.builder.build_unconditional_branch(header_bb).unwrap();
+
+        self.builder.position_at_end(header_bb);
+        let phi = self.builder.build_phi(i64_ty, "i").unwrap();
+        let i_v = phi.as_basic_value().into_int_value();
+        let cmp = self
+            .builder
+            .build_int_compare(IntPredicate::ULT, i_v, n_v, "cont")
+            .unwrap();
+        self.builder
+            .build_conditional_branch(cmp, body_bb, end_bb)
+            .unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let gep = unsafe {
+            self.builder
+                .build_in_bounds_gep(arr_ll, slot, &[zero, i_v], "rep.gep")
+                .unwrap()
+        };
+        self.builder.build_store(gep, init_v).unwrap();
+        let i_next = self.builder.build_int_add(i_v, one, "i.next").unwrap();
+        let body_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(header_bb).unwrap();
+        phi.add_incoming(&[(&zero, entry_bb), (&i_next, body_end)]);
+
+        self.builder.position_at_end(end_bb);
+    }
+
     // ---------- per-fn entry ----------
 
     fn lower_fn(&self, fid: FnId) {
@@ -186,16 +307,24 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         };
 
         // Alloca slots for params and store the incoming arg values.
+        // Array-typed params skip the alloca+store: per Path A in
+        // spec/09_ARRAY.md, `lower_fn_type` lowered the param to LLVM
+        // `ptr` and the caller (`emit_call`) memcpy'd into a fresh slot
+        // before passing. The incoming `ptr` IS the local's storage.
         let hir_fn = &self.hir.fns[fid];
         for (i, &lid) in hir_fn.params.iter().enumerate() {
             let pty = self.local_ty(lid);
+            let arg = fnv.get_nth_param(i as u32).expect("param exists");
+            if self.is_sized_array(pty) {
+                fx.locals.insert(lid, arg.into_pointer_value());
+                continue;
+            }
             let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, pty);
             let slot = self.alloca_in_entry(
                 &fx,
                 llty,
                 &format!("{}.{}.slot", self.hir.locals[lid].name, lid.raw()),
             );
-            let arg = fnv.get_nth_param(i as u32).expect("param exists");
             self.builder.build_store(slot, arg).unwrap();
             fx.locals.insert(lid, slot);
         }
@@ -210,6 +339,18 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             let sig = self.typeck_results.fn_sig(fid);
             if is_void_ret(self.typeck_results.tys(), sig.ret) {
                 self.builder.build_return(None).unwrap();
+            } else if self.is_sized_array(sig.ret) {
+                // Array-typed return — Path A: body produced a place ptr;
+                // load the aggregate and return it by value. LLVM's
+                // calling convention does the sret/register-return rewrite.
+                let v = body_val.expect("non-void fn body produced no value");
+                let arr_ll =
+                    lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, sig.ret);
+                let loaded = self
+                    .builder
+                    .build_load(arr_ll, v.into_pointer_value(), "ret.load")
+                    .unwrap();
+                self.builder.build_return(Some(&loaded)).unwrap();
             } else {
                 let v = body_val.expect("non-void fn body produced no value");
                 self.builder.build_return(Some(&v)).unwrap();
@@ -255,7 +396,17 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             HirExprKind::IntLit(n) => Some(self.emit_int_lit(eid, n)),
             HirExprKind::BoolLit(b) => Some(self.ctx.bool_type().const_int(b as u64, false).into()),
             HirExprKind::CharLit(c) => Some(self.ctx.i8_type().const_int(c as u64, false).into()),
-            HirExprKind::Local(lid) => Some(self.emit_local_load(fx, lid)),
+            HirExprKind::Local(lid) => {
+                // Array-typed locals stay in place form: return the slot ptr,
+                // not the loaded aggregate. Consumers (let-init, fn-arg,
+                // Index, Field) bridge as needed. See spec/09_ARRAY.md
+                // "arrays-as-places everywhere".
+                if self.is_sized_array(self.local_ty(lid)) {
+                    Some(fx.locals[&lid].into())
+                } else {
+                    Some(self.emit_local_load(fx, lid))
+                }
+            }
             HirExprKind::Unary { op, expr } => self.emit_unary(fx, op, expr),
             HirExprKind::Binary { op, lhs, rhs } => self.emit_binary(fx, eid, op, lhs, rhs),
             HirExprKind::Assign { op, target, rhs } => {
@@ -282,12 +433,8 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 panic!("v0 codegen: fn references are only valid as call targets")
             }
             HirExprKind::StrLit(s) => Some(self.emit_str_lit(&s)),
-            HirExprKind::Index { .. } => {
-                panic!("v0 codegen: index should have been rejected at typeck")
-            }
-            HirExprKind::ArrayLit(_) => {
-                panic!("v0 codegen: array literal should have been rejected at typeck")
-            }
+            HirExprKind::Index { base, index } => self.emit_index_rvalue(fx, base, index),
+            HirExprKind::ArrayLit(lit) => Some(self.emit_array_lit(fx, lit, self.ty_of(eid))),
             HirExprKind::Field { base, name } => self.emit_field(fx, base, &name),
             HirExprKind::StructLit { adt, fields } => {
                 Some(self.emit_struct_lit(fx, adt, &fields))
@@ -355,9 +502,15 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         self.builder.build_load(llty, slot, "load").unwrap()
     }
 
-    fn lvalue(&self, fx: &FnCodegenContext<'ctx>, eid: HExprId) -> PointerValue<'ctx> {
+    fn lvalue(&self, fx: &mut FnCodegenContext<'ctx>, eid: HExprId) -> PointerValue<'ctx> {
         match self.hir.exprs[eid].kind.clone() {
             HirExprKind::Local(lid) => fx.locals[&lid],
+            HirExprKind::Index { base, index } => {
+                // Bounds check fires here too — writing past the end is
+                // as wrong as reading past it. Same auto-deref machinery
+                // as the rvalue path.
+                self.emit_index_place(fx, base, index).0
+            }
             HirExprKind::Field { base, name } => {
                 let base_ptr = self.lvalue(fx, base);
                 let base_ty = self.ty_of(base);
@@ -413,16 +566,39 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 .builder
                 .build_struct_gep(base_ll, base_ptr, field_idx, "fld.gep")
                 .unwrap();
-            Some(self.builder.build_load(field_ll, gep, "fld.load").unwrap())
+            // Array-typed fields stay in place form: hand back the GEP'd
+            // pointer instead of loading the aggregate. Mirrors the
+            // arrays-as-places invariant for Locals.
+            if self.is_sized_array(field_ty) {
+                Some(gep.into())
+            } else {
+                Some(self.builder.build_load(field_ll, gep, "fld.load").unwrap())
+            }
         } else {
             // Value path — base is an rvalue aggregate; pull the field
             // out via extractvalue, no memory traffic.
             let agg = self.emit_expr(fx, base)?;
-            let val = self
-                .builder
-                .build_extract_value(agg.into_struct_value(), field_idx, "fld")
-                .unwrap();
-            Some(val)
+            if self.is_sized_array(field_ty) {
+                // Bridge: extract the array value, then alloca a temp slot
+                // and store it so the result has place form. Rare path —
+                // only fires when the struct itself is in SSA value form
+                // (e.g., direct Field on a Call return), which v0 codegen
+                // doesn't construct for ADTs containing arrays. Future
+                // work: revisit if this trips.
+                let arr_val = self
+                    .builder
+                    .build_extract_value(agg.into_struct_value(), field_idx, "fld.arr")
+                    .unwrap();
+                let slot = self.alloca_in_entry(fx, field_ll, "fld.arr.slot");
+                self.builder.build_store(slot, arr_val).unwrap();
+                Some(slot.into())
+            } else {
+                let val = self
+                    .builder
+                    .build_extract_value(agg.into_struct_value(), field_idx, "fld")
+                    .unwrap();
+                Some(val)
+            }
         }
     }
 
@@ -461,6 +637,170 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             agg = new_agg.into_struct_value();
         }
         agg.as_basic_value_enum()
+    }
+
+    // ---------- array literals & indexing ----------
+
+    /// Lower an array literal to a fresh alloca-backed place.
+    /// Returns the slot pointer as a `BasicValueEnum::PointerValue`;
+    /// downstream consumers (let-init, fn-arg, Index, …) see this as
+    /// the literal's place form. Per spec/09_ARRAY.md "ArrayLit shape"
+    /// (Q1 in the codegen plan): alloca + GEP+store, no SSA aggregate.
+    fn emit_array_lit(
+        &self,
+        fx: &mut FnCodegenContext<'ctx>,
+        lit: HirArrayLit,
+        array_ty: TyId,
+    ) -> BasicValueEnum<'ctx> {
+        let arr_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, array_ty);
+        let slot = self.alloca_in_entry(fx, arr_ll, "lit.slot");
+        let i64_ty = self.ctx.i64_type();
+        let zero = i64_ty.const_zero();
+        match lit {
+            HirArrayLit::Elems(es) => {
+                for (i, eid) in es.into_iter().enumerate() {
+                    let v = self
+                        .emit_expr(fx, eid)
+                        .expect("array literal element produced no value");
+                    let idx_v = i64_ty.const_int(i as u64, false);
+                    let gep = unsafe {
+                        self.builder
+                            .build_in_bounds_gep(arr_ll, slot, &[zero, idx_v], "lit.gep")
+                            .unwrap()
+                    };
+                    self.builder.build_store(gep, v).unwrap();
+                }
+            }
+            HirArrayLit::Repeat {
+                init,
+                len: HirConst::Lit(n),
+            } => {
+                let init_v = self
+                    .emit_expr(fx, init)
+                    .expect("array repeat init produced no value");
+                self.emit_repeat_loop(fx, slot, arr_ll, init_v, n);
+            }
+            HirArrayLit::Repeat {
+                len: HirConst::Error,
+                ..
+            } => unreachable!(
+                "HirConst::Error in repeat-literal length unreachable in v0 (parser rejects non-IntLit)"
+            ),
+        }
+        slot.into()
+    }
+
+    /// Index rvalue — `base[idx]` as a value-producing expression.
+    /// Dispatches on the base's resolved typeck kind:
+    ///
+    ///   - `Array(elem, Some(n))`        place-form base; bounds check;
+    ///                                   GEP `[N x T], ptr, 0, idx`; load.
+    ///   - `Ptr(Array(elem, Some(n)),_)` value-form base; bounds check;
+    ///                                   same GEP shape; load.
+    ///   - `Ptr(Array(elem, None),_)`    value-form base; flat element-stride
+    ///                                   GEP `T, ptr, idx`; **no bounds
+    ///                                   check** (the unsized form is the
+    ///                                   deliberate opt-out). Load.
+    ///
+    /// See spec/09_ARRAY.md "Index lowering".
+    fn emit_index_rvalue(
+        &self,
+        fx: &mut FnCodegenContext<'ctx>,
+        base_eid: HExprId,
+        idx_eid: HExprId,
+    ) -> Option<BasicValueEnum<'ctx>> {
+        let (elt_ptr, elem_ty) = self.emit_index_place(fx, base_eid, idx_eid);
+        let elem_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, elem_ty);
+        Some(
+            self.builder
+                .build_load(elem_ll, elt_ptr, "idx.load")
+                .unwrap(),
+        )
+    }
+
+    /// Index lvalue — produces the element pointer (no load) for use as
+    /// an assignment target or `&arr[i]` operand. Bounds check still
+    /// fires for sized bases (writing past the end is just as wrong as
+    /// reading past it). Returns `(elem_ptr, elem_ty_id)`.
+    ///
+    /// **Auto-deref through arbitrary `Ptr` depth.** Typeck's
+    /// `auto_deref_ptr` strips *all* outer `Ptr` layers before checking
+    /// for `Array` underneath, so `pp: *const *const [T; N]` accepts
+    /// `pp[i]`. Codegen mirrors that: peel pointer levels via
+    /// successive loads, then GEP the array. Each `Ptr` layer = one
+    /// `load ptr`. The first level is implicit (`emit_expr` of a
+    /// pointer-typed base already returns the loaded ptr value).
+    fn emit_index_place(
+        &self,
+        fx: &mut FnCodegenContext<'ctx>,
+        base_eid: HExprId,
+        idx_eid: HExprId,
+    ) -> (PointerValue<'ctx>, TyId) {
+        let base_ty = self.ty_of(base_eid);
+        let i64_ty = self.ctx.i64_type();
+        let zero = i64_ty.const_zero();
+        let tcx = self.typeck_results.tys();
+        let ptr_ll = self.ctx.ptr_type(inkwell::AddressSpace::default());
+
+        let base_v = self
+            .emit_expr(fx, base_eid)
+            .expect("index base produced no value")
+            .into_pointer_value();
+
+        // Set up the loop. At entry, `cur_ptr` addresses either the
+        // array storage (when base is an array place) or the next
+        // pointer in a chain (when base is a pointer).
+        let (mut cur_ptr, mut cur_ty) = match tcx.kind(base_ty) {
+            TyKind::Array(_, _) => (base_v, base_ty),
+            TyKind::Ptr(inner, _) => (base_v, *inner),
+            other => panic!(
+                "v0 codegen: index base has non-indexable type; typeck should have rejected ({:?})",
+                other
+            ),
+        };
+        while let TyKind::Ptr(inner, _) = tcx.kind(cur_ty) {
+            let next = *inner;
+            cur_ptr = self
+                .builder
+                .build_load(ptr_ll, cur_ptr, "deref")
+                .unwrap()
+                .into_pointer_value();
+            cur_ty = next;
+        }
+
+        let idx_v = self
+            .emit_expr(fx, idx_eid)
+            .expect("index produced no value")
+            .into_int_value();
+
+        match tcx.kind(cur_ty) {
+            TyKind::Array(elem, Some(n)) => {
+                let elem_ty = *elem;
+                let n_v = *n;
+                self.emit_bounds_check(fx, idx_v, n_v);
+                let arr_ll = lower_ty(self.ctx, tcx, &self.adt_ll, cur_ty);
+                let elt_ptr = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(arr_ll, cur_ptr, &[zero, idx_v], "idx.gep")
+                        .unwrap()
+                };
+                (elt_ptr, elem_ty)
+            }
+            TyKind::Array(elem, None) => {
+                let elem_ty = *elem;
+                let elem_ll = lower_ty(self.ctx, tcx, &self.adt_ll, elem_ty);
+                let elt_ptr = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(elem_ll, cur_ptr, &[idx_v], "idx.gep")
+                        .unwrap()
+                };
+                (elt_ptr, elem_ty)
+            }
+            other => panic!(
+                "v0 codegen: non-array reached after auto-deref; typeck should have rejected ({:?})",
+                other
+            ),
+        }
     }
 
     // ---------- unary / binary ----------
@@ -742,13 +1082,46 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         };
         let fnv = self.fn_decls[fid];
 
+        // Args. For each `Array(_, Some(_))`-typed arg: emit_expr returns
+        // the source's place ptr; we alloca a fresh "byval" slot, memcpy
+        // from src, and pass the slot ptr to build_call (the fn's LLVM
+        // signature has `ptr` for this param — see lower_fn_type). Other
+        // args flow as values.
         let mut arg_vals: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(args.len());
         for &a in args {
-            let v = self.emit_expr(fx, a).expect("call arg produced no value");
-            arg_vals.push(v.into());
+            let arg_ty = self.ty_of(a);
+            if self.is_sized_array(arg_ty) {
+                let src_ptr = self
+                    .emit_expr(fx, a)
+                    .expect("array arg produced no value")
+                    .into_pointer_value();
+                let arr_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, arg_ty);
+                let arg_slot = self.alloca_in_entry(fx, arr_ll, "call.arg.slot");
+                self.emit_memcpy_array(arg_slot, src_ptr, arg_ty);
+                arg_vals.push(arg_slot.into());
+            } else {
+                let v = self.emit_expr(fx, a).expect("call arg produced no value");
+                arg_vals.push(v.into());
+            }
         }
 
         let call = self.builder.build_call(fnv, &arg_vals, "call").unwrap();
+
+        // Return-value bridging. Path A: array returns lower as `[N x T]`
+        // values; we materialize a temp slot and store so the result has
+        // place form like every other array-typed expression.
+        let ret_ty = self.typeck_results.fn_sig(fid).ret;
+        if self.is_sized_array(ret_ty) {
+            let v = call
+                .try_as_basic_value()
+                .left()
+                .expect("array-returning call produced no value");
+            let arr_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, ret_ty);
+            let slot = self.alloca_in_entry(fx, arr_ll, "call.ret.slot");
+            self.builder.build_store(slot, v).unwrap();
+            return Some(slot.into());
+        }
+
         call.try_as_basic_value().left()
     }
 
@@ -896,7 +1269,18 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             return;
         }
 
+        let is_array_ret = self.is_sized_array(ret_ty);
         match val.and_then(|eid| self.emit_expr(fx, eid)) {
+            Some(v) if is_array_ret => {
+                // Array return — Path A: operand is a place ptr; load
+                // the aggregate before returning by value.
+                let arr_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, ret_ty);
+                let loaded = self
+                    .builder
+                    .build_load(arr_ll, v.into_pointer_value(), "ret.load")
+                    .unwrap();
+                self.builder.build_return(Some(&loaded)).unwrap();
+            }
             Some(v) => {
                 self.builder.build_return(Some(&v)).unwrap();
             }
@@ -931,7 +1315,14 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         let slot = self.alloca_in_entry(fx, llty, &format!("{}.{}.slot", local.name, lid.raw()));
         fx.locals.insert(lid, slot);
         if let Some(init_eid) = init {
-            if let Some(v) = self.emit_expr(fx, init_eid) {
+            if self.is_sized_array(ty) {
+                // Array-typed init: emit_expr returns the source's place
+                // ptr; bridge to the new local's slot via memcpy.
+                if let Some(v) = self.emit_expr(fx, init_eid) {
+                    let src_ptr = v.into_pointer_value();
+                    self.emit_memcpy_array(slot, src_ptr, ty);
+                }
+            } else if let Some(v) = self.emit_expr(fx, init_eid) {
                 self.builder.build_store(slot, v).unwrap();
             }
         }
