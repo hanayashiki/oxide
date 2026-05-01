@@ -32,28 +32,35 @@ codegen consumes through query methods.
 ```rust
 pub enum TyKind {
     Prim(PrimTy),
-    Unit,                       // ()
-    Never,                      // ! — bottom type; absorbs in coerce
+    Unit,                          // ()
+    Never,                         // ! — bottom type; absorbs in coerce
     Fn(Vec<TyId>, TyId),
-    Ptr(TyId, Mutability),      // *const T / *mut T; mutability interned alongside pointee
-    Adt(AdtId),                 // reserved: identity handle for user-defined types (see spec/08_ADT.md)
-    Infer(InferId),             // unification variable
-    Error,                      // poison; absorbs without further errors
+    Ptr(TyId, Mutability),         // *const T / *mut T; mutability interned alongside pointee
+    Adt(AdtId),                    // identity handle for user-defined types — see spec/08_ADT.md
+    Array(TyId, Option<ConstId>),  // [T; N] (Some) / [T] (None) — see spec/09_ARRAY.md
+    Infer(InferId),                // unification variable
+    Error,                         // poison; absorbs without further errors
 }
 
 pub enum PrimTy {
     I8, I16, I32, I64,
     U8, U16, U32, U64,
+    Usize, Isize,                  // target-pointer-sized; v0 lowers both to i64 (see spec/09_ARRAY.md)
     Bool,
 }
 
-pub struct TyArena { /* hash-cons: equal types share TyId */ }
+pub struct TyArena  { /* hash-cons: equal types share TyId */ }
+pub struct ConstArena { /* hash-cons for type-level u64 lengths — see spec/09_ARRAY.md */ }
 pub struct FnSig { pub params: Vec<TyId>, pub ret: TyId, pub partial: bool }
 ```
 
 `TyArena` pre-interns all primitives plus `Unit`, `Never`, and `Error`,
 exposed as fields (`tcx.i32`, `tcx.bool`, `tcx.unit`, etc.). Every
-`TyKind` constructed elsewhere goes through `intern` for dedup.
+`TyKind` constructed elsewhere goes through `intern` for dedup. The
+parallel `ConstArena` interns `ConstKind::Value(u64)` (and a recovery
+`Error` constant) used by `Array(_, Some(cid))`. Per-ADT structural
+data lives in a separate `adts: IndexVec<AdtId, AdtDef>` table; equality
+on `Adt(_)` is identity-only (`aid == aid`).
 
 ## Inference is per-function (Rust-style)
 
@@ -143,9 +150,12 @@ responsible for unifying with whatever they expected.
 | `Binary { shift, l, r }` | result = `l`'s type |
 | `Assign { _, target, rhs }` | `coerce(rhs, target)` (directional — pointer-mut subtype applies); result = `Unit` |
 | `Call { callee, args }` | callee must be `Fn(...)`; arity + per-arg `coerce` check; result = sig ret |
-| `Index/Field` | `Error`; emit `UnsupportedFeature` (E0255) — no arrays in v0; field access pending ADT support |
-| `StructLit { adt, fields }` | walk field exprs for inner diagnostics; emit `UnsupportedFeature` (E0255); result = `Error` |
-| `Cast { expr, ty }` | result = resolved `ty` (no compat check in v0) |
+| `Field { base, name }` | recurse on `base`; if its type is `Adt(aid)`, look up `name` → field type. `Adt` with no such field → E0261 `NoFieldOnAdt`. Non-ADT base → E0262 `TypeNotFieldable`. See spec/08_ADT.md. |
+| `Index { base, index }` | `Error`; emit `UnsupportedFeature` (E0255). Real typing rule (auto-deref through `Ptr<Array>`) is deferred per spec/09_ARRAY.md "Phase A Step 4/5". |
+| `StructLit { adt, fields }` | resolve `aid` from the HIR-level `HAdtId`; walk each field's value expr; per-field validation against the declared field set: unknown → E0258, missing → E0259, duplicate → E0260; per-value `coerce` against declared field type; result = `Adt(aid)`. See spec/08_ADT.md. |
+| `AddrOf { mutability, expr }` | infer `expr` (type `T`); validate `expr` is a place (HIR already filed `AddrOfNonPlace` if not); for `&mut`, `place_mutability(expr)` must be `Mut` else E0263; result = `Ptr(T, mutability)`. See spec/10_ADDRESS_OF.md. |
+| `ArrayLit(_)` | walk sub-exprs for inner diagnostics; emit `UnsupportedFeature` (E0255). Real typing rule deferred per spec/09_ARRAY.md "Phase A Step 4/5". |
+| `Cast { expr, ty }` | result = resolved `ty` (no compat check in v0; `InvalidCast` E0264 lands per spec/12_AS.md) |
 | `If { cond, then, else? }` | cond unified with `bool`; then/else go through `unify_arms` + `join_never` (or `coerce(then, Unit)` on then-arm if no else — a degenerate coercion) |
 | `Block(bid)` | recurse `infer_block` |
 | `Return(val)` | `coerce(val, cur_ret)` (or `coerce(Unit, cur_ret)` if no val); result = `Never` |
@@ -279,19 +289,32 @@ trait-ification".
 
 ```rust
 pub enum TypeError {
-    TypeMismatch              { expected: TyId, found: TyId, span: Span },    // E0250
-    UnknownType               { name: String, span: Span },                    // E0251
-    NotCallable               { found: TyId, span: Span },                     // E0252
-    WrongArgCount             { expected: usize, found: usize, span: Span },   // E0253
+    TypeMismatch              { expected: TyId, found: TyId, span: Span },        // E0250
+    UnknownType               { name: String, span: Span },                       // E0251
+    NotCallable               { found: TyId, span: Span },                        // E0252
+    WrongArgCount             { expected: usize, found: usize, span: Span },      // E0253
     // E0254 retired — string literals are typed `*const u8` (see StrLit row above)
-    UnsupportedFeature        { feature: &'static str, span: Span },           // E0255
-    CannotInfer               { span: Span },                                  // E0256
-    PointerMutabilityMismatch { expected: TyId, actual: TyId, span: Span },    // E0257
-    UnsizedArrayAsValue       { pos: SizedPos, span: Span },                   // E0261 (per spec/09_ARRAY.md)
+    UnsupportedFeature        { feature: &'static str, span: Span },              // E0255
+    CannotInfer               { span: Span },                                     // E0256
+    PointerMutabilityMismatch { expected: TyId, actual: TyId, span: Span },       // E0257
+    StructLitUnknownField     { field: String, adt: String, span: Span },         // E0258 — see spec/08_ADT.md
+    StructLitMissingField     { field: String, adt: String, lit_span: Span },     // E0259 — see spec/08_ADT.md
+    StructLitDuplicateField   { field: String, first: Span, dup: Span },          // E0260 — see spec/08_ADT.md
+    NoFieldOnAdt              { field: String, adt: String, span: Span },         // E0261 — see spec/08_ADT.md
+    TypeNotFieldable          { ty: TyId, span: Span },                           // E0262 — see spec/08_ADT.md
+    MutateImmutable           { op: MutateOp, span: Span },                       // E0263 — see spec/10_ADDRESS_OF.md, spec/11_MUTABILITY.md
+    UnsizedArrayAsValue       { pos: SizedPos, span: Span },                      // E0261 (collision — see note) — spec/09_ARRAY.md
+    // E0264 InvalidCast reserved per spec/12_AS.md
 }
 ```
 
 Code namespace: typeck owns **E0250–E0299**.
+
+**E0261 collision (known, tracked):** the code currently uses E0261
+for both `NoFieldOnAdt` and `UnsizedArrayAsValue`. The rendered text
+is unambiguous, but the numeric code is double-booked. Renumbering
+is a separate code-and-snapshot task; the spec lists both at their
+intended-but-conflicting codes so the discrepancy is discoverable.
 
 `from_typeck_error(err, file, &TyArena)` lives in
 `src/reporter/from_typeck.rs` and needs the arena to render type names
@@ -336,17 +359,21 @@ errors.
 ## Out of scope (v0)
 
 - Let-generalization / polymorphism / generics.
-- User-defined types in type position — `HirTyKind::Adt` is parsed and
-  reaches typeck, but lowering it to a usable `TyKind::Adt(_)` is not
-  wired up yet; today it surfaces as `UnsupportedFeature` (E0255). Same
-  for `StructLit` / `Field` access. See spec/08_ADT.md.
-- Address-of / deref operators. Pointer *types* (`*const T` / `*mut T`)
-  are first-class for FFI and string literals — the operators that
-  produce/consume them are not.
-- Arrays, slices (E0255 placeholder).
+- Pointer **deref** operator (`*p` rvalue, `*p = v` lvalue). Pointer
+  types and `&` / `&mut` are wired (see spec/10_ADDRESS_OF.md);
+  consuming a pointer back into a place is the still-deferred half
+  per spec/07_POINTER.md.
+- Array typing rules — `HirTyKind::Array` resolves to `Error` in
+  `resolve_ty` today, and `ArrayLit` / `Index` emit E0255. The
+  vocabulary (`TyKind::Array`, `ConstArena`, `Sized` obligation,
+  `UnsizedArrayAsValue`) is in place; rules land per spec/09_ARRAY.md
+  Phase A Step 4/5.
 - Implicit numeric widening (Rust-strict: explicit `as` required).
-- Cast compatibility check (loose in v0; codegen will refuse invalid
-  casts).
+- Cast compatibility check — loose in v0; `InvalidCast` (E0264) lands
+  per spec/12_AS.md.
 - Trait/method dispatch.
+- Recursive-type cycle detection — see spec/08_ADT.md TBD-T2.
+- Struct-by-value across `extern "C"` boundaries — see spec/08_ADT.md
+  TBD-T7.
 - Incremental / on-demand recomputation. The query API is implemented
   via an eager IndexVec cache; rebuilding requires re-running `check`.

@@ -344,21 +344,17 @@ anyway), not at the parser layer. This round:
 - Remove the `from_parse_error` arm.
 - Remove the E0106 description from `spec/03_PARSER.md`.
 
-#### What stays typeck's job (TBD)
+#### What stays typeck's job
 
 **Mutability of places.** Whether a place is *writable* (e.g.,
-`s.f = 1` requires `s` to be `mut`) needs typeck because the
+`s.f = 1` requires `s` to be `mut`) lives at typeck because the
 eventual `Unary { Deref, expr }` arm requires reading the pointer's
 type to decide `*mut T` (writable) vs `*const T` (not). For
-`Local`/`Field` only, the decision is also purely structural and
-could in principle live at HIR — but splitting `place_mutability`
-across layers would be uglier than keeping it together. We co-locate
-it with the future `Deref` work in typeck. Tracked as TBD-T6.
-
-**Plain-Local mutability gap.** `infer_assign` in typeck does not
-enforce that a non-`mut` `Local` rejects assignment — `let x = 1;
-x = 2;` typechecks. The typeck-side `place_mutability` work will
-close this at the same time.
+`Local`/`Field` only the decision is purely structural, but
+splitting `place_mutability` across layers would be uglier than
+keeping it together. The current `Local`/`Field` walk is implemented
+in `src/typeck/check.rs`; the `Deref` arm is the remaining piece of
+TBD-T6. See `spec/11_MUTABILITY.md` for the consolidated rules.
 
 ## Lowering algorithm
 
@@ -453,7 +449,8 @@ new codes.
 
 ### What HIR doesn't catch
 
-These are real errors but live in TBD layers:
+These are real errors that live in typeck (or remain genuinely
+deferred):
 
 - **Recursive type with infinite size** (`struct A { x: A }`). HIR
   happily resolves `A` against its own freshly-registered HAdtId.
@@ -462,13 +459,14 @@ These are real errors but live in TBD layers:
 
 - **Unknown type name in field position** (`struct Foo { x: Blarg }`).
   HIR produces `HirField { name: "x", ty: HirTyKind::Named("Blarg"), .. }`
-  and lets typeck error in TBD-T4.
+  and lets typeck error via `UnknownType` (E0251).
 
 - **Field-set mismatch in struct literal** (missing/extra/duplicate
-  field name in a literal vs the decl). Typeck (TBD-T6) catches —
-  it has to walk the literal anyway to type-check.
+  field name in a literal vs the decl). Typeck catches — E0258/
+  E0259/E0260 — since it has to walk the literal anyway to type-check.
 
-- **Mutability** for `s.f = 1` and similar — TBD-T6.
+- **Mutability** for `s.f = 1` and similar. Typeck's `place_mutability`
+  walk + `MutateImmutable` (E0263). See spec/11_MUTABILITY.md.
 
 ## Worked example
 
@@ -754,8 +752,8 @@ fn resolve_named_ty(...) -> TyId {
 
 Phase 0 has already populated `adts[haid]` with at least a stub, so
 the `intern` is sound; readers can defer to `adts[haid]` for
-field-level structural info when they need it (e.g., `Field`
-lookup in TBD-T6, `lower_ty` in TBD-T7).
+field-level structural info when they need it (e.g., `Field` lookup
+in `infer_field`, and `lower_ty` once TBD-T7 lands).
 
 ### Render
 
@@ -850,10 +848,10 @@ how the base lives (in memory vs in SSA). `lvalue` recurses through
 `Field` for chained access (`a.b.c`), emitting one `getelementptr`
 per layer and a single trailing `load` at the outermost rvalue use.
 
-The `lvalue`-of-`Field` machinery is shared with the future
-assignment-through-field path (TBD below): once `place_mutability`
-lands, `s.f = v` reuses the same GEP chain and emits a `store`
-instead of a `load`.
+The `lvalue`-of-`Field` machinery is shared with the
+assignment-through-field path: `s.f = v` reuses the same GEP chain
+and emits a `store` instead of a `load` (`emit_assign` →
+`lvalue` → `Field` arm in `src/codegen/lower.rs`).
 
 ### LLVM type construction (`prepare_adt_types`)
 
@@ -887,15 +885,17 @@ the day `repr(packed)` lands, the second arg toggles.
   a directly-self-referential struct passes typeck and infinite-loops
   in codegen's `prepare_adt_types` phase B.
 - **TBD-T6**: mutability and field assignment.
-  - `place_mutability` recursing through `Local`/`Field` (and a
-    `Deref` arm when 07_POINTER's deferred section lands), plus a
-    new `AssignToImmutable` typeck error. Closes the existing
-    plain-`Local`-mutability gap at the same time (today
-    `let x = 1; x = 2;` typechecks because `infer_assign` doesn't
-    consult the local's `mutable` flag).
-  - Codegen for `Field`-as-place in `Assign`: the `lvalue`-of-`Field`
-    GEP chain already exists for the rvalue-place path; assignment
-    just emits `store` instead of `load` against the same pointer.
+  Most of this is now resolved:
+  - `place_mutability` walks `Local` and `Field` in
+    `src/typeck/check.rs`; `MutateImmutable` (E0263) fires for both
+    `Assign` and `&mut`, closing the plain-`Local` gap. See
+    `spec/11_MUTABILITY.md`.
+  - Codegen for `Field`-as-place in `Assign` works through the same
+    `lvalue` GEP chain as the rvalue-place path (`emit_assign` →
+    `lvalue` → `Field` arm in `src/codegen/lower.rs`).
+
+  Still open: the `Deref` arm in `place_mutability`, gated on the
+  pointer-deref work deferred per `spec/07_POINTER.md`.
 - **TBD-T7**: struct-by-value across `extern "C"` boundaries. Today
   Oxide-internal calls work (LLVM picks a default lowering, both
   ends agree because both ends are us). FFI calls that pass or
@@ -921,10 +921,3 @@ the day `repr(packed)` lands, the second arg toggles.
 - Struct-by-value across `extern "C"` boundaries — see C-ABI
   discussion in 07_POINTER.md. Codegen-time error in TBD-T7.
 
-## Note: 04_HIR.md needs an update
-
-The "Out of scope (v0)" section of `04_HIR.md` currently states
-that type-namespace resolution is deferred and "likely living in
-typeck rather than HIR." This spec contradicts that — we resolve
-user-defined types at HIR. `04_HIR.md` should be updated to
-reflect the decision once this spec is implemented.
