@@ -1,0 +1,12 @@
+== diagnostics ==
+== types ==
+Fn[0] main() -> ()
+  HExprId(0) : i32
+  HExprId(1) : ()
+  HExprId(2) : i32
+  HExprId(3) : *mut i32
+  HExprId(4) : ()
+  HExprId(5) : *mut i32
+  HExprId(6) : i32
+  HExprId(7) : i32
+  HExprId(8) : ()

@@ -1,0 +1,14 @@
+== diagnostics ==
+[E0269] Error: cannot dereference pointer to unsized array `[T]`
+   ╭─[ error_deref_unsized_pointee.ox:2:6 ]
+   │
+ 2 │     *p;
+   │      ┬  
+   │      ╰── unsized pointee
+   │ 
+   │ Help: dereferencing `*const [T]` / `*mut [T]` would materialize an unsized value; use `p[i]` to index through the pointer instead
+───╯
+== types ==
+Fn[0] deref_slice(p[Local(0)]: *const [i32]) -> ()
+  HExprId(0) : *const [i32]
+  HExprId(1) : [i32]

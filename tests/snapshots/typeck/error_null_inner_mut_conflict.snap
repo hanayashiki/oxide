@@ -1,0 +1,22 @@
+== diagnostics ==
+[E0257] Error: pointer mutability mismatch: expected `*mut u8`, found `*const u8`
+   ╭─[ error_null_inner_mut_conflict.ox:9:11 ]
+   │
+ 9 │     use_b(n);
+   │           ┬  
+   │           ╰── incompatible pointer
+   │ 
+   │ Help: only `*mut T` → `*const T` is allowed at the outer layer; inner positions must match exactly
+───╯
+== types ==
+Fn[0] use_a(p[Local(0)]: *const *const u8) -> ()
+  HExprId(0) : *mut *const u8
+  HExprId(1) : ()
+  HExprId(2) : fn(*const *const u8)
+  HExprId(3) : *mut *const u8
+  HExprId(4) : ()
+  HExprId(5) : fn(*const *mut u8)
+  HExprId(6) : *mut *const u8
+  HExprId(7) : ()
+Fn[1] use_b(p[Local(1)]: *const *mut u8) -> ()
+Fn[2] bad() -> ()

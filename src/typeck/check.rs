@@ -456,6 +456,9 @@ impl<'hir> Checker<'hir> {
                 *expected = self.resolve_fully(inf, *expected);
                 *found = self.resolve_fully(inf, *found);
             }
+            TypeError::DerefNonPointer { found, .. } => {
+                *found = self.resolve_fully(inf, *found);
+            }
             TypeError::UnknownType { .. }
             | TypeError::WrongArgCount { .. }
             | TypeError::UnsupportedFeature { .. }
@@ -594,10 +597,15 @@ impl<'hir> Checker<'hir> {
     /// Used by Index typing, Field access, and `place_mutability` to
     /// enable `p[i]` / `s.a` for `p: *const [T; N]` / `s: *mut Struct`
     /// (and arbitrarily-deep nestings like `*const *mut [T; N]`).
-    /// Recursive auto-deref is a v0 expedient until `*p` deref lands
-    /// per `07_POINTER.md` §5; once explicit deref is available,
-    /// `(*p)[i]` / `(*p).a` becomes the canonical form. See
-    /// spec/09_ARRAY.md.
+    ///
+    /// Explicit `*p` deref is also available now per spec/07_POINTER.md
+    /// §Deref operator — `(*p)[i]` / `(*p).a` are valid alternatives
+    /// to the auto-deref forms. The two coexist: auto-deref keeps
+    /// `p.x` / `p[i]` ergonomic, while explicit `*p` is the canonical
+    /// rvalue/lvalue form. The longer-term plan (spec/07 §Pre-existing
+    /// codegen gap) is a HIR-rewrite pass inserting explicit `Deref`
+    /// nodes, after which this helper retires; not in scope here.
+    /// See spec/09_ARRAY.md.
     fn auto_deref_ptr(&self, ty: TyId) -> (TyId, Option<Mutability>) {
         let mut cur = ty;
         let mut innermost_mut: Option<Mutability> = None;
@@ -888,9 +896,17 @@ impl<'hir> Checker<'hir> {
                 let u8_ty = self.tys.u8;
                 self.tys.intern(TyKind::Ptr(u8_ty, Mutability::Const))
             }
-            HirExprKind::Null => todo!(
-                "typeck for Null — see spec/07_POINTER.md §Null literal Typeck changes"
-            ),
+            HirExprKind::Null => {
+                // Per spec/07_POINTER.md §Null literal "Typeck changes":
+                // fresh α (per `null` expression), wrap as `*mut α`. The
+                // outer `Mut` is load-bearing — coerce permits `*mut →
+                // *const` at the outer layer, so this lets `null` flow
+                // freely into both `*const T` and `*mut T` slots. α
+                // gets pinned by the use site via the existing
+                // loose-unify rule.
+                let alpha = self.fresh_infer(inf, false);
+                self.tys.intern(TyKind::Ptr(alpha, Mutability::Mut))
+            }
             HirExprKind::Local(lid) => self.local_tys[lid],
             HirExprKind::Fn(fid) => {
                 let sig = self.fn_sigs[fid].clone();
@@ -1174,7 +1190,44 @@ impl<'hir> Checker<'hir> {
                 bool_ty
             }
             UnOp::Deref => {
-                todo!("typeck for Deref — see spec/07_POINTER.md §Deref Typeck changes")
+                // Per spec/07_POINTER.md §Deref operator "Typeck changes":
+                // operand must resolve to `Ptr(T, _)`; result is the
+                // pointee. Sized-pointee check is handled via the
+                // existing `Sized` obligation queue (E0269 with
+                // `SizedPos::Deref`), so `*p` on `*const [T]` rejects
+                // at finalize through the same path as fn-param /
+                // let-binding sites — including infer-flowed cases
+                // where pointee α only resolves to `Array(_, None)`
+                // later. Non-pointer operand fires E0270 immediately
+                // since the result type is poison-bounded.
+                // Span is the operand's, matching `infer_field`'s
+                // precedent — the type that's wrong sits there.
+                let resolved = self.resolve(inf, t);
+                match self.tys.kind(resolved).clone() {
+                    TyKind::Ptr(pointee, _) => {
+                        let span = self.hir.exprs[inner].span.clone();
+                        inf.obligations.push(Obligation::Sized {
+                            ty: pointee,
+                            pos: SizedPos::Deref,
+                            span,
+                        });
+                        pointee
+                    }
+                    TyKind::Error => self.tys.error,
+                    TyKind::Infer(_) => {
+                        let span = self.hir.exprs[inner].span.clone();
+                        inf.errors.push(TypeError::CannotInfer { span });
+                        self.tys.error
+                    }
+                    _ => {
+                        let span = self.hir.exprs[inner].span.clone();
+                        inf.errors.push(TypeError::DerefNonPointer {
+                            found: resolved,
+                            span,
+                        });
+                        self.tys.error
+                    }
+                }
             }
         }
     }
@@ -1298,6 +1351,24 @@ impl<'hir> Checker<'hir> {
                     Some(m) => Some(m),
                     // Bare ADT / Array place: inherit from base.
                     None => self.place_mutability(*base),
+                }
+            }
+            // `*p` — outer mut of the operand pointer governs.
+            // Deliberately ONE peel, not recursive auto_deref_ptr:
+            // writing to `*p` modifies the location `p` addresses, so
+            // the *outer* mut is what matters. (Compose with Field /
+            // Index recursion above and the rules stay consistent —
+            // see spec/07_POINTER.md §Subtlety.)
+            HirExprKind::Unary {
+                op: UnOp::Deref,
+                expr: inner,
+            } => {
+                let inner_ty = self.expr_tys[*inner];
+                match self.tys.kind(inner_ty) {
+                    TyKind::Ptr(_, m) => Some(*m),
+                    // Non-pointer operand — `infer_unary` already
+                    // emitted E0270; suppress here.
+                    _ => None,
                 }
             }
             _ => None,

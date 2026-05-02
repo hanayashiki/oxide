@@ -1,0 +1,15 @@
+== diagnostics ==
+== types ==
+Fn[0] write_field() -> ()
+  HExprId(0) : i32
+  HExprId(1) : i32
+  HExprId(2) : Adt(0)
+  HExprId(3) : ()
+  HExprId(4) : Adt(0)
+  HExprId(5) : *mut Adt(0)
+  HExprId(6) : ()
+  HExprId(7) : *mut Adt(0)
+  HExprId(8) : Adt(0)
+  HExprId(9) : i32
+  HExprId(10) : i32
+  HExprId(11) : ()

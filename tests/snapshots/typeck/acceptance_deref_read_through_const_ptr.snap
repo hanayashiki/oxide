@@ -1,0 +1,12 @@
+== diagnostics ==
+== types ==
+Fn[0] main() -> i32
+  HExprId(0) : i32
+  HExprId(1) : ()
+  HExprId(2) : i32
+  HExprId(3) : *const i32
+  HExprId(4) : ()
+  HExprId(5) : *const i32
+  HExprId(6) : i32
+  HExprId(7) : ()
+  HExprId(8) : i32

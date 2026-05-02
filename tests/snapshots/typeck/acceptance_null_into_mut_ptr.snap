@@ -1,0 +1,5 @@
+== diagnostics ==
+== types ==
+Fn[0] main() -> ()
+  HExprId(0) : *mut u8
+  HExprId(1) : ()

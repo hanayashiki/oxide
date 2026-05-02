@@ -1,0 +1,12 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `i32`, found `*mut {error}`
+   ╭─[ error_null_into_non_pointer_slot.ox:2:18 ]
+   │
+ 2 │     let x: i32 = null;
+   │                  ──┬─  
+   │                    ╰─── type mismatch here
+───╯
+== types ==
+Fn[0] null_to_int() -> ()
+  HExprId(0) : *mut {error}
+  HExprId(1) : ()

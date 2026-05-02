@@ -208,25 +208,51 @@ pub fn from_typeck_error(err: &TypeError, file: FileId, tys: &TyArena) -> Diagno
         )),
 
         TypeError::UnsizedArrayAsValue { pos, span } => {
-            let pos_str = match pos {
-                SizedPos::Param => "function parameter",
-                SizedPos::Return => "function return",
-                SizedPos::Field => "struct field",
-                SizedPos::LetBinding => "let-binding",
+            let (msg, label, help) = match pos {
+                SizedPos::Param => (
+                    "unsized array `[T]` cannot appear by value at a function parameter",
+                    "unsized type at value position",
+                    "use a pointer (`*const [T]` / `*mut [T]`) for runtime-sized buffers, \
+                     or a sized array `[T; N]` if the length is known at compile time",
+                ),
+                SizedPos::Return => (
+                    "unsized array `[T]` cannot appear by value at a function return",
+                    "unsized type at value position",
+                    "use a pointer (`*const [T]` / `*mut [T]`) for runtime-sized buffers, \
+                     or a sized array `[T; N]` if the length is known at compile time",
+                ),
+                SizedPos::Field => (
+                    "unsized array `[T]` cannot appear by value at a struct field",
+                    "unsized type at value position",
+                    "use a pointer (`*const [T]` / `*mut [T]`) for runtime-sized buffers, \
+                     or a sized array `[T; N]` if the length is known at compile time",
+                ),
+                SizedPos::LetBinding => (
+                    "unsized array `[T]` cannot appear by value at a let-binding",
+                    "unsized type at value position",
+                    "use a pointer (`*const [T]` / `*mut [T]`) for runtime-sized buffers, \
+                     or a sized array `[T; N]` if the length is known at compile time",
+                ),
+                SizedPos::Deref => (
+                    "cannot dereference pointer to unsized array `[T]`",
+                    "unsized pointee",
+                    "dereferencing `*const [T]` / `*mut [T]` would materialize an \
+                     unsized value; use `p[i]` to index through the pointer instead",
+                ),
             };
-            Diagnostic::error(
-                "E0269",
-                format!("unsized array `[T]` cannot appear by value at a {pos_str}"),
-            )
-            .with_label(Label::primary(
-                file,
-                span.clone(),
-                "unsized type at value position",
-            ))
-            .with_help(
-                "use a pointer (`*const [T]` / `*mut [T]`) for runtime-sized buffers, \
-                 or a sized array `[T; N]` if the length is known at compile time",
-            )
+            Diagnostic::error("E0269", msg)
+                .with_label(Label::primary(file, span.clone(), label))
+                .with_help(help)
         }
+
+        TypeError::DerefNonPointer { found, span } => Diagnostic::error(
+            "E0270",
+            format!(
+                "cannot dereference value of type `{}`",
+                tys.render(*found)
+            ),
+        )
+        .with_label(Label::primary(file, span.clone(), "not a pointer"))
+        .with_help("`*` requires a pointer operand (`*const T` or `*mut T`)"),
     }
 }

@@ -1,0 +1,21 @@
+== diagnostics ==
+[E0263] Error: cannot take a mutable pointer to an immutable place
+   ╭─[ error_borrow_mut_through_const_deref.ox:4:29 ]
+   │
+ 4 │     let _q: *mut i32 = &mut *p;
+   │                             ─┬  
+   │                              ╰── cannot borrow as `&mut`
+   │ 
+   │ Help: declare the binding `mut` (e.g. `let mut x` or `fn f(mut x: T)`) to allow `&mut` borrows
+───╯
+== types ==
+Fn[0] borrow_mut_through_const() -> ()
+  HExprId(0) : i32
+  HExprId(1) : ()
+  HExprId(2) : i32
+  HExprId(3) : *const i32
+  HExprId(4) : ()
+  HExprId(5) : *const i32
+  HExprId(6) : i32
+  HExprId(7) : *mut i32
+  HExprId(8) : ()

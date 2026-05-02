@@ -121,6 +121,11 @@ pub enum TypeError {
         found: TyId,
         span: Span,
     },
+
+    /// `*expr` where `expr` is not a pointer type. The operand's type
+    /// (`found`) is fully resolved at the time of emission. See
+    /// spec/07_POINTER.md "Deref operator". E0270.
+    DerefNonPointer { found: TyId, span: Span },
 }
 
 /// Discriminator on `ArrayByValueAtExternC` so the diagnostic can
@@ -141,15 +146,18 @@ pub enum MutateOp {
 
 /// Discriminator on `UnsizedArrayAsValue` (and the `Sized` obligation
 /// kind in `obligation.rs`) so the diagnostic can name the offending
-/// position. Mirrors the four value-type positions where an unsized
-/// type is forbidden: fn parameter, fn return, struct field,
-/// let-binding. See spec/09_ARRAY.md.
+/// position. Mirrors the value-type positions where an unsized type
+/// is forbidden: fn parameter, fn return, struct field, let-binding,
+/// and pointer dereference (per spec/07_POINTER.md — `*p` for
+/// `p: *const [T]` would materialize an unsized value).
+/// See spec/09_ARRAY.md.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SizedPos {
     Param,
     Return,
     Field,
     LetBinding,
+    Deref,
 }
 
 impl TypeError {
@@ -171,7 +179,8 @@ impl TypeError {
             | Self::ArrayLengthMismatch { span, .. }
             | Self::NotIndexable { span, .. }
             | Self::IndexNotUsize { span, .. }
-            | Self::ArrayLitElementMismatch { span, .. } => span,
+            | Self::ArrayLitElementMismatch { span, .. }
+            | Self::DerefNonPointer { span, .. } => span,
             Self::StructLitMissingField { lit_span, .. } => lit_span,
             Self::StructLitDuplicateField { dup, .. } => dup,
         }

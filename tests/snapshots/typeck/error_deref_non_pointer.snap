@@ -1,0 +1,16 @@
+== diagnostics ==
+[E0270] Error: cannot dereference value of type `i32`
+   ╭─[ error_deref_non_pointer.ox:3:6 ]
+   │
+ 3 │     *x
+   │      ┬  
+   │      ╰── not a pointer
+   │ 
+   │ Help: `*` requires a pointer operand (`*const T` or `*mut T`)
+───╯
+== types ==
+Fn[0] deref_int() -> i32
+  HExprId(0) : i32
+  HExprId(1) : ()
+  HExprId(2) : i32
+  HExprId(3) : {error}

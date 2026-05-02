@@ -1,0 +1,14 @@
+== diagnostics ==
+== types ==
+Fn[0] puts(s[Local(0)]: *const u8) -> i32
+  HExprId(0) : *mut u8
+  HExprId(1) : ()
+  HExprId(2) : fn(*const u8) -> i32
+  HExprId(3) : *mut u8
+  HExprId(4) : i32
+  HExprId(5) : fn(*const u8) -> i32
+  HExprId(6) : *mut u8
+  HExprId(7) : i32
+  HExprId(8) : i32
+Fn[1] read_const(s[Local(1)]: *const u8) -> i32
+Fn[2] main() -> i32
