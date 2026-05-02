@@ -150,8 +150,11 @@ Under the current rules, no path mutates an immutable place:
 3. `&x` produces `*const T`; this cannot coerce to `*mut T`; cannot write
    through it.
 4. Field/index inherits root mutability; no laundering through projections.
-5. StrLit (`*const u8` v0 model) is not a place: `&"hello"` is rejected
-   with `AddrOfNonPlace` (E0208). No path to mutate a literal.
+5. StrLit (`*const [u8; N]` per `07_POINTER.md` §4) is not a place:
+   `&"hello"` is rejected with `AddrOfNonPlace` (E0208). The outer
+   `*const` also makes any indexed write through the literal
+   (`"hi"[0] = 1`) error as `MutateImmutable`. No path to mutate a
+   literal.
 
 The structural caveat is the loose-unification step in §6 — the strict
 boundary check is what keeps the model sound.

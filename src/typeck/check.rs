@@ -74,6 +74,46 @@ fn build_mismatch(ctx: MismatchCtx, expected: TyId, found: TyId, span: Span) -> 
     }
 }
 
+/// Threaded through `unify_with`. Bundles the diagnostic context and
+/// the structural-relaxation flag.
+///
+/// `pointee` is sticky: set to `true` when the Ptr-Ptr arm recurses
+/// into pointer inners; all deeper recursions inherit it. Length
+/// erasure (`Array(T, Some(_)) ~ Array(T, None)`) is silent only
+/// when `pointee == true` and only in the forward direction
+/// (found `Some`, expected `None`). Top-level (`pointee == false`)
+/// requires strict structural equality on length.
+///
+/// Span is *not* bundled here — it's `Clone` (not `Copy`) and gets
+/// `.clone()`d at recursion sites; folding it into a `Copy` struct
+/// would force unnecessary clones at every call.
+#[derive(Clone, Copy)]
+pub(super) struct UnifyContext {
+    pub(super) mismatch: MismatchCtx,
+    pub(super) pointee: bool,
+}
+
+impl UnifyContext {
+    fn default_ctx() -> Self {
+        UnifyContext {
+            mismatch: MismatchCtx::Default,
+            pointee: false,
+        }
+    }
+    fn from_mismatch(mismatch: MismatchCtx) -> Self {
+        UnifyContext {
+            mismatch,
+            pointee: false,
+        }
+    }
+    fn under_ptr(self) -> Self {
+        UnifyContext {
+            pointee: true,
+            ..self
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TypeckResults {
     pub tys: TyArena,
@@ -346,12 +386,12 @@ impl<'hir> Checker<'hir> {
     /// shape-mismatch diagnostic has already fired during the eager
     /// half of `coerce`. See spec/07_POINTER.md.
     ///
-    /// Array length erasure under outer Ptr: after the mut subtype
-    /// passes, an inner `Array(T, Some(_))` on actual / `Array(T, None)`
-    /// on expected is accepted (length erasure — `*M [T; N] → *M [T]`).
-    /// Reverse direction (`None → Some`) is rejected as a shape
-    /// mismatch — explicit `as` cast required. See spec/09_ARRAY.md
-    /// "Coercions".
+    /// Array length erasure / shape relaxation: now enforced eagerly
+    /// in `unify_with_ctx`'s Array-Array arm under the `pointee` flag
+    /// (gated to forward `Some → None` direction). Discharge no longer
+    /// needs to validate array direction — by the time it runs, any
+    /// invalid mixed-`Some/None` pair has already been rejected by
+    /// the eager unify. See spec/09_ARRAY.md "Coercions".
     fn discharge_coerce(&mut self, actual: TyId, expected: TyId, span: Span) {
         let (a_pt, a_mut, e_pt, e_mut) = match (self.tys.kind(actual), self.tys.kind(expected)) {
             (&TyKind::Ptr(ap, am), &TyKind::Ptr(ep, em)) => (ap, am, ep, em),
@@ -369,37 +409,11 @@ impl<'hir> Checker<'hir> {
     }
 
     /// Recursive strict-mutability equality at every inner pointer
-    /// position. Shape mismatches under here have already been caught
-    /// by the eager `unify` body of `coerce`; this only emits errors
-    /// for mutability divergence at inner layers.
-    ///
-    /// Special case: under outer Ptr, `Array(T, Some(_))` on actual /
-    /// `Array(T, None)` on expected is the length-erasure coercion —
-    /// accept silently. The reverse direction is a shape mismatch
-    /// requiring explicit `as`; emit `PointerMutabilityMismatch` as
-    /// the closest existing diagnostic (TODO: dedicated message).
+    /// position. Shape mismatches (including array-direction) have
+    /// already been caught by the eager `unify` body of `coerce`;
+    /// this only emits errors for mutability divergence at inner
+    /// pointer layers.
     fn discharge_ptr_inner_eq(&mut self, a: TyId, b: TyId, span: Span) {
-        // Length erasure: actual `Array(T, Some(_))` → expected `Array(T, None)`
-        // (under the outer Ptr we just peeled). Accept silently.
-        if let (TyKind::Array(_, Some(_)), TyKind::Array(_, None)) =
-            (self.tys.kind(a), self.tys.kind(b))
-        {
-            return;
-        }
-        // Reverse direction: actual unsized, expected sized.
-        // Shape mismatch requiring explicit `as`. Emit a diagnostic
-        // so the user gets a concrete signal (`unify`'s mixed Some/None
-        // arm passes silently to give discharge a chance to judge).
-        if let (TyKind::Array(_, None), TyKind::Array(_, Some(_))) =
-            (self.tys.kind(a), self.tys.kind(b))
-        {
-            self.errors.push(TypeError::TypeMismatch {
-                expected: b,
-                found: a,
-                span,
-            });
-            return;
-        }
         if let (&TyKind::Ptr(a_pt, a_mut), &TyKind::Ptr(b_pt, b_mut)) =
             (self.tys.kind(a), self.tys.kind(b))
         {
@@ -657,11 +671,12 @@ impl<'hir> Checker<'hir> {
     /// against `Never` is a mismatch. The "expression-of-type-`!`-can-flow-
     /// anywhere" rule lives in `coerce`, not in `unify`.
     fn unify(&mut self, inf: &mut Inferer, found: TyId, expected: TyId, span: Span) {
-        self.unify_with(inf, found, expected, span, MismatchCtx::Default);
+        self.unify_with_ctx(inf, found, expected, span, UnifyContext::default_ctx());
     }
 
     /// Single-body unify with a `MismatchCtx` that controls how the
-    /// terminal-mismatch diagnostic is built. See `MismatchCtx`.
+    /// terminal-mismatch diagnostic is built. See `MismatchCtx`. Top-level
+    /// entry point — `pointee` defaults to `false`.
     fn unify_with(
         &mut self,
         inf: &mut Inferer,
@@ -669,6 +684,22 @@ impl<'hir> Checker<'hir> {
         expected: TyId,
         span: Span,
         ctx: MismatchCtx,
+    ) {
+        self.unify_with_ctx(inf, found, expected, span, UnifyContext::from_mismatch(ctx));
+    }
+
+    /// Internal unify body that threads a full `UnifyContext`. Direct
+    /// callers should use `unify` or `unify_with`; the only place the
+    /// pointee flag flips on is the Ptr-Ptr arm inside this body.
+    /// See `UnifyContext` and spec/07_POINTER.md / spec/09_ARRAY.md
+    /// "Coercions".
+    fn unify_with_ctx(
+        &mut self,
+        inf: &mut Inferer,
+        found: TyId,
+        expected: TyId,
+        span: Span,
+        ctx: UnifyContext,
     ) {
         let found = self.resolve(inf, found);
         let expected = self.resolve(inf, expected);
@@ -686,26 +717,39 @@ impl<'hir> Checker<'hir> {
             (TyKind::Unit, TyKind::Unit) => {}
             (TyKind::Fn(params_f, ret_f), TyKind::Fn(params_e, ret_e)) => {
                 if params_f.len() != params_e.len() {
-                    inf.errors.push(build_mismatch(ctx, expected, found, span));
+                    inf.errors
+                        .push(build_mismatch(ctx.mismatch, expected, found, span));
                     return;
                 }
                 for (pf, pe) in params_f.iter().zip(&params_e) {
-                    self.unify_with(inf, *pf, *pe, span.clone(), ctx);
+                    self.unify_with_ctx(inf, *pf, *pe, span.clone(), ctx);
                 }
-                self.unify_with(inf, ret_f, ret_e, span, ctx);
+                self.unify_with_ctx(inf, ret_f, ret_e, span, ctx);
             }
-            // Loose on mutability — unify is shape-only (per spec/07_POINTER.md).
-            // The mutability subtype rule (`*mut → *const` OK at the outer
-            // layer, exact match below) is enforced by `coerce` at use sites.
-            (TyKind::Ptr(fi, _), TyKind::Ptr(ei, _)) => self.unify_with(inf, fi, ei, span, ctx),
-            // Array-Array: recurse on elem; length is strict on Some/Some
-            // (E0265 on mismatch), and mixed Some/None passes silently —
-            // the only path that reaches mixed Some/None is recursion from
-            // the Ptr-Ptr arm during a coerce site, which `discharge_coerce`
-            // validates directionally. Bare arrays of unsized form `[T]`
-            // never reach this arm because `[T]` can't be a value.
+            // Loose on mutability — unify is shape-only on mut (per
+            // spec/07_POINTER.md §3). The mutability subtype rule
+            // (`*mut → *const` outer, exact match inner) is enforced by
+            // `coerce`'s discharge at use sites. The Ptr-Ptr arm sets
+            // `pointee=true` on the recursion: this is the ONLY place
+            // it flips on; from here it's sticky through deeper
+            // recursions, enabling the gated length-erasure relaxation
+            // in the Array-Array arm below.
+            (TyKind::Ptr(fi, _), TyKind::Ptr(ei, _)) => {
+                self.unify_with_ctx(inf, fi, ei, span, ctx.under_ptr());
+            }
+            // Array-Array: recurse on elem (strict HM); length is gated.
+            // - Same length: OK.
+            // - Different concrete lengths: E0265.
+            // - Mixed Some/None: silent ONLY when `pointee=true` AND
+            //   forward direction (found `Some`, expected `None` — the
+            //   sound length-erasure direction). Top-level mixed and
+            //   reverse-direction mixed both error eagerly here, which
+            //   closes the mixed-direction silent-pass at `unify_arms`
+            //   sites and gives a sharper diagnostic at `coerce` sites
+            //   (vs. today's discharge-time `TypeMismatch`).
+            //   See spec/09_ARRAY.md "Coercions" for the rule.
             (TyKind::Array(fe, fc), TyKind::Array(ee, ec)) => {
-                self.unify_with(inf, fe, ee, span.clone(), ctx);
+                self.unify_with_ctx(inf, fe, ee, span.clone(), ctx);
                 match (fc, ec) {
                     (None, None) => {}
                     (Some(c1), Some(c2)) if c1 == c2 => {}
@@ -716,18 +760,25 @@ impl<'hir> Checker<'hir> {
                             span,
                         });
                     }
-                    (Some(_), None) | (None, Some(_)) => {}
+                    // Length erasure forward: silent only behind a pointer.
+                    (Some(_), None) if ctx.pointee => {}
+                    // Top-level Some↔None or reverse direction (None→Some).
+                    (Some(_), None) | (None, Some(_)) => {
+                        inf.errors.push(TypeError::ArrayLengthMismatch {
+                            expected,
+                            found,
+                            span,
+                        });
+                    }
                 }
             }
-            // ADTs unify by pure nominal identity — no structural recursion
-            // into fields. The `found == expected` short-circuit above
-            // already covers a == b; reaching this arm means a != b.
-            // See spec/08_ADT.md "Unification".
-            (TyKind::Adt(_), TyKind::Adt(_)) => {
-                inf.errors.push(build_mismatch(ctx, expected, found, span));
-            }
             _ => {
-                inf.errors.push(build_mismatch(ctx, expected, found, span));
+                // Catch-all mismatch. Includes Adt-vs-Adt with unequal `AdtId`
+                // (ADTs unify by pure nominal identity — see spec/08_ADT.md
+                // "Unification"; equal ADTs are absorbed by the `found == expected`
+                // short-circuit above).
+                inf.errors
+                    .push(build_mismatch(ctx.mismatch, expected, found, span));
             }
         }
     }
@@ -854,8 +905,8 @@ impl<'hir> Checker<'hir> {
     /// - `{ g(); }` where `g(): !` → same shape, value = `!`.
     /// - `{ 1; }` → last expr `1` is `i32` (not `!`), value = `()`,
     ///   coerce(`()`, declared) errors for non-unit returns
-    /// - `{ { return 1 } "a" }` → last expr `"a"` is `*const u8`,
-    ///   value = `*const u8`, coerce against `i32` errors.
+    /// - `{ { return 1 } "a" }` → last expr `"a"` is `*const [u8; 2]`,
+    ///   value = `*const [u8; 2]`, coerce against `i32` errors.
     fn infer_block(&mut self, inf: &mut Inferer, bid: HBlockId) -> TyId {
         let block = self.hir.blocks[bid].clone();
         let last_idx = block.items.len().checked_sub(1);
@@ -890,11 +941,19 @@ impl<'hir> Checker<'hir> {
             HirExprKind::IntLit(_) => self.fresh_infer(inf, true),
             HirExprKind::BoolLit(_) => self.tys.bool,
             HirExprKind::CharLit(_) => self.tys.u8,
-            HirExprKind::StrLit(_) => {
-                // String literals are C-style: `*const u8`, NUL-terminator
-                // appended at codegen. See spec/07_POINTER.md.
+            HirExprKind::StrLit(s) => {
+                // C-style string literal: `*const [u8; N]` where
+                // `N = byte_len + 1` (the trailing NUL is appended by
+                // codegen and counted in the type, matching C
+                // `char[N]` for `"hello"` → `char[6]`). Pointer-to-
+                // sized-array form encodes immutability structurally
+                // via the outer `*const` (a bare `[u8; N]` place
+                // would let `let mut s = "hi";` mutate). See
+                // spec/07_POINTER.md §4.
+                let n = (s.as_bytes().len() + 1) as u64;
                 let u8_ty = self.tys.u8;
-                self.tys.intern(TyKind::Ptr(u8_ty, Mutability::Const))
+                let arr_ty = self.tys.intern(TyKind::Array(u8_ty, Some(n)));
+                self.tys.intern(TyKind::Ptr(arr_ty, Mutability::Const))
             }
             HirExprKind::Null => {
                 // Per spec/07_POINTER.md §Null literal "Typeck changes":
@@ -1156,13 +1215,7 @@ impl<'hir> Checker<'hir> {
                 for (i, &eid) in es.iter().enumerate().skip(1) {
                     let ti = self.infer_expr(inf, eid);
                     let elem_span = self.hir.exprs[eid].span.clone();
-                    self.unify_with(
-                        inf,
-                        ti,
-                        t0,
-                        elem_span,
-                        MismatchCtx::ArrayLitElement { i },
-                    );
+                    self.unify_with(inf, ti, t0, elem_span, MismatchCtx::ArrayLitElement { i });
                 }
                 self.tys.intern(TyKind::Array(t0, Some(n)))
             }
@@ -1515,12 +1568,7 @@ impl<'hir> Checker<'hir> {
     /// innermost loop's target slot, return `!`. Mirrors `Return`'s
     /// shape. The operand's span is the coerce site so type-mismatch
     /// errors point at the value, not the `break` keyword.
-    fn infer_break_expr(
-        &mut self,
-        inf: &mut Inferer,
-        expr: Option<HExprId>,
-        span: &Span,
-    ) -> TyId {
+    fn infer_break_expr(&mut self, inf: &mut Inferer, expr: Option<HExprId>, span: &Span) -> TyId {
         let target = *inf
             .loop_tys
             .last()
@@ -1588,10 +1636,7 @@ impl<'hir> Checker<'hir> {
         let (local_ty, sized_span) = match &local_data.ty {
             Some(t) => {
                 let ty_span = t.span.clone();
-                (
-                    Self::resolve_ty(&mut self.tys, &mut inf.errors, t),
-                    ty_span,
-                )
+                (Self::resolve_ty(&mut self.tys, &mut inf.errors, t), ty_span)
             }
             None => (self.fresh_infer(inf, false), local_data.span.clone()),
         };

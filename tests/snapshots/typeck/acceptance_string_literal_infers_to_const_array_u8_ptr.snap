@@ -1,5 +1,5 @@
 == diagnostics ==
 == types ==
 Fn[0] f() -> ()
-  HExprId(0) : *const u8
+  HExprId(0) : *const [u8; 3]
   HExprId(1) : ()

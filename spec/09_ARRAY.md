@@ -688,7 +688,7 @@ Element-mismatch diagnostics route through `unify_with`'s
 
 ### Coercions (extending `07_POINTER.md`)
 
-Three new array-related coercions, all on the **pointer outer
+Three array-related coercions, all on the **pointer outer
 layer**:
 
 | From | To | Direction |
@@ -697,25 +697,57 @@ layer**:
 | `*mut [T; N]` | `*mut [T]` | Drop length (mut preserved) |
 | `*mut [T; N]` | `*const [T]` | Drop length AND mutability (composes with 07's `*mut → *const`) |
 
-Implementation: extend `coerce` to allow, when the outer is `Ptr`
-and the existing mutability subtype passes, the inner step
-`Array(T, Some(_)) → Array(T, None)` as a one-way length-erasure.
-Reverse direction is **not** offered as a coerce — users must use
-an explicit `as` cast.
-
-`unify` gains an Array arm. Equality of array types is
-structural: `Array(T1, c1) ~ Array(T2, c2)` recurses on elem
-(strict, no element variance) and on length:
+Implementation: the `unify_with` body threads a
+`UnifyContext { mismatch, pointee: bool }`. The `pointee` flag is
+sticky — set to `true` by the Ptr-Ptr arm on the recursion into
+the inner. The Array-Array arm consults it for the mixed-`Some/None`
+relaxation:
 
 - both `None` → OK.
 - both `Some(n)` and `n1 == n2` → OK.
-- both `Some(_)` and lengths differ → `E0265 ArrayLengthMismatch`
-  (fires from unify directly).
-- mixed `Some/None` → silently passes at unify (this case only
-  arises when recursion descends from a Ptr-Ptr coerce site;
-  bare arrays of type `[T]` never reach unify because `[T]` can't
-  be a value, per the Sized obligation). The directional
-  length-erasure judgement is then made at coerce discharge.
+- both `Some(_)` and lengths differ → `E0265 ArrayLengthMismatch`.
+- `(Some(_), None)` AND `pointee == true` → silent (length
+  erasure forward direction; the sound info-loss case).
+- `(Some(_), None)` at top level OR `(None, Some(_))` in any
+  position → `E0265 ArrayLengthMismatch`. The reverse direction
+  fabricates length info from the unsized side, which is
+  unsound; rejecting it eagerly keeps the relaxation principled.
+
+Reverse direction is **not** offered as a coerce — users must
+use an explicit `as` cast. `discharge_ptr_inner_eq` no longer
+needs to validate array direction (eager unify enforces it);
+discharge is now strictly outer-mut subtype + recursive inner-
+mut equality.
+
+Note on Fn-arm propagation: `pointee` propagates through the Fn
+arm's param/return recursions unchanged. Loose with respect to
+fn-pointer variance (e.g. `*const fn(*const [T; N])` vs
+`*const fn(*const [T])` would silently pass forward), but fn
+pointers aren't first-class value types in v0, so this isn't
+user-reachable. Future work: reset `pointee=false` when crossing
+a Fn arm if/when fn pointers become first-class.
+
+### Arm-coalesce sloppy subtyping (residual)
+
+`unify_arms` (`check.rs:1540-1549`) calls `unify(then_ty, else_ty)`
+and `join_never` returns `then_ty` as the if-expr's type. Combined
+with the asymmetric pointee-gated rule, mixed-`Some/None` arm
+coalescing produces a direction-asymmetric outcome:
+
+- `if c { sized } else { unsized }` — `unify(Some, None)` silent
+  under `pointee=true`; if-expr typed as `then_ty = sized`. **At
+  runtime** if the else arm is taken, the result-typed slot
+  claims a length we don't actually have. This is the residual
+  sloppy subtyping. Acceptable for v0 since the only way to
+  trigger it is to mix sized and unsized pointer expressions in
+  arms, which is uncommon.
+- `if c { unsized } else { sized }` — `unify(None, Some)` rejected
+  by the gated rule. User must reorder arms or annotate via local
+  bindings.
+
+Future work to retire the residual: either compute a real LUB in
+`unify_arms` (less-precise side wins) or require an explicit
+annotation when arms mix Some/None.
 
 ### ABI: array-by-value across `extern "C"` boundaries
 
@@ -1301,12 +1333,13 @@ use (`ArrayLenZeroForbidden` was a planned-but-unused defer flag).
   range syntax; both out of scope.
 - **Repeat with non-trivially-copyable init.** All v0 types are
   trivially copyable; the question doesn't arise.
-- **Array-to-pointer decay** `[T; N] → *const T` (C-style,
-  proposed in `07_POINTER.md` for StrLit migration). Not adopted
-  in v0 — to reach a `*const T` from a `[T; N]`, users go through
-  `&arr` (per `10_ADDRESS_OF.md`) and then `as` cast, or use
-  pointer-to-array directly. Re-evaluate when StrLit migration
-  lands.
+- **Array-to-pointer decay** `[T; N] → *const T` (C-style).
+  **Not adopted** — the StrLit migration (`07_POINTER.md` §4)
+  resolved this by re-typing C-FFI buffer parameters as
+  `*const [T]` / `*mut [T]` (sequence pointers) rather than
+  `*const T` (single-element pointers), so the decay is unnecessary.
+  To reach a `*const T` from a `[T; N]`, users go through `&arr`
+  (per `10_ADDRESS_OF.md`) and explicit element selection.
 
 ## TBDs and future evolution
 
@@ -1330,14 +1363,16 @@ use (`ArrayLenZeroForbidden` was a planned-but-unused defer flag).
   Monomorphization in codegen (one specialization per concrete N).
   Independent spec; no v0 surface change beyond what `ConstArena`
   already affords.
-- **StrLit migration.** Once arrays land, `"hello"` becomes
-  `[u8; 6]` per the migration plan in `07_POINTER.md`. Implies
-  StrLit becomes a place expression, and `&"hello"` becomes legit
-  per `10_ADDRESS_OF.md`. The path between this spec and StrLit
-  migration also needs to address whether array-to-pointer decay
-  (`[u8; N] → *const u8` at fn-arg / let-init position) is added
-  to keep existing FFI use sites compiling. Re-evaluated as part
-  of the StrLit migration spec.
+- **StrLit migration.** Done. `"hello"` is typed `*const [u8; 6]`
+  (pointer to sized array, NUL counted in N). StrLit stays a
+  non-place expression; `&"hello"` rejected (E0208). FFI signatures
+  use `*const [u8]`, and length-erasure (`*const [T; N] → *const [T]`,
+  the existing pointer-outer coercion) carries the literal into
+  the parameter slot. See `07_POINTER.md` §4 and the "`*const T` vs
+  `*const [T]`" subsection there. The earlier proposal of bare
+  `[u8; N]` (place form) was abandoned because it would have
+  admitted `let mut s = "hi"; s[0] = b'b';` — see the rationale
+  in `07_POINTER.md` §4.
 - **Struct-of-array layout.** Today nested arrays compose
   naturally — `[[T; M]; N]` is `Array(Array(T, Some(M)), Some(N))`
   and lowers to `[N x [M x T]]` in LLVM. No special spec needed
@@ -1349,7 +1384,9 @@ use (`ArrayLenZeroForbidden` was a planned-but-unused defer flag).
   `[i32; 256]` for lookup tables, etc.).
 - Fixed-size message structs via `[u8; N]` payloads.
 - StrLit migration from "magic `*const u8`" scaffolding to
-  proper `[u8; N]` per `07_POINTER.md`'s long-promised plan.
+  proper `*const [u8; N]` per `07_POINTER.md` §4. (Done; rides
+  the existing length-erasure coercion to `*const [u8]` at FFI
+  boundaries.)
 - Pointer-to-unsized-array `*const [T]` / `*mut [T]` as the
   unsafe array view, which is the natural type for FFI returns
   like `malloc`-shaped routines.

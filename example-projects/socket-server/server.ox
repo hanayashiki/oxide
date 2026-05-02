@@ -30,11 +30,11 @@ extern "C" {
     fn bind(fd: i32, addr: *const sockaddr_in, len: u32) -> i32;
     fn listen(fd: i32, backlog: i32) -> i32;
     fn accept(fd: i32, addr: *mut sockaddr_in, len: *mut u32) -> i32;
-    fn write(fd: i32, buf: *const u8, count: u64) -> i64;
+    fn write(fd: i32, buf: *const [u8], count: u64) -> i64;
     fn close(fd: i32) -> i32;
     fn htons(host: u16) -> u16;
-    fn perror(s: *const u8);
-    fn puts(s: *const u8) -> i32;
+    fn perror(s: *const [u8]);
+    fn puts(s: *const [u8]) -> i32;
 }
 
 // Accept connections forever, writing the canned response to each.

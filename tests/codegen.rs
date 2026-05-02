@@ -242,8 +242,11 @@ fn extern_fn_with_unit_return_emits_void_declare() {
 
 #[test]
 fn string_literal_emits_private_constant_global() {
+    // FFI signature uses `*const [u8]` (sequence pointer) — the
+    // honest spelling for libc `char *`. Length erasure carries
+    // `*const [u8; 12]` (literal type) → `*const [u8]` (param type).
     let ir = compile_to_ir(
-        r#"extern "C" { fn puts(s: *const u8) -> i32; }
+        r#"extern "C" { fn puts(s: *const [u8]) -> i32; }
            fn main() -> i32 { puts("hello world"); 0 }"#,
     );
     // 12 bytes: 11 source chars + trailing \0.
@@ -271,7 +274,7 @@ fn nested_pointer_param_still_lowers_to_single_ptr() {
 #[test]
 fn each_string_literal_gets_its_own_global() {
     let ir = compile_to_ir(
-        r#"extern "C" { fn puts(s: *const u8) -> i32; }
+        r#"extern "C" { fn puts(s: *const [u8]) -> i32; }
            fn main() -> i32 { puts("a"); puts("bc"); 0 }"#,
     );
     assert_contains(&ir, "@.str.0");

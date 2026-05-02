@@ -8,11 +8,11 @@ We need to be able to handle pointers to some extent, but first of all lets only
 
 ```
 extern "C" {
-    fn puts(s: *const u8) -> i32;
+    fn puts(s: *const [u8]) -> i32;
 }
 
 extern "C" {
-    fn multi_ptr(s: *const *const *const u8);
+    fn multi_ptr(s: *const *const *const [u8]);
 }
 
 fn main() -> i32 {
@@ -24,23 +24,31 @@ fn main() -> i32 {
 
 Anatomy:
 
-1. String literal "hello world" is treated as "*const u8". Unlike "str" in rust is utf-8, Oxide does not have such luxury.
+1. String literal `"hello world"` has type `*const [u8; 12]` —
+   pointer to a sized byte array; `N = byte_len + 1` counts the
+   trailing `\0` (matches C's `char[12]` for the same literal).
+   Codegen emits a private `[12 x i8]` global in `.rodata`. Unlike
+   Rust's UTF-8 `str`, Oxide bytes are bytes — no Unicode invariant.
 
-2. **String literals are C-style null-terminated.** This is a deliberate
-   divergence from Rust and an alignment with C: every string literal
-   emits a trailing `\0` byte that is *not* counted in the source-level
-   length. So `"hello world"` is 11 visible characters but 12 bytes in
-   the emitted data (`h e l l o ' ' w o r l d \0`). The pointer handed
-   to FFI is to the first byte; the consumer (e.g. `puts`, `printf`)
-   walks the bytes until it sees `\0`. There is no separate length
-   field, no `&str` fat pointer, no `CString` wrapper type. A bare
-   `"..."` literal *is* the C string.
+2. **String literals are C-style null-terminated.** This is a
+   deliberate divergence from Rust and an alignment with C: every
+   string literal emits a trailing `\0` byte that is *counted* in
+   the type's length (`char[12]` for `"hello world"`, mirroring C).
+   The pointer handed to FFI is to the first byte; the consumer
+   (e.g. `puts`, `printf`) walks the bytes until it sees `\0`. There
+   is no separate length field at runtime, no `&str` fat pointer, no
+   `CString` wrapper type. A bare `"..."` literal *is* the C string.
 
-   Rationale: the only string consumers we care about today are C ABI
-   functions, and they all expect NUL-terminated `char*`. Carrying a
-   Rust-style length around would be dead weight that we'd just have
-   to strip at every FFI boundary. We are explicitly choosing the C
-   model here, not Rust's.
+   Rationale: the only string consumers we care about today are C
+   ABI functions, and they all expect NUL-terminated `char*`.
+   Carrying a Rust-style length around would be dead weight that
+   we'd just have to strip at every FFI boundary.
+
+   Note that the FFI parameter is spelled `*const [u8]` — pointer
+   to *unsized* byte sequence — not `*const u8`. See "`*const T` vs
+   `*const [T]`" below for the distinction; the StrLit's
+   `*const [u8; N]` reaches the parameter slot via the existing
+   length-erasure coercion (`*const [T; N] → *const [T]`).
 
 3. **Pointer types: loose unify + strict coercion.** Mutability is a
    permission, not a structural property, so we keep it out of unify
@@ -75,34 +83,84 @@ Anatomy:
    forge write access. Only `as` casts grant that, and `as` is out
    of scope for v0.
 
-4. StrLit still holds string (at compilation level), just get
-   downleveled from utf-8 to bytes in type level. The `\0` terminator
-   is appended at codegen time and is *not* stored in the AST/HIR
-   string payload — so the source-level `.len()` of the literal stays
-   honest if we ever expose it to user code.
+4. **StrLit type: `*const [u8; N]`.** The HIR payload still holds
+   the source string (no NUL); codegen appends the `\0` and emits a
+   `[N x i8]` private global with `N = byte_len + 1` (NUL counted).
+   Typeck assigns the literal expression the type
+   `*const [u8; N]` — pointer to a sized byte array.
 
-   **Note: the "`*const u8` is the literal's type" model is
-   scaffolding for the no-arrays-in-v0 era.** Both C (`char[6]`) and
-   Rust (`&'static str`) keep an array layer that makes string
-   literals places with a stable address. We collapsed that layer
-   purely because arrays weren't available; one consequence is
-   `&"hello"` is rejected today (see `10_ADDRESS_OF.md` "Subset
-   gap"). Once arrays land (future `09_ARRAY.md`), the model
-   transitions to:
+   Two properties of this typing:
 
-   - `"hello"` has type `[u8; 6]` (matching C's `char[6]`; `N`
-     counts the trailing `\0`).
-   - `StrLit` becomes a place expression — codegen's existing
-     private-global emission already gives it a stable address.
-   - Existing FFI use sites continue to work via array-to-pointer
-     decay (`[u8; N] → *const u8` at fn-arg / let-init position),
-     so no source-level breakage.
-   - `&"hello"` becomes legit and produces `*const [u8; N]`.
+   - **Length is in the type.** Lengths shift around between
+     literals (`"hi"` → `*const [u8; 3]`, `"bye"` → `*const [u8; 4]`),
+     so two literals of different sizes don't unify directly.
+     Workaround for arm-coalesce / `=` reassignment: bind through a
+     `*const [u8]` (unsized) local first.
+   - **Immutability is encoded structurally** by the outer
+     `*const`. A bare `[u8; N]` place (the variant in earlier drafts
+     of this spec) would have admitted `let mut s = "aa"; s[0] = b'b';`
+     where the rebinding-mut + array-element-write would write
+     through `.rodata`. The pointer wrapper makes that statically
+     impossible without involving `as`. Rust's `b"..."` of type
+     `&'static [u8; N]` makes the same call.
 
-   The current spec (string-literal-IS-`*const u8`) stays in force
-   until arrays land. Codegen needs no change at that point —
-   `emit_str_lit`'s `[LEN+1 x i8]` global *is* the array layer; we
-   just stop pretending it isn't.
+   `&"hello"` stays rejected (E0208) because StrLit remains a
+   non-place expression. The canonical form is already a pointer;
+   `&"hello"` would produce `*const *const [u8; N]`, which is
+   rarely what anyone wants. If you do want a double-pointer, bind
+   to a local first: `let s = "hi"; let p = &s;`.
+
+   FFI compatibility: extern signatures should be spelled with
+   `*const [u8]` (sequence pointer; see "`*const T` vs `*const [T]`"
+   below). The literal's `*const [u8; N]` reaches the parameter
+   slot via the existing length-erasure coercion
+   (`*const [T; N] → *const [T]`; spec/09 "Coercions"). The pre-
+   migration spelling `*const u8` no longer accepts a string literal
+   — `*const T` strictly means "pointer to a single T".
+
+   Incidental consequences of the type carrying the array layer:
+
+   - `"hi"[0]` is now valid (returns `u8`). Index already unwraps
+     `Array(u8, _)` after `auto_deref_ptr`; no new code path.
+     Indexing through a string literal is read-only (the outer
+     `*const` propagates through the auto-deref, so `s[0] = 1` errors
+     as `MutateImmutable`).
+   - In if/match arms with mismatched-length literals (e.g.
+     `if c { "hi" } else { "bye" }`), the strict Some/Some length
+     check fires and rejects with E0265. Workaround: bind each
+     literal to a `*const [u8]` local first.
+
+   See `09_ARRAY.md` "Arm-coalesce sloppy subtyping" for the
+   one residual asymmetry around arm coalescing of mixed
+   sized / unsized arms.
+
+### `*const T` vs `*const [T]` semantics
+
+`*const T` is a pointer to **a single `T`**. `*const [T]` is a
+pointer to a **sequence** of `T` (length not statically known).
+`*const [T; N]` is a pointer to a sequence of statically-known
+length. C's `char *` semantically maps to Oxide `*const [u8]`,
+not `*const u8` — `char *` is the address of a sequence, just
+like `int *` is the address of a sequence in idiomatic C even when
+the type doesn't say so.
+
+Codegen lowers all three to opaque LLVM `ptr`, so the distinction
+is typeck-only and free at runtime. The point of the distinction
+is what the type system lets you do:
+
+- Through a `*const u8`: deref to `u8` (read one byte). No
+  indexing — there's no array layer to index into.
+- Through a `*const [u8]`: index `p[i]` (returns `u8`). No
+  bounds check at runtime — the length is not in the type.
+- Through a `*const [u8; N]`: index `p[i]` (with a static
+  bounds check at compile time when `i` is a const). Length-
+  erasure coerces this to `*const [u8]` at use sites.
+
+Pointer-to-sequence is the right type for *any* C function that
+takes a buffer (`read`, `write`, `puts`, `perror`, `system`,
+`memcpy`, …). Single-byte pointers (`*const u8` / `*mut u8`)
+are for the rare case where you actually mean "address of one
+byte" (e.g. atomic reads of a flag byte).
 
 5. **Pointer access (`*ptr` rvalue / `*ptr = v` lvalue) and the
    `null` literal are now specified — see "Null literal" and
@@ -167,7 +225,7 @@ mutability story stays inside typeck and never reaches codegen.
 Source:
 
 ```rust
-extern "C" { fn puts(s: *const u8) -> i32; }
+extern "C" { fn puts(s: *const [u8]) -> i32; }
 
 fn main() -> i32 {
     puts("hello world");
@@ -227,14 +285,14 @@ anticipated.
 
 ```rust
 extern "C" {
-    fn puts(s: *const u8) -> i32;
-    fn write(fd: i32, buf: *mut u8, n: usize) -> isize;
+    fn puts(s: *const [u8]) -> i32;
+    fn write(fd: i32, buf: *mut [u8], n: usize) -> isize;
 }
 
 fn main() -> i32 {
     let s: *const u8 = null;        // *mut α → *const u8 (α=u8, Mut→Const)
     let buf: *mut u8 = null;        // *mut α → *mut u8   (α=u8, Mut→Mut)
-    puts(null);                     // each `null` is its own α
+    puts(null);                     // each `null` is its own α; α=[u8] here
     0
 }
 ```

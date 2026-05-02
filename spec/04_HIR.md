@@ -154,7 +154,7 @@ pub enum HirExprKind {
     IntLit(u64),                              // typed by typeck (default i32)
     BoolLit(bool),
     CharLit(u8),                              // C-style: a byte
-    StrLit(String),                           // typeck: `*const u8` (NUL-terminated)
+    StrLit(String),                           // typeck: `*const [u8; N]`, N = bytes + 1 (NUL-terminated)
     Local(LocalId),                           // resolved use of a let/param
     Fn(FnId),                                 // resolved use of a fn name
     Unresolved(String),                       // value-name lookup failed

@@ -32,10 +32,10 @@
 // frame rate is ~12 fps (80 ms/frame), pipes scroll every other tick.
 
 extern "C" {
-    fn write(fd: i32, buf: *const u8, count: u64) -> i64;
-    fn read(fd: i32, buf: *mut u8, count: u64) -> i64;
+    fn write(fd: i32, buf: *const [u8], count: u64) -> i64;
+    fn read(fd: i32, buf: *mut [u8], count: u64) -> i64;
     fn usleep(usec: u32) -> i32;
-    fn system(cmd: *const u8) -> i32;
+    fn system(cmd: *const [u8]) -> i32;
     fn rand() -> i32;
     fn srand(seed: u32);
     fn time(t: *mut u64) -> u64;
@@ -58,7 +58,7 @@ fn main() -> i32 {
 
     // Put terminal into non-canonical, no-echo, non-blocking-read mode.
     system("stty -icanon -echo min 0 time 0");
-    write(1, &init_seq[0], 10);
+    write(1, &init_seq, 10);
 
     // Seed RNG from current time. `time(NULL)` would need a pointer-
     // int cast, which is deferred (spec/12_AS.md), so we pass the
@@ -96,7 +96,7 @@ fn main() -> i32 {
 
     loop {
         // ---- input ----------------------------------------------------
-        let n = read(0, &mut input[0], 8);
+        let n = read(0, &mut input, 8);
         if n > 0 {
             // `i: i64` so the `i < n` compare unifies cleanly with
             // `read`'s `i64` return. Default i32 would mismatch.
@@ -105,7 +105,7 @@ fn main() -> i32 {
                 // `c` inferred as u8 from `input`'s element type.
                 let c = input[i as usize];
                 if c == 113 {              // 'q' — quit
-                    write(1, &restore_seq[0], 13);
+                    write(1, &restore_seq, 13);
                     system("stty icanon echo");
                     return 0;
                 }
@@ -242,7 +242,7 @@ fn main() -> i32 {
         }
         buf[off] = 10; off = off + 1;      // trailing newline
 
-        write(1, &buf[0], off as u64);
+        write(1, &buf, off as u64);
 
         usleep(80000);                     // ~12 fps
         tick = tick + 1;

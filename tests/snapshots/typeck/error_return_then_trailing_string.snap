@@ -1,5 +1,5 @@
 == diagnostics ==
-[E0250] Error: type mismatch: expected `i32`, found `*const u8`
+[E0250] Error: type mismatch: expected `i32`, found `*const [u8; 2]`
    ╭─[ error_return_then_trailing_string.ox:1:15 ]
    │
  1 │ fn f() -> i32 { return 1; "a" }
@@ -10,4 +10,4 @@
 Fn[0] f() -> i32
   HExprId(0) : i32
   HExprId(1) : !
-  HExprId(2) : *const u8
+  HExprId(2) : *const [u8; 2]

@@ -293,7 +293,7 @@ pub enum TypeError {
     UnknownType               { name: String, span: Span },                       // E0251
     NotCallable               { found: TyId, span: Span },                        // E0252
     WrongArgCount             { expected: usize, found: usize, span: Span },      // E0253
-    // E0254 retired — string literals are typed `*const u8` (see StrLit row above)
+    // E0254 retired — string literals are typed `*const [u8; N]` (see StrLit row above)
     UnsupportedFeature        { feature: &'static str, span: Span },              // E0255
     CannotInfer               { span: Span },                                     // E0256
     PointerMutabilityMismatch { expected: TyId, actual: TyId, span: Span },       // E0257

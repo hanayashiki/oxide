@@ -474,49 +474,39 @@ emerges. One diagnostic from one layer.
 - `&place as *const U` cross-type pointer casts. `as` between
   pointer types remains TBD.
 
-### Subset gap: `&` on string literals (until arrays land)
+### Subset gap: `&` on string literals
 
-Both C and Rust treat string literals as having an underlying
-array layer that makes them places:
+`&"hello"` is rejected in Oxide (E0208). The rationale shifted
+once arrays landed and `07_POINTER.md` §4 settled the StrLit type:
 
 | Language | `"hello"` type             | Place? | `&"hello"` |
 |---|---|---|---|
 | C        | `char[6]` (array)          | yes    | `char (*)[6]` |
 | Rust     | `&'static str`             | yes    | `&&'static str` |
-| Oxide    | `*const u8` (collapsed)    | **no** | rejected (E0208) |
+| Oxide    | `*const [u8; 6]` (pointer) | **no** | rejected (E0208) |
 
-Our `07_POINTER.md` collapsed that array layer — `"hello"` *is*
-the `*const u8`, not a place holding a `[u8; 6]` we could address.
-The collapse was scaffolding for "no arrays in v0," not a model
-choice we want to keep.
+Oxide's StrLit is already in pointer form — it carries the
+address of the `.rodata` global directly as a `*const [u8; 6]`,
+not as a place holding a `[u8; 6]` we'd need to address. Taking
+its address would produce `*const *const [u8; 6]` (pointer to
+pointer), which is rarely the user's intent and not how C/Rust
+handle the same construct. The non-place rule is captured in
+`compute_is_place`'s catch-all arm.
 
-**Once arrays land** (future `09_ARRAY.md`), the model shifts:
-
-- `"hello"` becomes `[u8; 6]` (mirroring C — N counts the trailing
-  `\0` byte).
-- `StrLit` becomes a place expression (it has a stable address in
-  `.rodata`; codegen's `emit_str_lit` already emits a private
-  global there).
-- `&"hello"` becomes legit, producing `*const [u8; 6]`.
-- The existing `*const u8` use sites (FFI to `puts` etc.) keep
-  working through array-to-pointer decay (`[u8; N] → *const u8`
-  at function-arg / let-init position).
-
-At that point, `compute_is_place` gains a `StrLit` arm and this
-spec gap closes. The `&` operator's machinery here doesn't need
-to change — the place check is structural, and StrLit becoming a
-place is purely a HIR-side reclassification.
-
-Until then, workaround is bind-to-local:
+If you do want a double-pointer (e.g. for `*const *const [u8]`
+FFI), the canonical workaround is bind-to-local:
 
 ```rust
-let s: *const u8 = "hello";
-let pp = &s;                   // *const *const u8
+let s = "hello";               // *const [u8; 6]
+let pp = &s;                   // *const *const [u8; 6]
 ```
 
-The subset-of-Rust constraint is preserved (we don't accept
-anything Rust rejects), but the asymmetry is real and explicitly
-temporary.
+This was originally framed as a "subset gap" pending the bare-
+`[u8; N]` (place) variant of the StrLit migration; that variant
+was not adopted (it would have admitted `let mut s = "hi"; s[0] = b'b';`
+mutating `.rodata`). The pointer-form variant — chosen and
+shipped — keeps `&"hello"` rejected by structural design rather
+than by scaffolding.
 
 ## Errors summary
 

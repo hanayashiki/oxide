@@ -1,5 +1,5 @@
 == diagnostics ==
-[E0250] Error: type mismatch: expected `i32`, found `*const u8`
+[E0250] Error: type mismatch: expected `i32`, found `*const [u8; 2]`
    ╭─[ error_divergent_subblock_does_not_silence_trailing_mismatch.ox:1:18 ]
    │
  1 │ fn shit() -> i32 { { return 1 } "a" }
@@ -11,4 +11,4 @@ Fn[0] shit() -> i32
   HExprId(0) : i32
   HExprId(1) : !
   HExprId(2) : !
-  HExprId(3) : *const u8
+  HExprId(3) : *const [u8; 2]
