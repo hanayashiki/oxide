@@ -39,6 +39,20 @@ pub enum ItemKind {
     ExternBlock(ExternBlock),
     /// `struct Name { f: T, ... }` — record struct declaration.
     Struct(StructDecl),
+    /// `import "<path>";` — request to splat another file's top-level
+    /// items into this file's scope. Consumed at HIR lowering once the
+    /// loader and `lower_program` land; until then HIR lowering skips
+    /// it. See spec/14_MODULES.md.
+    Import(ImportItem),
+}
+
+#[derive(Clone, Debug)]
+pub struct ImportItem {
+    /// Path string as it appears in source, before resolution. The
+    /// loader is responsible for resolving this against the importing
+    /// file's directory and the stdlib hardcode table.
+    pub path: String,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug)]

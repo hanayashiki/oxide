@@ -1,0 +1,11 @@
+Module
+== diagnostics ==
+[E0102] Error: unexpected end of input
+   ╭─[ error_import_missing_semi.ox:1:19 ]
+   │
+ 1 │ import "stdio.ox"
+   │                   │ 
+   │                   ╰─ input ended here
+   │ 
+   │ Note: expected: token
+───╯

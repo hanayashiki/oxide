@@ -1,0 +1,9 @@
+Module
+== diagnostics ==
+[E0107] Error: expected import path string literal, got Semi
+   ╭─[ error_import_missing_string.ox:1:8 ]
+   │
+ 1 │ import ;
+   │        ┬  
+   │        ╰── here
+───╯

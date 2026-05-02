@@ -139,6 +139,9 @@ impl<'a> Lowerer<'a> {
                 ast::ItemKind::Struct(s) => {
                     self.register_adt_stub(s, &item.span);
                 }
+                // Imports are consumed once the loader + lower_program land
+                // (Steps 5+7). Until then, swallow them at HIR-lower time.
+                ast::ItemKind::Import(_) => {}
             }
         }
         out

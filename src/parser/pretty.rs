@@ -60,6 +60,12 @@ impl<'a> Printer<'a> {
                 self.indent -= 1;
             }
             ItemKind::Struct(s) => self.print_struct(s),
+            ItemKind::Import(i) => {
+                self.begin_line();
+                self.write("Import ");
+                write!(self.out, "{:?}", i.path).unwrap();
+                self.end_line();
+            }
         }
     }
 

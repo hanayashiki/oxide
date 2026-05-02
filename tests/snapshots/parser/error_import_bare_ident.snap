@@ -1,0 +1,9 @@
+Module
+== diagnostics ==
+[E0107] Error: expected import path string literal, got Ident("stdio")
+   ╭─[ error_import_bare_ident.ox:1:8 ]
+   │
+ 1 │ import stdio;
+   │        ──┬──  
+   │          ╰──── here
+───╯

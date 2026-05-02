@@ -847,6 +847,31 @@ where
         .labelled("extern block")
 }
 
+/// `import "<path>";` — splat-import statement. Top-level only.
+/// The path is taken raw; resolution is the loader's job. See
+/// spec/14_MODULES.md.
+fn import_item_parser<'a, I>() -> impl Parser<'a, I, ItemId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+{
+    let path = any().try_map(|tok: TokenKind, span: SimpleSpan| match tok {
+        TokenKind::Str(s) => Ok(s),
+        other => Err(Rich::custom(
+            span,
+            format!("expected import path string literal, got {other:?}"),
+        )),
+    });
+
+    just(TokenKind::KwImport)
+        .ignore_then(path)
+        .then_ignore(just(TokenKind::Semi))
+        .map_with(|path, e| {
+            let span = e.lex_span();
+            e.push_item(ItemKind::Import(ImportItem { path, span }))
+        })
+        .labelled("import")
+}
+
 /// `struct Name { f: T, ... }` — record struct declaration. Empty field
 /// list (`struct Foo {}`) is accepted; tuple/unit struct forms (`Foo(...)`,
 /// `Foo;`) are not.
@@ -886,6 +911,7 @@ where
     I: OValueInput<'a>,
 {
     let item = choice((
+        import_item_parser(),
         extern_block_parser(),
         struct_item_parser(),
         fn_item_parser(),

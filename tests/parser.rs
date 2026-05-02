@@ -80,3 +80,16 @@ fn pointer_without_mutability_is_parse_error() {
         "`*u8` without const/mut must not parse"
     );
 }
+
+#[test]
+fn import_lowers_to_import_item_with_raw_path() {
+    let tokens = lex(r#"import "stdio.ox";"#, FID);
+    let (module, errors) = parse(&tokens, FID);
+    assert!(errors.is_empty(), "expected clean parse, got {errors:#?}");
+    assert_eq!(module.root_items.len(), 1);
+    let item = &module.items[module.root_items[0]];
+    let oxide::parser::ItemKind::Import(imp) = &item.kind else {
+        panic!("expected Import, got {:?}", item.kind);
+    };
+    assert_eq!(imp.path, "stdio.ox");
+}
