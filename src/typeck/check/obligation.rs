@@ -44,7 +44,7 @@
 //! once `<T>` lands. The check-only architecture extends without
 //! redesign.
 
-use crate::lexer::Span;
+use crate::reporter::Span;
 
 use super::super::error::SizedPos;
 use super::super::ty::TyId;

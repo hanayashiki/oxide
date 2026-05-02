@@ -9,9 +9,9 @@ use std::collections::BTreeMap;
 use chumsky::span::SimpleSpan;
 use index_vec::IndexVec;
 
-use crate::lexer::{BytePos, LspPos, Span};
 use crate::parser::ast::*;
 use crate::parser::error::ParseError;
+use crate::reporter::{BytePos, FileId, LspPos, Span};
 
 /// Mutable parser state carried by chumsky via `extra::SimpleState`.
 /// Combinators push new AST nodes here and return their typed-index handles.
@@ -23,6 +23,7 @@ use crate::parser::error::ParseError;
 /// `ModuleBuilder` and truncate each `IndexVec` on rollback.
 #[derive(Default)]
 pub(super) struct ModuleBuilder {
+    pub(super) file: FileId,
     pub(super) items: IndexVec<ItemId, Item>,
     pub(super) exprs: IndexVec<ExprId, Expr>,
     pub(super) blocks: IndexVec<BlockId, Block>,
@@ -33,12 +34,22 @@ pub(super) struct ModuleBuilder {
 }
 
 impl ModuleBuilder {
+    pub(super) fn new(file: FileId) -> Self {
+        Self {
+            file,
+            ..ModuleBuilder::default()
+        }
+    }
+}
+
+impl ModuleBuilder {
     /// Convert a chumsky byte-range span into a full `lexer::Span` (byte + LSP).
     /// AST nodes always span token boundaries, so the lookup never misses for
     /// well-formed input. For synthesized spans we fall back to the nearest
     /// preceding boundary.
     pub(super) fn span(&self, ss: SimpleSpan) -> Span {
         Span {
+            file: self.file,
             start: BytePos { offset: ss.start },
             end: BytePos { offset: ss.end },
             lsp_start: self.lsp_at(ss.start),

@@ -16,8 +16,8 @@ use std::collections::hash_map::Entry;
 
 use index_vec::IndexVec;
 
-use crate::lexer::Span;
 use crate::parser::ast::UnOp;
+use crate::reporter::Span;
 use crate::parser::{Ident, StructLitField, ast};
 
 use super::ir::*;

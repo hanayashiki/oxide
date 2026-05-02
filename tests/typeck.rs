@@ -9,11 +9,14 @@
 use oxide::hir::lower;
 use oxide::lexer::lex;
 use oxide::parser::parse;
+use oxide::reporter::FileId;
 use oxide::typeck::{TyKind, TypeError, TypeckResults, check};
 
+const FID: FileId = FileId(0);
+
 fn typeck(src: &str) -> (TypeckResults, Vec<TypeError>) {
-    let tokens = lex(src);
-    let (ast, parse_errs) = parse(&tokens);
+    let tokens = lex(src, FID);
+    let (ast, parse_errs) = parse(&tokens, FID);
     assert!(parse_errs.is_empty(), "parse errors: {parse_errs:#?}");
     let (hir, hir_errs) = lower(&ast);
     assert!(hir_errs.is_empty(), "hir errors: {hir_errs:#?}");

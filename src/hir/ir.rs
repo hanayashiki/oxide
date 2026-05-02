@@ -4,7 +4,7 @@
 
 use index_vec::IndexVec;
 
-use crate::lexer::Span;
+use crate::reporter::Span;
 use crate::parser::ast::{AssignOp, BinOp, Mutability, UnOp};
 
 index_vec::define_index_type! { pub struct FnId        = u32; }

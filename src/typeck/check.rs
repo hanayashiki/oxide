@@ -30,8 +30,8 @@ use crate::hir::{
     FnId, HBlockId, HElseArm, HExprId, HirArrayLit, HirConst, HirExpr, HirExprKind, HirLocal,
     HirModule, HirStructLitField, HirTy, HirTyKind, LocalId, VariantIdx,
 };
-use crate::lexer::Span;
 use crate::parser::ast::{AssignOp, BinOp, Mutability, UnOp};
+use crate::reporter::Span;
 
 use self::obligation::Obligation;
 use super::error::{MutateOp, SizedPos, TypeError};

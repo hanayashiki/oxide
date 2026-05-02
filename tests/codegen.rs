@@ -4,14 +4,17 @@ use oxide::codegen::codegen;
 use oxide::hir::lower as hir_lower;
 use oxide::lexer::lex;
 use oxide::parser::parse;
+use oxide::reporter::FileId;
 use oxide::typeck::check;
+
+const FID: FileId = FileId(0);
 
 /// Compile a source string through the full pipeline and hand back the
 /// LLVM IR as a string.
 fn compile_to_ir(src: &str) -> String {
     let ctx = Context::create();
-    let tokens = lex(src);
-    let (ast, parse_errs) = parse(&tokens);
+    let tokens = lex(src, FID);
+    let (ast, parse_errs) = parse(&tokens, FID);
     assert!(parse_errs.is_empty(), "parse errors: {parse_errs:#?}");
     let (hir, hir_errs) = hir_lower(&ast);
     assert!(hir_errs.is_empty(), "hir errors: {hir_errs:#?}");

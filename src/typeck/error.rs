@@ -1,4 +1,4 @@
-use crate::lexer::Span;
+use crate::reporter::Span;
 
 use super::ty::TyId;
 

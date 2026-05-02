@@ -31,11 +31,11 @@ struct Args {
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    let tokens = lex(&args.parse);
-    let (module, parse_errors) = parse(&tokens);
-
     let mut map = SourceMap::new();
     let file = map.add(PathBuf::from("<arg>"), args.parse.clone());
+    let tokens = lex(&args.parse, file);
+    let (module, parse_errors) = parse(&tokens, file);
+
     let stderr = std::io::stderr();
     let color = stderr.is_terminal();
 

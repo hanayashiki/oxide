@@ -29,12 +29,12 @@ struct Args {
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    let tokens = lex(&args.parse);
-    let (module, errors) = parse(&tokens);
+    let mut map = SourceMap::new();
+    let file = map.add(PathBuf::from("<arg>"), args.parse.clone());
+    let tokens = lex(&args.parse, file);
+    let (module, errors) = parse(&tokens, file);
 
     if !errors.is_empty() {
-        let mut map = SourceMap::new();
-        let file = map.add(PathBuf::from("<arg>"), args.parse.clone());
         let stderr = std::io::stderr();
         let color = stderr.is_terminal();
         let mut out = stderr.lock();

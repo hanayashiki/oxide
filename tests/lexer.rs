@@ -1,7 +1,10 @@
-use oxide::lexer::{BytePos, LexError, LspPos, Span, Token, TokenKind, lex};
+use oxide::lexer::{LexError, Token, TokenKind, lex};
+use oxide::reporter::{BytePos, FileId, LspPos, Span};
+
+const FID: FileId = FileId(0);
 
 fn kinds(src: &str) -> Vec<TokenKind> {
-    lex(src).into_iter().map(|t| t.kind).collect()
+    lex(src, FID).into_iter().map(|t| t.kind).collect()
 }
 
 fn ident(s: &str) -> TokenKind {
@@ -16,7 +19,7 @@ fn s(s: &str) -> TokenKind {
 
 #[test]
 fn empty_input_yields_only_eof() {
-    let toks = lex("");
+    let toks = lex("", FID);
     assert_eq!(toks.len(), 1);
     assert_eq!(toks[0].kind, TokenKind::Eof);
     assert_eq!(toks[0].span.start, BytePos::new(0));
@@ -300,7 +303,7 @@ fn longest_match_eqeq_vs_eq() {
 
 #[test]
 fn byte_span_for_simple_token() {
-    let toks = lex("foo");
+    let toks = lex("foo", FID);
     assert_eq!(toks[0].span.start, BytePos::new(0));
     assert_eq!(toks[0].span.end, BytePos::new(3));
     assert_eq!(toks[0].span.lsp_start, LspPos::new(0, 0));
@@ -310,7 +313,7 @@ fn byte_span_for_simple_token() {
 #[test]
 fn span_across_newline() {
     // "foo\nbar"
-    let toks = lex("foo\nbar");
+    let toks = lex("foo\nbar", FID);
     assert_eq!(toks.len(), 3); // foo, bar, eof
     let bar = &toks[1].span;
     assert_eq!(bar.start, BytePos::new(4));
@@ -325,7 +328,7 @@ fn span_across_non_ascii_in_string() {
     // Bytes:   "  é(0xC3,0xA9)  "  x
     // Offsets: 0  1            3  4   5
     let src = "\"é\"x";
-    let toks = lex(src);
+    let toks = lex(src, FID);
     // Tokens: Str("é"), Ident("x"), Eof.
     assert_eq!(toks[0].kind, s("é"));
     assert_eq!(toks[0].span.start, BytePos::new(0));
@@ -339,7 +342,7 @@ fn span_across_non_ascii_in_string() {
 
 #[test]
 fn eof_span_is_zero_width_at_end() {
-    let toks = lex("ab");
+    let toks = lex("ab", FID);
     let eof = toks.last().unwrap();
     assert_eq!(eof.kind, TokenKind::Eof);
     assert_eq!(eof.span.start, BytePos::new(2));
@@ -404,19 +407,15 @@ fn small_program() {
 
 #[test]
 fn _span_struct_is_constructible() {
-    let _ = Span::new(
-        BytePos::new(0),
-        BytePos::new(0),
-        LspPos::new(0, 0),
-        LspPos::new(0, 0),
-    );
+    let zero = Span {
+        file: FID,
+        start: BytePos::new(0),
+        end: BytePos::new(0),
+        lsp_start: LspPos::new(0, 0),
+        lsp_end: LspPos::new(0, 0),
+    };
     let _: Token = Token {
         kind: TokenKind::Eof,
-        span: Span::new(
-            BytePos::new(0),
-            BytePos::new(0),
-            LspPos::new(0, 0),
-            LspPos::new(0, 0),
-        ),
+        span: zero,
     };
 }

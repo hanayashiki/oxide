@@ -62,11 +62,11 @@ fn main() -> ExitCode {
         }
     };
 
-    let tokens = lex(&source);
-    let (ast, parse_errors) = parse(&tokens);
-
     let mut map = SourceMap::new();
     let file = map.add(file_label, source.clone());
+    let tokens = lex(&source, file);
+    let (ast, parse_errors) = parse(&tokens, file);
+
     let stderr = std::io::stderr();
     let color = stderr.is_terminal();
 

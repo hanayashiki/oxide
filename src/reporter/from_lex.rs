@@ -1,6 +1,6 @@
-use crate::lexer::{LexError, Span};
+use crate::lexer::LexError;
 use super::diagnostic::{Diagnostic, Label};
-use super::source_map::FileId;
+use super::source_map::{FileId, Span};
 
 /// Map a lex error and its span into a structured diagnostic.
 pub fn from_lex_error(err: &LexError, file: FileId, span: Span) -> Diagnostic {

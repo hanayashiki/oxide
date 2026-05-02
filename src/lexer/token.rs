@@ -1,5 +1,6 @@
+use crate::reporter::Span;
+
 use super::error::LexError;
-use super::span::Span;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Token {

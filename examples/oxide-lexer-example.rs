@@ -30,7 +30,9 @@ struct Args {
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    let tokens = lex(&args.lex);
+    let mut map = SourceMap::new();
+    let file = map.add(PathBuf::from("<arg>"), args.lex.clone());
+    let tokens = lex(&args.lex, file);
 
     let errors: Vec<_> = tokens
         .iter()
@@ -41,8 +43,6 @@ fn main() -> ExitCode {
         .collect();
 
     if !errors.is_empty() {
-        let mut map = SourceMap::new();
-        let file = map.add(PathBuf::from("<arg>"), args.lex.clone());
         let stderr = std::io::stderr();
         let color = stderr.is_terminal();
         let mut out = stderr.lock();

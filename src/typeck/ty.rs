@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use index_vec::IndexVec;
 
 use crate::hir::{AdtKind, FieldIdx, VariantIdx};
-use crate::lexer::Span;
 use crate::parser::ast::Mutability;
+use crate::reporter::Span;
 
 index_vec::define_index_type! { pub struct TyId    = u32; }
 index_vec::define_index_type! { pub struct InferId = u32; }

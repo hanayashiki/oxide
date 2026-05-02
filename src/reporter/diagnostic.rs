@@ -1,5 +1,4 @@
-use crate::lexer::Span;
-use super::source_map::FileId;
+use super::source_map::{FileId, Span};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Severity {

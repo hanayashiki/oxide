@@ -12,17 +12,18 @@ use chumsky::input::Stream;
 use chumsky::prelude::*;
 use chumsky::span::SimpleSpan;
 
-use crate::lexer::{BytePos, LspPos, Span, Token, TokenKind};
+use crate::lexer::{Token, TokenKind};
 use crate::parser::ast::Module;
 use crate::parser::error::ParseError;
+use crate::reporter::{BytePos, FileId, LspPos, Span};
 
 use builder::ModuleBuilder;
 
 /// Parse a token stream into a `Module`. Always returns the `Module`
 /// (possibly with empty arenas for empty/all-error input) alongside any
 /// recovered `ParseError`s. Recoverable: there is no "failed to parse" case.
-pub fn parse(tokens: &[Token]) -> (Module, Vec<ParseError>) {
-    let mut builder = ModuleBuilder::default();
+pub fn parse(tokens: &[Token], file: FileId) -> (Module, Vec<ParseError>) {
+    let mut builder = ModuleBuilder::new(file);
 
     // Build the byte → LSP lookup so AST node spans can be reconstructed
     // from chumsky's byte-only `SimpleSpan`.
@@ -37,12 +38,14 @@ pub fn parse(tokens: &[Token]) -> (Module, Vec<ParseError>) {
 
     let module_span: Span = match (tokens.first(), tokens.last()) {
         (Some(first), Some(last)) => Span {
+            file,
             start: first.span.start,
             end: last.span.end,
             lsp_start: first.span.lsp_start,
             lsp_end: last.span.lsp_end,
         },
         _ => Span {
+            file,
             start: BytePos { offset: 0 },
             end: BytePos { offset: 0 },
             lsp_start: LspPos {

@@ -155,11 +155,11 @@ fn format_mismatch(path: &Path, expected: &str, actual: &str) -> String {
 }
 
 pub fn render_parser(file_name: &str, src: &str) -> String {
-    let tokens = lex(src);
-    let (module, errors) = parse(&tokens);
+    let (map, file) = make_map(file_name, src);
+    let tokens = lex(src, file);
+    let (module, errors) = parse(&tokens, file);
     let mut out = parser_pretty_print(&module);
     if !errors.is_empty() {
-        let (map, file) = make_map(file_name, src);
         let diags: Vec<_> = errors.iter().map(|e| from_parse_error(e, file)).collect();
         out.push_str("== diagnostics ==\n");
         out.push_str(&render_diagnostics(&diags, &map));
@@ -168,8 +168,9 @@ pub fn render_parser(file_name: &str, src: &str) -> String {
 }
 
 pub fn render_hir(file_name: &str, src: &str) -> String {
-    let tokens = lex(src);
-    let (module, parse_errs) = parse(&tokens);
+    let (map, file) = make_map(file_name, src);
+    let tokens = lex(src, file);
+    let (module, parse_errs) = parse(&tokens, file);
     assert!(
         parse_errs.is_empty(),
         "parse errors in {file_name}: {parse_errs:#?}"
@@ -177,7 +178,6 @@ pub fn render_hir(file_name: &str, src: &str) -> String {
     let (hir, errors) = lower(&module);
     let mut out = hir_pretty_print(&hir);
     if !errors.is_empty() {
-        let (map, file) = make_map(file_name, src);
         let diags: Vec<_> = errors.iter().map(|e| from_hir_error(e, file)).collect();
         out.push_str("== diagnostics ==\n");
         out.push_str(&render_diagnostics(&diags, &map));
@@ -202,8 +202,9 @@ pub fn render_hir(file_name: &str, src: &str) -> String {
 /// Safety: the caller asserts the function's actual return type matches
 /// `R`. A mismatch here is undefined behaviour.
 pub unsafe fn jit_run_with_ir<R: Copy + 'static>(src: &str, entry: &str) -> (String, R) {
-    let tokens = lex(src);
-    let (ast, parse_errs) = parse(&tokens);
+    let (_map, file) = make_map("<jit>", src);
+    let tokens = lex(src, file);
+    let (ast, parse_errs) = parse(&tokens, file);
     assert!(parse_errs.is_empty(), "parse errors: {parse_errs:#?}");
     let (hir, hir_errs) = lower(&ast);
     assert!(hir_errs.is_empty(), "hir errors: {hir_errs:#?}");
@@ -237,8 +238,9 @@ pub unsafe fn jit_run<R: Copy + 'static>(src: &str, entry: &str) -> R {
 }
 
 pub fn render_typeck(file_name: &str, src: &str) -> String {
-    let tokens = lex(src);
-    let (ast, parse_errs) = parse(&tokens);
+    let (map, file) = make_map(file_name, src);
+    let tokens = lex(src, file);
+    let (ast, parse_errs) = parse(&tokens, file);
     assert!(
         parse_errs.is_empty(),
         "parse errors in {file_name}: {parse_errs:#?}"
@@ -249,8 +251,6 @@ pub fn render_typeck(file_name: &str, src: &str) -> String {
         "hir errors in {file_name}: {hir_errs:#?}"
     );
     let (results, type_errors) = check(&hir);
-
-    let (map, file) = make_map(file_name, src);
 
     let mut out = String::new();
 

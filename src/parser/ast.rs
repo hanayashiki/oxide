@@ -5,7 +5,7 @@
 
 use std::cmp::Ordering;
 
-use crate::lexer::Span;
+use crate::reporter::Span;
 use index_vec::IndexVec;
 
 index_vec::define_index_type! { pub struct ItemId  = u32; }

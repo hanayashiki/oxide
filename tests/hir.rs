@@ -9,10 +9,13 @@
 use oxide::hir::{HirError, HirExprKind, HirModule, HirTyKind, LoopSource, lower};
 use oxide::lexer::lex;
 use oxide::parser::parse;
+use oxide::reporter::FileId;
+
+const FID: FileId = FileId(0);
 
 fn lower_src(src: &str) -> (HirModule, Vec<HirError>) {
-    let tokens = lex(src);
-    let (ast, parse_errs) = parse(&tokens);
+    let tokens = lex(src, FID);
+    let (ast, parse_errs) = parse(&tokens, FID);
     assert!(parse_errs.is_empty(), "parse errors: {parse_errs:#?}");
     lower(&ast)
 }
@@ -56,8 +59,8 @@ fn if_else_branches_resolve_to_correct_locals() {
     // snapshot covers the rendered shape; this asserts the structural
     // invariants the snapshot can't see (`has_semi == false` for the
     // value-producing item, exact local indices in each branch).
-    let tokens = lex("fn f(c: bool, a: i32, b: i32) -> i32 { if c { a } else { b } }");
-    let (ast, _) = parse(&tokens);
+    let tokens = lex("fn f(c: bool, a: i32, b: i32) -> i32 { if c { a } else { b } }", FID);
+    let (ast, _) = parse(&tokens, FID);
     let (hir, _) = lower(&ast);
     let f = &hir.fns[hir.root_fns[0]];
     let body = &hir.blocks[f.body.expect("local fn has body")];

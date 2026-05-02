@@ -9,7 +9,7 @@ use oxide::reporter::{Diagnostic, FileId, Severity, SourceMap, emit, from_lex_er
 fn diags_for(src: &str) -> (SourceMap, FileId, Vec<Diagnostic>) {
     let mut map = SourceMap::new();
     let file = map.add(PathBuf::from("test.ox"), src.to_string());
-    let diags = lex(src)
+    let diags = lex(src, file)
         .into_iter()
         .filter_map(|t| match t.kind {
             TokenKind::Error(e) => Some(from_lex_error(&e, file, t.span)),

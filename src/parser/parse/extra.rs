@@ -9,8 +9,9 @@ use chumsky::extra;
 use chumsky::input::{MapExtra, ValueInput};
 use chumsky::span::SimpleSpan;
 
-use crate::lexer::{Span, TokenKind};
+use crate::lexer::TokenKind;
 use crate::parser::ast::*;
+use crate::reporter::Span;
 
 use super::builder::ModuleBuilder;
 

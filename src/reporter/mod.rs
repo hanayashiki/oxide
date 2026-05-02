@@ -12,4 +12,4 @@ pub use from_lex::from_lex_error;
 pub use from_parse::from_parse_error;
 pub use from_typeck::from_typeck_error;
 pub use render::{emit, emit_all};
-pub use source_map::{FileId, SourceFile, SourceMap};
+pub use source_map::{BytePos, FileId, LspPos, Span, SourceFile, SourceMap};

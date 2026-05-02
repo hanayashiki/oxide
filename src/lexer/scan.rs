@@ -1,9 +1,11 @@
+use crate::reporter::{BytePos, FileId, LspPos, Span};
+
 use super::error::LexError;
-use super::span::{BytePos, LspPos, Span};
 use super::token::{keyword_lookup, Token, TokenKind};
 
 pub(super) struct Lexer<'a> {
     src: &'a str,
+    file: FileId,
     pos: usize,
     line: u32,
     col: u32,
@@ -12,8 +14,8 @@ pub(super) struct Lexer<'a> {
 type Mark = (BytePos, LspPos);
 
 impl<'a> Lexer<'a> {
-    pub(super) fn new(src: &'a str) -> Self {
-        Self { src, pos: 0, line: 0, col: 0 }
+    pub(super) fn new(src: &'a str, file: FileId) -> Self {
+        Self { src, file, pos: 0, line: 0, col: 0 }
     }
 
     fn peek(&self) -> Option<char> {
@@ -45,12 +47,13 @@ impl<'a> Lexer<'a> {
     }
 
     fn span_from(&self, start: Mark) -> Span {
-        Span::new(
-            start.0,
-            BytePos::new(self.pos),
-            start.1,
-            LspPos::new(self.line, self.col),
-        )
+        Span {
+            file: self.file,
+            start: start.0,
+            end: BytePos::new(self.pos),
+            lsp_start: start.1,
+            lsp_end: LspPos::new(self.line, self.col),
+        }
     }
 
     /// Skip whitespace and comments. Returns `Some(error_token)` if an
@@ -429,7 +432,7 @@ mod tests {
     use super::*;
 
     fn lex(src: &str) -> Vec<Token> {
-        Lexer::new(src).lex()
+        Lexer::new(src, FileId(0)).lex()
     }
 
     #[test]
