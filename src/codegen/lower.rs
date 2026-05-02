@@ -836,7 +836,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         rhs: HExprId,
     ) -> Option<BasicValueEnum<'ctx>> {
         // Short-circuit operators have their own control-flow shape.
-        if matches!(op, BinOp::And | BinOp::Or) {
+        if let BinOp::And | BinOp::Or = op {
             return Some(self.emit_short_circuit(fx, op, lhs, rhs));
         }
 
@@ -1018,7 +1018,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             .expect("assign rhs produced no value")
             .into_int_value();
 
-        let new_val = if matches!(op, AssignOp::Eq) {
+        let new_val = if let AssignOp::Eq = op {
             r
         } else {
             let cur = self

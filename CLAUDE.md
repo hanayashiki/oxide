@@ -21,3 +21,7 @@ When reviewingg, report directly to your human and ask for confirmation;
 ## Committing
 
 A local `.git/hooks/pre-commit` is setup to guard the commit. Tests and types must be green to commit.
+
+## Style
+
+- Prefer `if let Pattern = expr` over `if matches!(expr, Pattern)`

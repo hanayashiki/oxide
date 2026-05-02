@@ -111,7 +111,7 @@ pub fn lower_fn_type<'ctx>(
         .params
         .iter()
         .map(|&p| {
-            if matches!(tcx.kind(p), TyKind::Array(_, Some(_))) {
+            if let TyKind::Array(_, Some(_)) = tcx.kind(p) {
                 ctx.ptr_type(inkwell::AddressSpace::default()).into()
             } else {
                 lower_ty(ctx, tcx, adt_ll, p).into()

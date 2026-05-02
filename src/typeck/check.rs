@@ -322,7 +322,7 @@ impl<'hir> Checker<'hir> {
                     Some(i) => self.resolve_fully(i, ty),
                     None => ty,
                 };
-                if matches!(self.tys.kind(t), TyKind::Array(_, None)) {
+                if let TyKind::Array(_, None) = self.tys.kind(t) {
                     self.errors
                         .push(TypeError::UnsizedArrayAsValue { pos, span });
                 }
@@ -735,7 +735,7 @@ impl<'hir> Checker<'hir> {
     /// and the eager unify enforces the constraint.
     fn coerce(&mut self, inf: &mut Inferer, actual: TyId, expected: TyId, span: Span) {
         let resolved_a = self.resolve(inf, actual);
-        if matches!(self.tys.kind(resolved_a), TyKind::Never | TyKind::Error) {
+        if let TyKind::Never | TyKind::Error = self.tys.kind(resolved_a) {
             return;
         }
         self.unify(inf, actual, expected, span.clone());
@@ -1222,9 +1222,9 @@ impl<'hir> Checker<'hir> {
     /// mutable. See spec/10_ADDRESS_OF.md "Type rule" / "Mutability check".
     fn infer_addr_of(&mut self, inf: &mut Inferer, mutability: Mutability, expr: HExprId) -> TyId {
         let inner_ty = self.infer_expr(inf, expr);
-        if matches!(mutability, Mutability::Mut) {
+        if let Mutability::Mut = mutability {
             // None ⇒ HIR already filed `AddrOfNonPlace`; suppress.
-            if matches!(self.place_mutability(expr), Some(Mutability::Const)) {
+            if let Some(Mutability::Const) = self.place_mutability(expr) {
                 let span = self.hir.exprs[expr].span.clone();
                 inf.errors.push(TypeError::MutateImmutable {
                     op: MutateOp::BorrowMut,
@@ -1378,7 +1378,7 @@ impl<'hir> Checker<'hir> {
     /// arm came first, instead of `i32`.
     fn join_never(&self, inf: &Inferer, a: TyId, b: TyId) -> TyId {
         let ar = self.resolve(inf, a);
-        if matches!(self.tys.kind(ar), TyKind::Never) {
+        if let TyKind::Never = self.tys.kind(ar) {
             self.resolve(inf, b)
         } else {
             a
