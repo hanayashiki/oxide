@@ -173,6 +173,45 @@ pub enum ExprKind {
         then_block: BlockId,
         else_arm: Option<ElseArm>,
     },
+    /// `while cond block` — see spec/13_LOOPS.md. Cond must be `bool`;
+    /// body must produce `()`/`!`. The `while` expression itself types
+    /// as `()`.
+    While {
+        cond: ExprId,
+        body: BlockId,
+    },
+    /// `loop block` — infinite loop. The expression's value type is
+    /// derived from `break expr?` operands inside the body: `!` if no
+    /// break, `()` if only `break;`, `T` if any `break expr;`.
+    Loop {
+        body: BlockId,
+    },
+    /// C-style `for ( init? ; cond? ; update? ) block`. Each header
+    /// slot independently optional; `for (;;) { ... }` is the
+    /// infinite-loop spelling. Parens around the header are mandatory
+    /// (they delimit header from body — see spec/13_LOOPS.md "Why
+    /// parens around the `for` header"). `init` may be a `let`-form
+    /// (parsed as `ExprKind::Let`) or any other expression.
+    For {
+        init: Option<ExprId>,
+        cond: Option<ExprId>,
+        update: Option<ExprId>,
+        body: BlockId,
+    },
+    /// `break expr?` — type `!`. Named field `expr` is the value
+    /// flowing into the enclosing loop's result-type slot. Struct-
+    /// variant shape (rather than `Break(Option<_>)` like `Return`)
+    /// because the operand has a load-bearing typing role we want
+    /// named explicitly at the AST. HIR-lower validates we're inside
+    /// a loop; typeck coerces `expr`'s type (or `()` if `None`) into
+    /// the innermost loop's result-type slot.
+    Break {
+        expr: Option<ExprId>,
+    },
+    /// `continue` — type `!`. No operand in v0 (no labels, so no need
+    /// for one). Targets the innermost enclosing loop; HIR-lower
+    /// validates we're inside a loop.
+    Continue,
     Block(BlockId),
     /// `return e?` — type `!`. Always parses as an expression so it can
     /// appear in any expression position (`let b: i32 = return 1;`).

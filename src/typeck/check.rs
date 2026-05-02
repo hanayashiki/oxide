@@ -850,6 +850,7 @@ impl<'hir> Checker<'hir> {
                 self.coerce(inf, ty, unit, span);
             }
         }
+
         match block.items.last() {
             Some(it) => {
                 let expr_ty = self.expr_tys[it.expr];

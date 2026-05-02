@@ -1,0 +1,10 @@
+Module
+  Fn f()
+    Block
+      tail:
+        For
+          init: Let mut i = Int(0)
+          cond: <empty>
+          update: <empty>
+          Block
+            ExprStmt Break

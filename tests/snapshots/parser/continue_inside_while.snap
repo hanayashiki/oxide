@@ -1,0 +1,11 @@
+Module
+  Fn f(mut x: i32)
+    Block
+      tail:
+        While Binary(Gt, Ident("x"), Int(0))
+          Block
+            If Binary(Eq, Ident("x"), Int(5))
+              then:
+                Block
+                  ExprStmt Continue
+            ExprStmt Assign(Eq, Ident("x"), Binary(Sub, Ident("x"), Int(1)))

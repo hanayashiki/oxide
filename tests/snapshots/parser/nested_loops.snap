@@ -1,0 +1,10 @@
+Module
+  Fn f(c: bool)
+    Block
+      tail:
+        Loop
+          Block
+            tail:
+              While Ident("c")
+                Block
+                  ExprStmt Break

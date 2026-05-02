@@ -1,0 +1,7 @@
+Module
+  Fn f() -> i32
+    Block
+      tail:
+        Loop
+          Block
+            ExprStmt Break Int(5)

@@ -137,7 +137,11 @@ impl<'a> Printer<'a> {
         let kind = &self.m.exprs[eid].kind;
         let is_value_producing = is_last && !has_semi;
         match kind {
-            ExprKind::If { .. } | ExprKind::Block(_) => {
+            ExprKind::If { .. }
+            | ExprKind::Block(_)
+            | ExprKind::While { .. }
+            | ExprKind::Loop { .. }
+            | ExprKind::For { .. } => {
                 if is_value_producing {
                     self.write_line("tail:");
                     self.indent += 1;
@@ -203,11 +207,60 @@ impl<'a> Printer<'a> {
                 let bid = *bid;
                 self.print_block(bid);
             }
+            ExprKind::While { cond, body } => {
+                let cond = *cond;
+                let body = *body;
+                self.begin_line();
+                self.write("While ");
+                self.append_expr(cond);
+                self.end_line();
+                self.indent += 1;
+                self.print_block(body);
+                self.indent -= 1;
+            }
+            ExprKind::Loop { body } => {
+                let body = *body;
+                self.write_line("Loop");
+                self.indent += 1;
+                self.print_block(body);
+                self.indent -= 1;
+            }
+            ExprKind::For {
+                init,
+                cond,
+                update,
+                body,
+            } => {
+                let init = *init;
+                let cond = *cond;
+                let update = *update;
+                let body = *body;
+                self.write_line("For");
+                self.indent += 1;
+                self.write_for_header_slot("init:", init);
+                self.write_for_header_slot("cond:", cond);
+                self.write_for_header_slot("update:", update);
+                self.print_block(body);
+                self.indent -= 1;
+            }
             _ => {
                 self.begin_line();
                 self.append_expr(eid);
                 self.end_line();
             }
+        }
+    }
+
+    fn write_for_header_slot(&mut self, label: &str, slot: Option<ExprId>) {
+        match slot {
+            Some(eid) => {
+                self.begin_line();
+                self.write(label);
+                self.write(" ");
+                self.append_expr(eid);
+                self.end_line();
+            }
+            None => self.write_line(&format!("{label} <empty>")),
         }
     }
 
@@ -336,8 +389,26 @@ impl<'a> Printer<'a> {
                     self.append_expr(*eid);
                 }
             }
+            ExprKind::Break { expr } => {
+                self.write("Break");
+                if let Some(eid) = expr {
+                    self.write(" ");
+                    self.append_expr(*eid);
+                }
+            }
+            ExprKind::Continue => self.write("Continue"),
             ExprKind::If { .. } => self.write("If(…)"),
             ExprKind::Block(_) => self.write("Block(…)"),
+            // While/Loop/For are routed through `print_expr`'s multi-line
+            // arms via the `print_block_item` dispatch; reaching them
+            // here means the parent code called `append_expr` on a loop
+            // expression (rare — happens only if a loop appears nested
+            // inside a single-line expression context, e.g. as an
+            // operand of `+`). Print a placeholder rather than the
+            // whole tree to keep the inline shape sane.
+            ExprKind::While { .. } => self.write("While(…)"),
+            ExprKind::Loop { .. } => self.write("Loop(…)"),
+            ExprKind::For { .. } => self.write("For(…)"),
             ExprKind::Poison => self.write("<poison>"),
         }
     }

@@ -134,22 +134,30 @@ where
     I: OValueInput<'a>,
 {
     recursive(|expr| {
-        // `return e?` is an expression of type `!`. Sits above the Pratt
-        // tower so its operand can itself be any expression
-        // (`return e + 1` ⇒ `return (e + 1)`).
+        // Top-of-expression forms — sit above the Pratt tower so their
+        // operands can be full expressions (`return e + 1` parses as
+        // `return (e + 1)`). All produce type `!` at typeck.
         let return_form = return_expr_parser(expr.clone());
+        let break_form = break_expr_parser(expr.clone());
+        let continue_form = continue_expr_parser();
 
         // Atoms — tried in priority order. `struct_lit` precedes
         // `ident_expr` so the bare-ident fallback only fires when the
         // following tokens don't shape up to a field list.
         let block = block_parser_inner(expr.clone());
         let if_expr = if_parser(expr.clone(), block.clone());
+        let while_expr = while_parser(expr.clone(), block.clone());
+        let loop_expr = loop_parser(block.clone());
+        let for_expr = for_parser(expr.clone(), block.clone());
         let atom = choice((
             int_lit_parser(),
             bool_lit_parser(),
             char_lit_parser(),
             str_lit_parser(),
             if_expr,
+            while_expr,
+            loop_expr,
+            for_expr,
             block_expr_parser(block),
             paren_parser(expr.clone()),
             array_lit_parser(expr.clone()),
@@ -241,7 +249,7 @@ where
             ),
         ));
 
-        choice((return_form, pratt_expr)).labelled("expression")
+        choice((return_form, break_form, continue_form, pratt_expr)).labelled("expression")
     })
 }
 
@@ -519,22 +527,14 @@ where
     I: OValueInput<'a>,
     PE: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
 {
-    let ty = type_parser(expr.clone());
-    let let_form = just(TokenKind::KwLet)
-        .ignore_then(just(TokenKind::KwMut).or_not().map(|m| m.is_some()))
-        .then(ident_parser())
-        .then(just(TokenKind::Colon).ignore_then(ty).or_not())
-        .then(just(TokenKind::Eq).ignore_then(expr.clone()).or_not())
+    // Block-item `let` is `let_form_no_semi` followed by a mandatory `;`.
+    // The grammar of the let itself is shared with `for_parser`'s init
+    // slot — see `let_form_no_semi`.
+    let let_form = let_form_no_semi(expr.clone())
         .then_ignore(just(TokenKind::Semi))
-        .map_with(|(((mutable, name), ty), init), e| {
-            let expr = e.push_expr(ExprKind::Let {
-                mutable,
-                name,
-                ty,
-                init,
-            });
+        .map(|eid| {
             Some(BlockItem {
-                expr,
+                expr: eid,
                 has_semi: true,
             })
         });
@@ -560,6 +560,37 @@ where
     choice((let_form, expr_item, bare_semi)).labelled("block item")
 }
 
+/// Parses `let [mut] name (: ty)? (= init)?` — **no trailing `;`**. The
+/// grammar shared between block-position let-statements (which append
+/// a `;` at the call site) and `for_parser`'s init slot (where `;` is
+/// the for-header separator, consumed by `for_parser` itself).
+///
+/// Not promoted to a sibling of `return_form` / `break_form` /
+/// `continue_form` in `expr_parser`'s top-level `choice` because that
+/// would make `let x = let y = 5` and `return let x = 5` parse, which
+/// Rust rejects. See spec/13_LOOPS.md "Why `let` stays out of
+/// `expr_parser`".
+fn let_form_no_semi<'a, I, PE>(expr: PE) -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+    PE: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
+{
+    let ty = type_parser(expr.clone());
+    just(TokenKind::KwLet)
+        .ignore_then(just(TokenKind::KwMut).or_not().map(|m| m.is_some()))
+        .then(ident_parser())
+        .then(just(TokenKind::Colon).ignore_then(ty).or_not())
+        .then(just(TokenKind::Eq).ignore_then(expr).or_not())
+        .map_with(|(((mutable, name), ty), init), e| {
+            e.push_expr(ExprKind::Let {
+                mutable,
+                name,
+                ty,
+                init,
+            })
+        })
+}
+
 fn if_parser<'a, I, PE, PB>(expr: PE, block: PB) -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
 where
     I: OValueInput<'a>,
@@ -583,6 +614,91 @@ where
                 })
             })
     })
+}
+
+/// `while cond block`. Cond struct-literal ambiguity (`while Foo { } { }`
+/// parses the first `{}` as a struct literal) is the same TBD as
+/// `if`'s — see `struct_lit_parser` and spec/08_ADT.md.
+fn while_parser<'a, I, PE, PB>(expr: PE, block: PB) -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+    PE: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
+    PB: Parser<'a, I, BlockId, Extra<'a>> + Clone + 'a,
+{
+    just(TokenKind::KwWhile)
+        .ignore_then(expr)
+        .then(block)
+        .map_with(|(cond, body), e| e.push_expr(ExprKind::While { cond, body }))
+}
+
+/// `loop block`. The expression's value type is decided at typeck per
+/// the `break expr?` operands inside the body — see spec/13_LOOPS.md.
+fn loop_parser<'a, I, PB>(block: PB) -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+    PB: Parser<'a, I, BlockId, Extra<'a>> + Clone + 'a,
+{
+    just(TokenKind::KwLoop)
+        .ignore_then(block)
+        .map_with(|body, e| e.push_expr(ExprKind::Loop { body }))
+}
+
+/// `for ( init? ; cond? ; update? ) block` — C-style. Each header slot
+/// independently optional; `for (;;) { ... }` is the infinite-loop
+/// spelling. Parens around the header are mandatory — they delimit
+/// header from body unambiguously, fixing the update→body ambiguity
+/// the parenless form has (see spec/13_LOOPS.md "Why parens around
+/// the `for` header"). `init` may be a `let`-form (parsed via
+/// `let_form_no_semi`) or any other expression; the `let` is tried
+/// first because the keyword disambiguates.
+fn for_parser<'a, I, PE, PB>(expr: PE, block: PB) -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+    PE: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
+    PB: Parser<'a, I, BlockId, Extra<'a>> + Clone + 'a,
+{
+    let init = choice((let_form_no_semi(expr.clone()), expr.clone()));
+
+    let header = init
+        .or_not()
+        .then_ignore(just(TokenKind::Semi))
+        .then(expr.clone().or_not())
+        .then_ignore(just(TokenKind::Semi))
+        .then(expr.or_not())
+        .delimited_by(just(TokenKind::LParen), just(TokenKind::RParen));
+
+    just(TokenKind::KwFor)
+        .ignore_then(header)
+        .then(block)
+        .map_with(|(((init, cond), update), body), e| {
+            e.push_expr(ExprKind::For {
+                init,
+                cond,
+                update,
+                body,
+            })
+        })
+}
+
+/// `break expr?` — wraps an optional operand. Operand parsing is greedy
+/// (consumes any expression that follows the keyword), same as
+/// `return`. Use a `;` to terminate explicitly.
+fn break_expr_parser<'a, I, PE>(expr: PE) -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+    PE: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
+{
+    just(TokenKind::KwBreak)
+        .ignore_then(expr.or_not())
+        .map_with(|val, e| e.push_expr(ExprKind::Break { expr: val }))
+}
+
+/// `continue` — bare keyword, no operand.
+fn continue_expr_parser<'a, I>() -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+{
+    just(TokenKind::KwContinue).map_with(|_, e| e.push_expr(ExprKind::Continue))
 }
 
 fn param_parser<'a, I, PT>(ty: PT) -> impl Parser<'a, I, Param, Extra<'a>> + Clone

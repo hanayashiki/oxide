@@ -1,0 +1,1 @@
+fn f() { loop { break; } }

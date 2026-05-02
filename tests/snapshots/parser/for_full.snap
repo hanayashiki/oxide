@@ -1,0 +1,9 @@
+Module
+  Fn f(n: i32)
+    Block
+      tail:
+        For
+          init: Let mut i = Int(0)
+          cond: Binary(Lt, Ident("i"), Ident("n"))
+          update: Assign(Eq, Ident("i"), Binary(Add, Ident("i"), Int(1)))
+          Block

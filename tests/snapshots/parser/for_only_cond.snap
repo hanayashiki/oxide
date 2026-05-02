@@ -1,0 +1,10 @@
+Module
+  Fn f(mut x: i32)
+    Block
+      tail:
+        For
+          init: <empty>
+          cond: Binary(Gt, Ident("x"), Int(0))
+          update: <empty>
+          Block
+            ExprStmt Assign(Eq, Ident("x"), Binary(Sub, Ident("x"), Int(1)))

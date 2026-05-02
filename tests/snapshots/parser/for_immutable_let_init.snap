@@ -1,0 +1,10 @@
+Module
+  Fn f() -> i32
+    Block
+      For
+        init: Let i = Int(0)
+        cond: Binary(Lt, Ident("i"), Int(10))
+        update: <empty>
+        Block
+          ExprStmt Break Ident("i")
+      tail: Int(0)

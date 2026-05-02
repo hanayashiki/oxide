@@ -391,6 +391,20 @@ impl<'a> Lowerer<'a> {
             }
             ast::ExprKind::Poison => HirExprKind::Poison,
             ast::ExprKind::ArrayLit(lit) => self.lower_array_lit(lit),
+            // TODO(spec/13_LOOPS.md): HIR lowering for loops + break/continue
+            // is the follow-up PR. For now, keep the parser working end-to-end
+            // by panicking here — programs that don't use loops compile fine,
+            // programs that do will ICE here with a clear pointer to the spec.
+            ast::ExprKind::While { .. }
+            | ast::ExprKind::Loop { .. }
+            | ast::ExprKind::For { .. }
+            | ast::ExprKind::Break { .. }
+            | ast::ExprKind::Continue => {
+                unimplemented!(
+                    "HIR lowering for while/loop/for/break/continue \
+                     not yet implemented (see spec/13_LOOPS.md)"
+                )
+            }
         };
 
         let is_place = compute_is_place(&kind, &self.exprs);

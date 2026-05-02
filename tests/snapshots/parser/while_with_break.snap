@@ -1,0 +1,7 @@
+Module
+  Fn f()
+    Block
+      tail:
+        While Bool(true)
+          Block
+            ExprStmt Break

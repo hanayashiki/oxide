@@ -1,0 +1,10 @@
+Module
+  Fn f(mut i: i32)
+    Block
+      tail:
+        For
+          init: <empty>
+          cond: <empty>
+          update: Assign(Eq, Ident("i"), Binary(Add, Ident("i"), Int(1)))
+          Block
+            ExprStmt Break
