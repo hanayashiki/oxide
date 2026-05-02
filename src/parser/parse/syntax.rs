@@ -154,6 +154,7 @@ where
             bool_lit_parser(),
             char_lit_parser(),
             str_lit_parser(),
+            null_lit_parser(),
             if_expr,
             while_expr,
             loop_expr,
@@ -178,6 +179,10 @@ where
                 TokenKind::Minus => UnOp::Neg,
                 TokenKind::Bang => UnOp::Not,
                 TokenKind::Tilde => UnOp::BitNot,
+                // `*expr` — pointer deref. Position-disambiguated from
+                // binary `*` (Mul, level 11) by the Pratt builder.
+                // See spec/07_POINTER.md "Deref operator".
+                TokenKind::Star => UnOp::Deref,
             ),
             // `&expr` / `&mut expr` — same precedence as the other prefix
             // unary ops. `Amp` here is the prefix path; the infix `Amp`
@@ -286,6 +291,15 @@ where
     I: OValueInput<'a>,
 {
     select! { TokenKind::Str(s) => s }.map_with(|s, e| e.push_expr(ExprKind::StrLit(s)))
+}
+
+/// `null` — typed null pointer literal. See spec/07_POINTER.md
+/// "Null literal".
+fn null_lit_parser<'a, I>() -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+{
+    just(TokenKind::KwNull).map_with(|_, e| e.push_expr(ExprKind::Null))
 }
 
 fn ident_expr_parser<'a, I>() -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone

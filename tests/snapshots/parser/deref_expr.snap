@@ -1,0 +1,4 @@
+Module
+  Fn f(p: *mut i32)
+    Block
+      ExprStmt Unary(Deref, Ident("p"))

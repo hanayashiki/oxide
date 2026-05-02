@@ -1,0 +1,4 @@
+Module
+  Fn f(pp: *mut *mut i32)
+    Block
+      ExprStmt Assign(Eq, Unary(Deref, Unary(Deref, Ident("pp"))), Int(1))

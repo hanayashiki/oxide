@@ -308,6 +308,9 @@ impl<'a> Lowerer<'a> {
             ast::ExprKind::BoolLit(b) => HirExprKind::BoolLit(b),
             ast::ExprKind::CharLit(c) => self.lower_char_lit(c, &span),
             ast::ExprKind::StrLit(s) => HirExprKind::StrLit(s),
+            ast::ExprKind::Null => {
+                todo!("HIR lowering for Null — see spec/07_POINTER.md §Null literal")
+            }
             ast::ExprKind::Ident(id) => self.resolve_ident(&id),
             ast::ExprKind::Paren(_) => unreachable!("handled above"),
             ast::ExprKind::Unary { op, expr } => {

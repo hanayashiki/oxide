@@ -1008,6 +1008,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 .builder
                 .build_xor(v, ty.const_all_ones(), "bnot")
                 .unwrap(),
+            UnOp::Deref => {
+                todo!("codegen for Deref — see spec/07_POINTER.md §Deref Codegen")
+            }
         };
         Some(Operand::Value(res.into()))
     }

@@ -117,6 +117,10 @@ pub enum ExprKind {
     BoolLit(bool),
     CharLit(char),
     StrLit(String),
+    /// `null` — typed null pointer literal. See spec/07_POINTER.md
+    /// "Null literal". Typing rule (typeck): `Ptr(α, Mut)` with a
+    /// fresh inference variable; pinned at the use site.
+    Null,
     Ident(Ident),
     Paren(ExprId),
     Unary {
@@ -254,6 +258,11 @@ pub enum UnOp {
     Neg,
     Not,
     BitNot,
+    /// `*p` — pointer deref. Place producer; lvalue path returns the
+    /// loaded pointer, rvalue path wraps it as `Operand::Place(ptr)`
+    /// for downstream `store_into` / `load_value` dispatch. See
+    /// spec/07_POINTER.md "Deref operator".
+    Deref,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

@@ -1,0 +1,4 @@
+Module
+  Fn f(p: Holder)
+    Block
+      ExprStmt Unary(Deref, Ident("p").q)

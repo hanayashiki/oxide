@@ -271,6 +271,7 @@ impl<'a> Printer<'a> {
             ExprKind::BoolLit(b) => write!(self.out, "Bool({b})").unwrap(),
             ExprKind::CharLit(c) => write!(self.out, "Char({c:?})").unwrap(),
             ExprKind::StrLit(s) => write!(self.out, "Str({s:?})").unwrap(),
+            ExprKind::Null => write!(self.out, "Null").unwrap(),
             ExprKind::Ident(id) => write!(self.out, "Ident({:?})", id.name).unwrap(),
             ExprKind::Paren(inner) => {
                 self.write("(");

@@ -1,0 +1,4 @@
+Module
+  Fn f() -> *const u8
+    Block
+      tail: Null

@@ -1,0 +1,4 @@
+Module
+  Fn f(p: *mut Point)
+    Block
+      ExprStmt (Unary(Deref, Ident("p"))).x

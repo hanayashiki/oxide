@@ -132,6 +132,10 @@ Content-Length: 13
 Hello, world!
 ```
 
+# References
+
+- [Mapping High Level Constructs to LLVM IR](https://mapping-high-level-constructs-to-llvm-ir.readthedocs.io/en/latest/)
+
 # License
 
 This project is publicly available and hopefully you can learn some compiler knowledge from it.

@@ -1170,6 +1170,9 @@ impl<'hir> Checker<'hir> {
                 self.unify(inf, t, bool_ty, span);
                 bool_ty
             }
+            UnOp::Deref => {
+                todo!("typeck for Deref — see spec/07_POINTER.md §Deref Typeck changes")
+            }
         }
     }
 
