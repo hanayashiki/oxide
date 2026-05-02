@@ -1,0 +1,27 @@
+== ir ==
+; ModuleID = 'jit'
+source_filename = "jit"
+
+define i32 @accept(ptr %_p) {
+allocas:
+  %_p.0.slot = alloca ptr, align 8
+  br label %body
+
+body:                                             ; preds = %allocas
+  store ptr %_p, ptr %_p.0.slot, align 8
+  ret i32 0
+}
+
+define i32 @main() {
+allocas:
+  %p.1.slot = alloca ptr, align 8
+  br label %body
+
+body:                                             ; preds = %allocas
+  store ptr null, ptr %p.1.slot, align 8
+  %load = load ptr, ptr %p.1.slot, align 8
+  %call = call i32 @accept(ptr %load)
+  ret i32 %call
+}
+== result ==
+0

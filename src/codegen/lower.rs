@@ -530,9 +530,12 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             HirExprKind::CharLit(c) => Some(Operand::Value(
                 self.ctx.i8_type().const_int(c as u64, false).into(),
             )),
-            HirExprKind::Null => todo!(
-                "codegen for Null — see spec/07_POINTER.md §Null literal Codegen"
-            ),
+            HirExprKind::Null => Some(Operand::Value(
+                self.ctx
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .const_null()
+                    .into(),
+            )),
             HirExprKind::Local(lid) => {
                 // Array-typed locals stay in place form (slot ptr, not
                 // loaded aggregate). `()`-typed locals materialize as
@@ -689,6 +692,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 };
                 self.field_gep(base_ptr, base_ty, self.field_index(aid, &name))
             }
+            HirExprKind::Unary { op: UnOp::Deref, expr } => self
+                .emit_deref_ptr(fx, expr)
+                .expect("lvalue-position Deref operand cannot diverge"),
             other => panic!("v0 codegen: non-lvalue assignment target {:?}", other),
         }
     }
@@ -997,6 +1003,10 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         op: UnOp,
         expr: HExprId,
     ) -> Option<Operand<'ctx>> {
+        if let UnOp::Deref = op {
+            let ptr = self.emit_deref_ptr(fx, expr)?;
+            return Some(Operand::Place(ptr));
+        }
         let inner_ty = self.ty_of(expr);
         let inner_op = self.emit_expr(fx, expr)?;
         let v = self.load_value(inner_op, inner_ty, "load").into_int_value();
@@ -1011,11 +1021,25 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 .builder
                 .build_xor(v, ty.const_all_ones(), "bnot")
                 .unwrap(),
-            UnOp::Deref => {
-                todo!("codegen for Deref — see spec/07_POINTER.md §Deref Codegen")
-            }
+            UnOp::Deref => unreachable!("Deref handled above"),
         };
         Some(Operand::Value(res.into()))
+    }
+
+    /// Load the operand of a `Deref` and return the resulting raw pointer.
+    /// Shared by `emit_unary`'s Deref rvalue arm (wraps in `Operand::Place`)
+    /// and `lvalue`'s Deref arm (returns the ptr directly).
+    fn emit_deref_ptr(
+        &self,
+        fx: &mut FnCodegenContext<'ctx>,
+        expr: HExprId,
+    ) -> Option<PointerValue<'ctx>> {
+        let inner_ty = self.ty_of(expr);
+        let inner_op = self.emit_expr(fx, expr)?;
+        Some(
+            self.load_value(inner_op, inner_ty, "deref")
+                .into_pointer_value(),
+        )
     }
 
     fn emit_binary(
