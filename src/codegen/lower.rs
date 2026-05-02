@@ -17,6 +17,7 @@ use inkwell::values::{
     UnnamedAddress,
 };
 
+use crate::codegen;
 use crate::hir::{
     FieldIdx, FnId, HBlockId, HElseArm, HExprId, HirArrayLit, HirConst, HirExprKind, HirModule,
     LocalId, VariantIdx,
@@ -150,6 +151,51 @@ struct LoopTargets<'ctx> {
     result_slot: Option<PointerValue<'ctx>>,
 }
 
+/// The form a value-producing expression takes after lowering. This is the
+/// central place-vs-value abstraction in codegen — every `emit_expr` site
+/// returns one of these (or `None` for divergence).
+///
+///   - `Value(_)` — live SSA value (Int, Bool, Ptr, Struct).
+///   - `Place(_)` — memory-backed value. The pointer is opaque LLVM `ptr`;
+///     the type lives alongside via the consumer's `TyId`. Reads via
+///     `load(llty, ptr)`; writes/copies via `memcpy(sizeof(ty))`. Today
+///     only `Array(_, Some(_))`-typed expressions ever produce `Place`;
+///     everything else is `Value` or `Unit`.
+///   - `Unit`    — zero-sized canonical value of type `()`. Materializes
+///     as `{} undef` when an SSA form is needed; no-op when stored.
+///
+/// No `From`/`Into` impls — `PointerValue` is ambiguous between Value
+/// (a `BasicValueEnum::PointerValue`) and Place (a slot ptr), and the
+/// place-vs-value choice is the whole point of this abstraction. Every
+/// constructor site spells the variant explicitly.
+#[derive(Copy, Clone, Debug)]
+enum Operand<'ctx> {
+    Value(BasicValueEnum<'ctx>),
+    Place(PointerValue<'ctx>),
+    Unit,
+}
+
+impl<'ctx> Operand<'ctx> {
+    /// Assert this operand is a `Place` and return the pointer. Used by
+    /// sites where typeck guarantees the form (e.g., `lvalue`).
+    #[allow(dead_code)]
+    fn unwrap_place(self) -> PointerValue<'ctx> {
+        match self {
+            Self::Place(p) => p,
+            other => panic!("expected Operand::Place, got {:?}", other),
+        }
+    }
+
+    /// Assert this operand is a `Value` and return the basic value.
+    #[allow(dead_code)]
+    fn unwrap_value(self) -> BasicValueEnum<'ctx> {
+        match self {
+            Self::Value(v) => v,
+            other => panic!("expected Operand::Value, got {:?}", other),
+        }
+    }
+}
+
 impl<'a, 'ctx> Codegen<'a, 'ctx> {
     // ---------- helpers ----------
 
@@ -245,54 +291,77 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         self.builder.position_at_end(ok_bb);
     }
 
-    /// `llvm.memcpy` of an `[N x T]` aggregate from `src` to `dst`.
-    /// Uses the LLVM type's static `size_of()` (an i64 const). Align is
-    /// 1 — soundness-safe and lets LLVM choose the actual alignment via
+    /// `llvm.memcpy` of `sizeof(ty)` bytes from `src` to `dst`. Type-driven
+    /// size — works for arrays, structs, primitives, anything sized. Align
+    /// is 1 — soundness-safe and lets LLVM choose the actual alignment via
     /// the operand types.
-    fn emit_memcpy_array(&self, dst: PointerValue<'ctx>, src: PointerValue<'ctx>, array_ty: TyId) {
-        let ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, array_ty);
-        let size = ll.size_of().expect("array type has size_of");
+    fn emit_memcpy(&self, dst: PointerValue<'ctx>, src: PointerValue<'ctx>, ty: TyId) {
+        let ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, ty);
+        let size = ll.size_of().expect("type has size_of");
         self.builder
             .build_memcpy(dst, 1, src, 1, size)
             .expect("build_memcpy");
     }
 
-    /// Store `v` (a fully-evaluated rhs/init value) into `dst`,
-    /// dispatching on `target_ty`:
+    // ---------- Operand helpers ----------
+
+    /// Materialize an `Operand` into a destination slot. The only place
+    /// in codegen that ever stores anything to a slot.
     ///
-    ///   - `Array(_, Some(_))` — `v` is a place pointer to the source
-    ///     slot; memcpy `sizeof([N x T])` bytes from src to dst. Arrays
-    ///     are place-form everywhere in our codegen (`emit_expr` of an
-    ///     array-typed expression returns the slot pointer, not a
-    ///     loaded `[N x T]` aggregate).
-    ///   - `Array(_, None)` — defensive ICE. Typeck E0269 rejects
-    ///     unsized arrays at every value position (`Param` / `Return` /
-    ///     `Field` / `LetBinding`), so they cannot reach codegen as a
-    ///     store target. See `src/typeck/error.rs::SizedPos`.
-    ///   - everything else — `v` is an SSA value (primitive, bool,
-    ///     pointer, struct). LLVM `store %T %v, ptr` is legal for any
-    ///     `T`; inkwell reads the type off the value, the pointer is
-    ///     opaque.
+    ///   - `Value` ⇒ `build_store` (LLVM lowers aggregates).
+    ///   - `Place` ⇒ `memcpy(sizeof(ty))` — type-driven size; works for
+    ///     any sized type, not just arrays.
+    ///   - `Unit`  ⇒ no-op. The `{}`-typed slot needs no init; mem2reg
+    ///     removes the dead alloca.
     ///
-    /// Shared by `emit_let` (init-into-slot) and `emit_assign` (rhs-
-    /// into-target-slot).
-    fn emit_store_into_slot(
-        &self,
-        dst: PointerValue<'ctx>,
-        target_ty: TyId,
-        v: BasicValueEnum<'ctx>,
-    ) {
-        match self.typeck_results.tys().kind(target_ty) {
-            TyKind::Array(_, Some(_)) => {
-                self.emit_memcpy_array(dst, v.into_pointer_value(), target_ty);
-            }
-            TyKind::Array(_, None) => unreachable!(
-                "ICE: unsized array as store target — typeck E0269 should have rejected"
-            ),
-            _ => {
+    /// Shared by `emit_let`, `emit_assign`, `emit_if`, `emit_loop`,
+    /// `emit_break`, anywhere a value flows into memory.
+    fn store_into(&self, dst: PointerValue<'ctx>, op: Operand<'ctx>, ty: TyId) {
+        match op {
+            Operand::Value(v) => {
                 self.builder.build_store(dst, v).unwrap();
             }
+            Operand::Place(src) => self.emit_memcpy(dst, src, ty),
+            Operand::Unit => {}
         }
+    }
+
+    /// Force an `Operand` to SSA-value form. Loads from memory if the
+    /// operand is a Place; passes through Value; materializes `{} undef`
+    /// for Unit. `name` is the LLVM SSA name suffix for the generated
+    /// `load` (consumed only when the operand is a Place).
+    fn load_value(&self, op: Operand<'ctx>, ty: TyId, name: &str) -> BasicValueEnum<'ctx> {
+        match op {
+            Operand::Value(v) => v,
+            Operand::Place(p) => {
+                let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, ty);
+                self.builder.build_load(llty, p, name).unwrap()
+            }
+            Operand::Unit => self.ctx.struct_type(&[], false).get_undef().into(),
+        }
+    }
+
+    /// Materialize an `Operand` into a fresh Place. Always allocates a
+    /// new slot — the caller gets a distinct copy, even for an
+    /// already-Place input. Used by:
+    ///
+    ///   - the byval-call ABI for array args (callee may write through
+    ///     the ptr, so the caller owns its own copy);
+    ///   - the array-return bridge (LLVM returned the aggregate as Value;
+    ///     we materialize a Place to keep the place-form invariant);
+    ///   - `emit_field`'s value-form bridge (extract array from a Value
+    ///     struct and re-spill so the result has place form).
+    fn spill_to_place_fresh(
+        &self,
+        fx: &FnCodegenContext<'ctx>,
+        op: Operand<'ctx>,
+        ty: TyId,
+        name: &str,
+    ) -> PointerValue<'ctx> {
+        let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, ty);
+        let slot = self.alloca_in_entry(fx, llty, name);
+        self.store_into(slot, op, ty);
+        slot
     }
 
     /// Runtime-loop fill of `slot: [N x T]` with `init_v` repeated `n`
@@ -399,19 +468,13 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             let sig = self.typeck_results.fn_sig(fid);
             if is_void_ret(self.typeck_results.tys(), sig.ret) {
                 self.builder.build_return(None).unwrap();
-            } else if self.is_sized_array(sig.ret) {
-                // Array-typed return — Path A: body produced a place ptr;
-                // load the aggregate and return it by value. LLVM's
-                // calling convention does the sret/register-return rewrite.
-                let v = body_val.expect("non-void fn body produced no value");
-                let arr_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, sig.ret);
-                let loaded = self
-                    .builder
-                    .build_load(arr_ll, v.into_pointer_value(), "ret.load")
-                    .unwrap();
-                self.builder.build_return(Some(&loaded)).unwrap();
             } else {
-                let v = body_val.expect("non-void fn body produced no value");
+                // Array-typed return — Path A: body produced a place ptr;
+                // load_value loads the aggregate before return-by-value
+                // so LLVM's calling convention does the sret/register-return
+                // rewrite. Non-array returns: load_value passes through.
+                let op = body_val.expect("non-void fn body produced no value");
+                let v = self.load_value(op, sig.ret, "ret.load");
                 self.builder.build_return(Some(&v)).unwrap();
             }
         }
@@ -419,61 +482,87 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
     // ---------- blocks ----------
 
-    fn emit_block(
-        &self,
-        fx: &mut FnCodegenContext<'ctx>,
-        bid: HBlockId,
-    ) -> Option<BasicValueEnum<'ctx>> {
+    fn emit_block(&self, fx: &mut FnCodegenContext<'ctx>, bid: HBlockId) -> Option<Operand<'ctx>> {
         // Clone the items vec so we don't borrow self.hir while emitting.
         let block = self.hir.blocks[bid].clone();
         let last_idx = block.items.len().checked_sub(1);
-        let mut last_val: Option<BasicValueEnum<'ctx>> = None;
+        let mut tail: Option<Operand<'ctx>> = None;
         for (i, item) in block.items.iter().enumerate() {
             if self.is_terminated() {
                 return None;
             }
             let v = self.emit_expr(fx, item.expr);
             if Some(i) == last_idx && !item.has_semi {
-                last_val = v;
+                tail = v;
             }
         }
-        last_val
+        if self.is_terminated() {
+            return None;
+        }
+        // No-tail block (or tail with semi) types as `()`: return Unit.
+        // Otherwise propagate the tail's operand.
+        tail.or(Some(Operand::Unit))
     }
 
     // ---------- expressions ----------
 
-    fn emit_expr(
-        &self,
-        fx: &mut FnCodegenContext<'ctx>,
-        eid: HExprId,
-    ) -> Option<BasicValueEnum<'ctx>> {
+    /// Lower an expression. Returns `Some(Operand)` for a value-producing
+    /// expression; returns `None` IFF the BB is terminated as a result of
+    /// this call (the expression diverged via `return`/`break`/`continue`,
+    /// or its sub-expression did). The `None` channel is reserved for
+    /// divergence — `()`-typed expressions return `Some(Operand::Unit)`.
+    ///
+    /// **Divergence contract.** Every consumer that calls `emit_expr` MUST
+    /// either propagate `None` (typically via `?`) or document why typeck
+    /// guarantees the operand cannot be `!`-typed at this site. See
+    /// spec/BACKLOG/B005_VOID_TYPES_CODEGEN_MODEL.md (Q3) for the
+    /// motivation.
+    fn emit_expr(&self, fx: &mut FnCodegenContext<'ctx>, eid: HExprId) -> Option<Operand<'ctx>> {
         if self.is_terminated() {
             return None;
         }
         let kind = self.hir.exprs[eid].kind.clone();
         match kind {
             HirExprKind::IntLit(n) => Some(self.emit_int_lit(eid, n)),
-            HirExprKind::BoolLit(b) => Some(self.ctx.bool_type().const_int(b as u64, false).into()),
-            HirExprKind::CharLit(c) => Some(self.ctx.i8_type().const_int(c as u64, false).into()),
+            HirExprKind::BoolLit(b) => Some(Operand::Value(
+                self.ctx.bool_type().const_int(b as u64, false).into(),
+            )),
+            HirExprKind::CharLit(c) => Some(Operand::Value(
+                self.ctx.i8_type().const_int(c as u64, false).into(),
+            )),
             HirExprKind::Local(lid) => {
-                // Array-typed locals stay in place form: return the slot ptr,
-                // not the loaded aggregate. Consumers (let-init, fn-arg,
-                // Index, Field) bridge as needed. See spec/09_ARRAY.md
-                // "arrays-as-places everywhere".
-                if self.is_sized_array(self.local_ty(lid)) {
-                    Some(fx.locals[&lid].into())
-                } else {
-                    Some(self.emit_local_load(fx, lid))
-                }
+                // Array-typed locals stay in place form (slot ptr, not
+                // loaded aggregate). `()`-typed locals materialize as
+                // Unit. Everything else loads to Value. See
+                // spec/09_ARRAY.md "arrays-as-places everywhere".
+                let ty = self.local_ty(lid);
+                let kind = self.typeck_results.tys().kind(ty);
+                Some(match kind {
+                    TyKind::Array(_, Some(_)) => Operand::Place(fx.locals[&lid]),
+                    TyKind::Unit => Operand::Unit,
+                    _ => {
+                        let slot = fx.locals[&lid];
+                        let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, ty);
+                        Operand::Value(self.builder.build_load(llty, slot, "load").unwrap())
+                    }
+                })
             }
             HirExprKind::Unary { op, expr } => self.emit_unary(fx, op, expr),
             HirExprKind::Binary { op, lhs, rhs } => self.emit_binary(fx, eid, op, lhs, rhs),
             HirExprKind::Assign { op, target, rhs } => {
                 self.emit_assign(fx, op, target, rhs);
-                None
+                // The assign expression types as `()`. If rhs diverged,
+                // emit_assign early-returned and the BB is terminated;
+                // emit_expr's next call will see is_terminated and return
+                // None. Here we report Unit on the non-divergent path.
+                if self.is_terminated() {
+                    None
+                } else {
+                    Some(Operand::Unit)
+                }
             }
             HirExprKind::Call { callee, args } => self.emit_call(fx, callee, &args),
-            HirExprKind::Cast { expr, ty: _ } => Some(self.emit_cast(fx, eid, expr)),
+            HirExprKind::Cast { expr, ty: _ } => self.emit_cast(fx, eid, expr),
             HirExprKind::If {
                 cond,
                 then_block,
@@ -486,16 +575,20 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             }
             HirExprKind::Let { local, init } => {
                 self.emit_let(fx, local, init);
-                None
+                if self.is_terminated() {
+                    None
+                } else {
+                    Some(Operand::Unit)
+                }
             }
             HirExprKind::Fn(_) => {
                 panic!("v0 codegen: fn references are only valid as call targets")
             }
             HirExprKind::StrLit(s) => Some(self.emit_str_lit(&s)),
             HirExprKind::Index { base, index } => self.emit_index_rvalue(fx, base, index),
-            HirExprKind::ArrayLit(lit) => Some(self.emit_array_lit(fx, lit, self.ty_of(eid))),
+            HirExprKind::ArrayLit(lit) => self.emit_array_lit(fx, lit, self.ty_of(eid)),
             HirExprKind::Field { base, name } => self.emit_field(fx, base, &name),
-            HirExprKind::StructLit { adt, fields } => Some(self.emit_struct_lit(fx, adt, &fields)),
+            HirExprKind::StructLit { adt, fields } => self.emit_struct_lit(fx, adt, &fields),
             // `&place` / `&mut place` — the slot pointer that `lvalue`
             // already produces for assignment targets *is* the value we
             // want here. LLVM `ptr` is mutability-agnostic; the
@@ -506,7 +599,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 expr,
             } => {
                 let ptr = self.lvalue(fx, expr);
-                Some(ptr.into())
+                Some(Operand::Value(ptr.into()))
             }
             HirExprKind::Unresolved(_) | HirExprKind::Poison => {
                 panic!("v0 codegen: poisoned expr reached codegen")
@@ -538,7 +631,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// terminator and return a pointer to its first byte. The value's
     /// type is opaque `ptr` (LLVM 15+); no GEP needed since the global
     /// itself is already a pointer.
-    fn emit_str_lit(&self, s: &str) -> BasicValueEnum<'ctx> {
+    fn emit_str_lit(&self, s: &str) -> Operand<'ctx> {
         let mut bytes: Vec<u8> = s.as_bytes().to_vec();
         bytes.push(0); // C-style NUL terminator (see spec/07_POINTER.md).
         let i8_ty = self.ctx.i8_type();
@@ -560,22 +653,15 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         global.set_unnamed_address(UnnamedAddress::Global);
         global.set_initializer(&const_arr);
 
-        global.as_pointer_value().into()
+        Operand::Value(global.as_pointer_value().into())
     }
 
-    fn emit_int_lit(&self, eid: HExprId, n: u64) -> BasicValueEnum<'ctx> {
+    fn emit_int_lit(&self, eid: HExprId, n: u64) -> Operand<'ctx> {
         let ty = self.ty_of(eid);
         match self.typeck_results.tys().kind(ty) {
-            TyKind::Prim(p) => lower_prim(self.ctx, *p).const_int(n, false).into(),
+            TyKind::Prim(p) => Operand::Value(lower_prim(self.ctx, *p).const_int(n, false).into()),
             other => panic!("int lit had non-prim type {:?}", other),
         }
-    }
-
-    fn emit_local_load(&self, fx: &FnCodegenContext<'ctx>, lid: LocalId) -> BasicValueEnum<'ctx> {
-        let slot = fx.locals[&lid];
-        let ty = self.local_ty(lid);
-        let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, ty);
-        self.builder.build_load(llty, slot, "load").unwrap()
     }
 
     fn lvalue(&self, fx: &mut FnCodegenContext<'ctx>, eid: HExprId) -> PointerValue<'ctx> {
@@ -584,21 +670,21 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             HirExprKind::Index { base, index } => {
                 // Bounds check fires here too — writing past the end is
                 // as wrong as reading past it. Same auto-deref machinery
-                // as the rvalue path.
-                self.emit_index_place(fx, base, index).0
+                // as the rvalue path. Lvalue positions can't diverge by
+                // typeck (lvalue-positions are place-expressions, not
+                // value-producers like `return`/`break`), so unwrap.
+                self.emit_index_place(fx, base, index)
+                    .expect("lvalue-position Index produced no place")
+                    .0
             }
             HirExprKind::Field { base, name } => {
                 let base_ptr = self.lvalue(fx, base);
                 let base_ty = self.ty_of(base);
-                let base_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, base_ty);
                 let aid = match self.typeck_results.tys().kind(base_ty) {
                     TyKind::Adt(aid) => *aid,
                     other => panic!("Field base lvalue: non-Adt type {:?}", other),
                 };
-                let field_idx = self.field_index(aid, &name);
-                self.builder
-                    .build_struct_gep(base_ll, base_ptr, field_idx, "fld.gep")
-                    .unwrap()
+                self.field_gep(base_ptr, base_ty, self.field_index(aid, &name))
             }
             other => panic!("v0 codegen: non-lvalue assignment target {:?}", other),
         }
@@ -615,12 +701,28 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             .expect("typeck guaranteed field exists") as u32
     }
 
+    /// `getelementptr` of `base_ptr` to the `field_idx`'th field of an
+    /// ADT-typed place. Shared by `lvalue`'s Field arm (assignment
+    /// targets, `&place.field`) and `emit_field`'s Place path
+    /// (single-field rvalue load).
+    fn field_gep(
+        &self,
+        base_ptr: PointerValue<'ctx>,
+        base_ty: TyId,
+        field_idx: u32,
+    ) -> PointerValue<'ctx> {
+        let base_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, base_ty);
+        self.builder
+            .build_struct_gep(base_ll, base_ptr, field_idx, "fld.gep")
+            .unwrap()
+    }
+
     fn emit_field(
         &self,
         fx: &mut FnCodegenContext<'ctx>,
         base: HExprId,
         name: &str,
-    ) -> Option<BasicValueEnum<'ctx>> {
+    ) -> Option<Operand<'ctx>> {
         let base_expr = &self.hir.exprs[base];
         let base_ty = self.ty_of(base);
         let aid = match self.typeck_results.tys().kind(base_ty) {
@@ -636,44 +738,45 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
         if base_expr.is_place {
             // Place path — single-field load via `getelementptr`, no whole-struct copy.
-            let base_ptr = self.lvalue(fx, base);
-            let base_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, base_ty);
-            let gep = self
-                .builder
-                .build_struct_gep(base_ll, base_ptr, field_idx, "fld.gep")
-                .unwrap();
+            let gep = self.field_gep(self.lvalue(fx, base), base_ty, field_idx);
             // Array-typed fields stay in place form: hand back the GEP'd
             // pointer instead of loading the aggregate. Mirrors the
             // arrays-as-places invariant for Locals.
             if self.is_sized_array(field_ty) {
-                Some(gep.into())
+                Some(Operand::Place(gep))
             } else {
-                Some(self.builder.build_load(field_ll, gep, "fld.load").unwrap())
+                Some(Operand::Value(
+                    self.builder.build_load(field_ll, gep, "fld.load").unwrap(),
+                ))
             }
         } else {
             // Value path — base is an rvalue aggregate; pull the field
             // out via extractvalue, no memory traffic.
-            let agg = self.emit_expr(fx, base)?;
+            let agg_op = self.emit_expr(fx, base)?;
+            let agg = self.load_value(agg_op, base_ty, "load").into_struct_value();
             if self.is_sized_array(field_ty) {
-                // Bridge: extract the array value, then alloca a temp slot
-                // and store it so the result has place form. Rare path —
-                // only fires when the struct itself is in SSA value form
-                // (e.g., direct Field on a Call return), which v0 codegen
-                // doesn't construct for ADTs containing arrays. Future
-                // work: revisit if this trips.
+                // Bridge: extract the array value, then spill into a fresh
+                // slot so the result has place form. Rare path — only fires
+                // when the struct itself is in SSA value form (e.g., direct
+                // Field on a Call return), which v0 codegen doesn't construct
+                // for ADTs containing arrays. Future work: revisit if it trips.
                 let arr_val = self
                     .builder
-                    .build_extract_value(agg.into_struct_value(), field_idx, "fld.arr")
+                    .build_extract_value(agg, field_idx, "fld.arr")
                     .unwrap();
-                let slot = self.alloca_in_entry(fx, field_ll, "fld.arr.slot");
-                self.builder.build_store(slot, arr_val).unwrap();
-                Some(slot.into())
+                let slot = self.spill_to_place_fresh(
+                    fx,
+                    Operand::Value(arr_val),
+                    field_ty,
+                    "fld.arr.slot",
+                );
+                Some(Operand::Place(slot))
             } else {
                 let val = self
                     .builder
-                    .build_extract_value(agg.into_struct_value(), field_idx, "fld")
+                    .build_extract_value(agg, field_idx, "fld")
                     .unwrap();
-                Some(val)
+                Some(Operand::Value(val))
             }
         }
     }
@@ -688,7 +791,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         fx: &mut FnCodegenContext<'ctx>,
         adt: crate::hir::HAdtId,
         fields: &[crate::hir::HirStructLitField],
-    ) -> BasicValueEnum<'ctx> {
+    ) -> Option<Operand<'ctx>> {
         let aid = AdtId::from_raw(adt.raw());
         let llty = self.adt_ll[aid];
         let mut agg = llty.get_undef();
@@ -703,31 +806,31 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 .iter()
                 .find(|p| p.name == declared.name)
                 .expect("typeck guaranteed all fields are provided");
-            let value = self
-                .emit_expr(fx, provided.value)
-                .expect("struct literal field produced no value");
+            let provided_ty = self.ty_of(provided.value);
+            let provided_op = self.emit_expr(fx, provided.value)?;
+            let value = self.load_value(provided_op, provided_ty, "load");
             let new_agg = self
                 .builder
                 .build_insert_value(agg, value, i as u32, "lit.fld")
                 .unwrap();
             agg = new_agg.into_struct_value();
         }
-        agg.as_basic_value_enum()
+        Some(Operand::Value(agg.as_basic_value_enum()))
     }
 
     // ---------- array literals & indexing ----------
 
-    /// Lower an array literal to a fresh alloca-backed place.
-    /// Returns the slot pointer as a `BasicValueEnum::PointerValue`;
-    /// downstream consumers (let-init, fn-arg, Index, …) see this as
-    /// the literal's place form. Per spec/09_ARRAY.md "ArrayLit shape"
-    /// (Q1 in the codegen plan): alloca + GEP+store, no SSA aggregate.
+    /// Lower an array literal to a fresh alloca-backed place. Returns
+    /// `Operand::Place(slot)`; downstream consumers (let-init, fn-arg,
+    /// Index, …) see this as the literal's place form. Per
+    /// spec/09_ARRAY.md "ArrayLit shape" (Q1 in the codegen plan):
+    /// alloca + GEP+store, no SSA aggregate.
     fn emit_array_lit(
         &self,
         fx: &mut FnCodegenContext<'ctx>,
         lit: HirArrayLit,
         array_ty: TyId,
-    ) -> BasicValueEnum<'ctx> {
+    ) -> Option<Operand<'ctx>> {
         let arr_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, array_ty);
         let slot = self.alloca_in_entry(fx, arr_ll, "lit.slot");
         let i64_ty = self.ctx.i64_type();
@@ -735,9 +838,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         match lit {
             HirArrayLit::Elems(es) => {
                 for (i, eid) in es.into_iter().enumerate() {
-                    let v = self
-                        .emit_expr(fx, eid)
-                        .expect("array literal element produced no value");
+                    let elem_ty = self.ty_of(eid);
+                    let elem_op = self.emit_expr(fx, eid)?;
+                    let v = self.load_value(elem_op, elem_ty, "load");
                     let idx_v = i64_ty.const_int(i as u64, false);
                     let gep = unsafe {
                         self.builder
@@ -751,9 +854,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 init,
                 len: HirConst::Lit(n),
             } => {
-                let init_v = self
-                    .emit_expr(fx, init)
-                    .expect("array repeat init produced no value");
+                let init_ty = self.ty_of(init);
+                let init_op = self.emit_expr(fx, init)?;
+                let init_v = self.load_value(init_op, init_ty, "load");
                 self.emit_repeat_loop(fx, slot, arr_ll, init_v, n);
             }
             HirArrayLit::Repeat {
@@ -763,7 +866,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 "HirConst::Error in repeat-literal length unreachable in v0 (parser rejects non-IntLit)"
             ),
         }
-        slot.into()
+        Some(Operand::Place(slot))
     }
 
     /// Index rvalue — `base[idx]` as a value-producing expression.
@@ -784,14 +887,14 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         fx: &mut FnCodegenContext<'ctx>,
         base_eid: HExprId,
         idx_eid: HExprId,
-    ) -> Option<BasicValueEnum<'ctx>> {
-        let (elt_ptr, elem_ty) = self.emit_index_place(fx, base_eid, idx_eid);
+    ) -> Option<Operand<'ctx>> {
+        let (elt_ptr, elem_ty) = self.emit_index_place(fx, base_eid, idx_eid)?;
         let elem_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, elem_ty);
-        Some(
+        Some(Operand::Value(
             self.builder
                 .build_load(elem_ll, elt_ptr, "idx.load")
                 .unwrap(),
-        )
+        ))
     }
 
     /// Index lvalue — produces the element pointer (no load) for use as
@@ -811,17 +914,22 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         fx: &mut FnCodegenContext<'ctx>,
         base_eid: HExprId,
         idx_eid: HExprId,
-    ) -> (PointerValue<'ctx>, TyId) {
+    ) -> Option<(PointerValue<'ctx>, TyId)> {
         let base_ty = self.ty_of(base_eid);
         let i64_ty = self.ctx.i64_type();
         let zero = i64_ty.const_zero();
         let tcx = self.typeck_results.tys();
         let ptr_ll = self.ctx.ptr_type(inkwell::AddressSpace::default());
 
-        let base_v = self
-            .emit_expr(fx, base_eid)
-            .expect("index base produced no value")
-            .into_pointer_value();
+        // Array base: Operand::Place — the slot ptr IS the array storage.
+        // Ptr base: Operand::Value(PointerValue) — the loaded ptr value.
+        // Both produce the pointer we need to index off of.
+        let base_op = self.emit_expr(fx, base_eid)?;
+        let base_v = match base_op {
+            Operand::Place(p) => p,
+            Operand::Value(v) => v.into_pointer_value(),
+            Operand::Unit => unreachable!("typeck rejects index on ()"),
+        };
 
         // Set up the loop. At entry, `cur_ptr` addresses either the
         // array storage (when base is an array place) or the next
@@ -844,10 +952,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             cur_ty = next;
         }
 
-        let idx_v = self
-            .emit_expr(fx, idx_eid)
-            .expect("index produced no value")
-            .into_int_value();
+        let idx_ty = self.ty_of(idx_eid);
+        let idx_op = self.emit_expr(fx, idx_eid)?;
+        let idx_v = self.load_value(idx_op, idx_ty, "load").into_int_value();
 
         match tcx.kind(cur_ty) {
             TyKind::Array(elem, Some(n)) => {
@@ -860,7 +967,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                         .build_in_bounds_gep(arr_ll, cur_ptr, &[zero, idx_v], "idx.gep")
                         .unwrap()
                 };
-                (elt_ptr, elem_ty)
+                Some((elt_ptr, elem_ty))
             }
             TyKind::Array(elem, None) => {
                 let elem_ty = *elem;
@@ -870,7 +977,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                         .build_in_bounds_gep(elem_ll, cur_ptr, &[idx_v], "idx.gep")
                         .unwrap()
                 };
-                (elt_ptr, elem_ty)
+                Some((elt_ptr, elem_ty))
             }
             other => panic!(
                 "v0 codegen: non-array reached after auto-deref; typeck should have rejected ({:?})",
@@ -886,8 +993,10 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         fx: &mut FnCodegenContext<'ctx>,
         op: UnOp,
         expr: HExprId,
-    ) -> Option<BasicValueEnum<'ctx>> {
-        let v = self.emit_expr(fx, expr)?.into_int_value();
+    ) -> Option<Operand<'ctx>> {
+        let inner_ty = self.ty_of(expr);
+        let inner_op = self.emit_expr(fx, expr)?;
+        let v = self.load_value(inner_op, inner_ty, "load").into_int_value();
         let ty = v.get_type();
         let res: IntValue<'ctx> = match op {
             UnOp::Neg => self.builder.build_int_neg(v, "neg").unwrap(),
@@ -900,7 +1009,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 .build_xor(v, ty.const_all_ones(), "bnot")
                 .unwrap(),
         };
-        Some(res.into())
+        Some(Operand::Value(res.into()))
     }
 
     fn emit_binary(
@@ -910,15 +1019,18 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         op: BinOp,
         lhs: HExprId,
         rhs: HExprId,
-    ) -> Option<BasicValueEnum<'ctx>> {
+    ) -> Option<Operand<'ctx>> {
         // Short-circuit operators have their own control-flow shape.
         if let BinOp::And | BinOp::Or = op {
-            return Some(self.emit_short_circuit(fx, op, lhs, rhs));
+            return self.emit_short_circuit(fx, op, lhs, rhs);
         }
 
         let lt = self.ty_of(lhs);
-        let l = self.emit_expr(fx, lhs)?.into_int_value();
-        let r = self.emit_expr(fx, rhs)?.into_int_value();
+        let rt = self.ty_of(rhs);
+        let l_op = self.emit_expr(fx, lhs)?;
+        let r_op = self.emit_expr(fx, rhs)?;
+        let l = self.load_value(l_op, lt, "load").into_int_value();
+        let r = self.load_value(r_op, rt, "load").into_int_value();
         let signed = as_prim(self.typeck_results.tys(), lt)
             .map(is_signed_prim)
             .unwrap_or(false);
@@ -1005,7 +1117,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             BinOp::And | BinOp::Or => unreachable!("handled by short-circuit path"),
         };
         let _ = eid;
-        Some(v.into())
+        Some(Operand::Value(v.into()))
     }
 
     /// LLVM requires shift amounts to match the lhs's int type.
@@ -1030,11 +1142,10 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         op: BinOp,
         lhs: HExprId,
         rhs: HExprId,
-    ) -> BasicValueEnum<'ctx> {
-        let l = self
-            .emit_expr(fx, lhs)
-            .expect("logical lhs produced no value")
-            .into_int_value();
+    ) -> Option<Operand<'ctx>> {
+        let lt = self.ty_of(lhs);
+        let l_op = self.emit_expr(fx, lhs)?;
+        let l = self.load_value(l_op, lt, "load").into_int_value();
         let lhs_end_bb = self.builder.get_insert_block().unwrap();
         let parent = fx.fn_value;
         let rhs_bb = self.ctx.append_basic_block(parent, "logic.rhs");
@@ -1055,14 +1166,19 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         }
 
         self.builder.position_at_end(rhs_bb);
-        let r = self
-            .emit_expr(fx, rhs)
-            .expect("logical rhs produced no value")
-            .into_int_value();
-        let rhs_end_bb = self.builder.get_insert_block().unwrap();
-        if !self.is_terminated() {
-            self.builder.build_unconditional_branch(end_bb).unwrap();
-        }
+        let rt = self.ty_of(rhs);
+        let r_op = self.emit_expr(fx, rhs);
+        // rhs may diverge (`a && return`); short-circuit still has the
+        // lhs-false predecessor edge into end_bb, so the phi is well-formed
+        // with one incoming. Skip the rhs incoming if it diverged.
+        let rhs_incoming = r_op.map(|op| {
+            let r = self.load_value(op, rt, "load").into_int_value();
+            let rhs_end_bb = self.builder.get_insert_block().unwrap();
+            if !self.is_terminated() {
+                self.builder.build_unconditional_branch(end_bb).unwrap();
+            }
+            (r, rhs_end_bb)
+        });
 
         self.builder.position_at_end(end_bb);
         let phi = self
@@ -1074,8 +1190,15 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             BinOp::Or => self.ctx.bool_type().const_int(1, false),
             _ => unreachable!(),
         };
-        phi.add_incoming(&[(&short_circuit_val, lhs_end_bb), (&r, rhs_end_bb)]);
-        phi.as_basic_value()
+        match rhs_incoming {
+            Some((r, rhs_end_bb)) => {
+                phi.add_incoming(&[(&short_circuit_val, lhs_end_bb), (&r, rhs_end_bb)]);
+            }
+            None => {
+                phi.add_incoming(&[(&short_circuit_val, lhs_end_bb)]);
+            }
+        }
+        Some(Operand::Value(phi.as_basic_value()))
     }
 
     fn emit_assign(
@@ -1085,59 +1208,56 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         target: HExprId,
         rhs: HExprId,
     ) {
-        let slot = self.lvalue(fx, target);
         let target_ty = self.ty_of(target);
-        let v = self
-            .emit_expr(fx, rhs)
-            .expect("assign rhs produced no value");
-
-        let new_val = if let AssignOp::Eq = op {
-            // Plain `=`: rhs passes through to the shared store
-            // dispatch below.
-            v
-        } else {
-            // Compound ops (+=, -=, *=, /=, %=, &=, |=, ^=, <<=, >>=) are
-            // int-only by language design — the `Eq` arm above handles
-            // plain `=`, and compound ops only apply to integer targets.
-            let r = v.into_int_value();
-            let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, target_ty);
-            let cur = self
-                .builder
-                .build_load(llty, slot, "asgn.cur")
-                .unwrap()
-                .into_int_value();
-            let signed = as_prim(self.typeck_results.tys(), target_ty)
-                .map(is_signed_prim)
-                .unwrap_or(false);
-            let build_result = match op {
-                AssignOp::Add => self.builder.build_int_add(cur, r, "asgn.add"),
-                AssignOp::Sub => self.builder.build_int_sub(cur, r, "asgn.sub"),
-                AssignOp::Mul => self.builder.build_int_mul(cur, r, "asgn.mul"),
-                AssignOp::Div if signed => self.builder.build_int_signed_div(cur, r, "asgn.sdiv"),
-                AssignOp::Div => self.builder.build_int_unsigned_div(cur, r, "asgn.udiv"),
-                AssignOp::Rem if signed => self.builder.build_int_signed_rem(cur, r, "asgn.srem"),
-                AssignOp::Rem => self.builder.build_int_unsigned_rem(cur, r, "asgn.urem"),
-                AssignOp::BitAnd => self.builder.build_and(cur, r, "asgn.and"),
-                AssignOp::BitOr => self.builder.build_or(cur, r, "asgn.or"),
-                AssignOp::BitXor => self.builder.build_xor(cur, r, "asgn.xor"),
-                AssignOp::Shl => {
-                    let r = self.coerce_shift_amt(r, cur.get_type());
-                    self.builder.build_left_shift(cur, r, "asgn.shl")
-                }
-                AssignOp::Shr => {
-                    let r = self.coerce_shift_amt(r, cur.get_type());
-                    self.builder.build_right_shift(cur, r, signed, "asgn.shr")
-                }
-                AssignOp::Eq => unreachable!("covered by the outer if-let `Eq` arm"),
-            };
-
-            // Convert `IntValue`s into `BasicValueEnum` in one shot.
-            build_result.unwrap().into()
+        // Rust evaluates rhs first; if rhs diverges (`b = return;`), the
+        // BB is already terminated and lvalue computation is unreachable.
+        let Some(rhs_op) = self.emit_expr(fx, rhs) else {
+            return;
         };
 
-        // Shared dispatch with let-init. Handles primitives, structs
-        // (LLVM aggregate store), arrays (memcpy from src slot).
-        self.emit_store_into_slot(slot, target_ty, new_val);
+        if let AssignOp::Eq = op {
+            let slot = self.lvalue(fx, target);
+            self.store_into(slot, rhs_op, target_ty);
+            return;
+        }
+
+        // Compound ops (+=, -=, *=, /=, %=, &=, |=, ^=, <<=, >>=) are
+        // int-only by language design.
+        let slot = self.lvalue(fx, target);
+        let r = self.load_value(rhs_op, target_ty, "load").into_int_value();
+        let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, target_ty);
+        let cur = self
+            .builder
+            .build_load(llty, slot, "asgn.cur")
+            .unwrap()
+            .into_int_value();
+        let signed = as_prim(self.typeck_results.tys(), target_ty)
+            .map(is_signed_prim)
+            .unwrap_or(false);
+        let build_result = match op {
+            AssignOp::Add => self.builder.build_int_add(cur, r, "asgn.add"),
+            AssignOp::Sub => self.builder.build_int_sub(cur, r, "asgn.sub"),
+            AssignOp::Mul => self.builder.build_int_mul(cur, r, "asgn.mul"),
+            AssignOp::Div if signed => self.builder.build_int_signed_div(cur, r, "asgn.sdiv"),
+            AssignOp::Div => self.builder.build_int_unsigned_div(cur, r, "asgn.udiv"),
+            AssignOp::Rem if signed => self.builder.build_int_signed_rem(cur, r, "asgn.srem"),
+            AssignOp::Rem => self.builder.build_int_unsigned_rem(cur, r, "asgn.urem"),
+            AssignOp::BitAnd => self.builder.build_and(cur, r, "asgn.and"),
+            AssignOp::BitOr => self.builder.build_or(cur, r, "asgn.or"),
+            AssignOp::BitXor => self.builder.build_xor(cur, r, "asgn.xor"),
+            AssignOp::Shl => {
+                let r = self.coerce_shift_amt(r, cur.get_type());
+                self.builder.build_left_shift(cur, r, "asgn.shl")
+            }
+            AssignOp::Shr => {
+                let r = self.coerce_shift_amt(r, cur.get_type());
+                self.builder.build_right_shift(cur, r, signed, "asgn.shr")
+            }
+            AssignOp::Eq => unreachable!("handled by the early return above"),
+        };
+        self.builder
+            .build_store(slot, build_result.unwrap())
+            .unwrap();
     }
 
     // ---------- calls ----------
@@ -1147,53 +1267,53 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         fx: &mut FnCodegenContext<'ctx>,
         callee_eid: HExprId,
         args: &[HExprId],
-    ) -> Option<BasicValueEnum<'ctx>> {
+    ) -> Option<Operand<'ctx>> {
         let HirExprKind::Fn(fid) = self.hir.exprs[callee_eid].kind.clone() else {
             panic!("v0 codegen: callee must be a direct fn reference")
         };
         let fnv = self.fn_decls[fid];
 
-        // Args. For each `Array(_, Some(_))`-typed arg: emit_expr returns
-        // the source's place ptr; we alloca a fresh "byval" slot, memcpy
-        // from src, and pass the slot ptr to build_call (the fn's LLVM
-        // signature has `ptr` for this param — see lower_fn_type). Other
-        // args flow as values.
+        // Args. For each `Array(_, Some(_))`-typed arg: byval ABI per
+        // spec/09_ARRAY.md — caller owns a fresh slot, memcpys from the
+        // source operand, passes the slot ptr (the fn's LLVM signature
+        // has `ptr` for this param — see lower_fn_type). Other args
+        // flow as SSA values.
         let mut arg_vals: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(args.len());
         for &a in args {
             let arg_ty = self.ty_of(a);
+            let op = self.emit_expr(fx, a)?;
             if self.is_sized_array(arg_ty) {
-                let src_ptr = self
-                    .emit_expr(fx, a)
-                    .expect("array arg produced no value")
-                    .into_pointer_value();
-                let arr_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, arg_ty);
-                let arg_slot = self.alloca_in_entry(fx, arr_ll, "call.arg.slot");
-                self.emit_memcpy_array(arg_slot, src_ptr, arg_ty);
-                arg_vals.push(arg_slot.into());
+                let fresh = self.spill_to_place_fresh(fx, op, arg_ty, "call.arg.slot");
+                arg_vals.push(fresh.into());
             } else {
-                let v = self.emit_expr(fx, a).expect("call arg produced no value");
-                arg_vals.push(v.into());
+                arg_vals.push(self.load_value(op, arg_ty, "load").into());
             }
         }
 
         let call = self.builder.build_call(fnv, &arg_vals, "call").unwrap();
 
-        // Return-value bridging. Path A: array returns lower as `[N x T]`
-        // values; we materialize a temp slot and store so the result has
-        // place form like every other array-typed expression.
         let ret_ty = self.typeck_results.fn_sig(fid).ret;
+        if is_void_ret(self.typeck_results.tys(), ret_ty) {
+            // Void / Never return: the call expression types as `()`
+            // (or `!`, but B005 collapses both at the operand level).
+            return Some(Operand::Unit);
+        }
         if self.is_sized_array(ret_ty) {
+            // Path A: LLVM returns `[N x T]` by value; spill to a Place
+            // to keep the place-form invariant for array-typed expressions.
             let v = call
                 .try_as_basic_value()
                 .left()
                 .expect("array-returning call produced no value");
-            let arr_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, ret_ty);
-            let slot = self.alloca_in_entry(fx, arr_ll, "call.ret.slot");
-            self.builder.build_store(slot, v).unwrap();
-            return Some(slot.into());
+            let slot = self.spill_to_place_fresh(fx, Operand::Value(v), ret_ty, "call.ret.slot");
+            return Some(Operand::Place(slot));
         }
 
-        call.try_as_basic_value().left()
+        Some(Operand::Value(
+            call.try_as_basic_value()
+                .left()
+                .expect("non-void call produced no value"),
+        ))
     }
 
     // ---------- casts ----------
@@ -1203,27 +1323,26 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         fx: &mut FnCodegenContext<'ctx>,
         eid: HExprId,
         inner: HExprId,
-    ) -> BasicValueEnum<'ctx> {
+    ) -> Option<Operand<'ctx>> {
         let dst_ty = self.ty_of(eid);
         let src_ty = self.ty_of(inner);
-        let v = self
-            .emit_expr(fx, inner)
-            .expect("cast operand produced no value")
-            .into_int_value();
+        let inner_op = self.emit_expr(fx, inner)?;
+        let v = self.load_value(inner_op, src_ty, "load").into_int_value();
         let dst_prim = as_prim(self.typeck_results.tys(), dst_ty)
             .expect("v0: cast target must be a primitive");
         let dst_ll = lower_prim(self.ctx, dst_prim);
         let src_w = v.get_type().get_bit_width();
         let dst_w = dst_ll.get_bit_width();
         if src_w == dst_w {
-            return v.into();
+            return Some(Operand::Value(v.into()));
         }
         if dst_w < src_w {
-            return self
-                .builder
-                .build_int_truncate(v, dst_ll, "trunc")
-                .unwrap()
-                .into();
+            return Some(Operand::Value(
+                self.builder
+                    .build_int_truncate(v, dst_ll, "trunc")
+                    .unwrap()
+                    .into(),
+            ));
         }
         let src_signed = as_prim(self.typeck_results.tys(), src_ty)
             .map(is_signed_prim)
@@ -1233,7 +1352,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         } else {
             self.builder.build_int_z_extend(v, dst_ll, "zext").unwrap()
         };
-        v.into()
+        Some(Operand::Value(v.into()))
     }
 
     // ---------- if / else ----------
@@ -1245,11 +1364,33 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         cond: HExprId,
         then_block: HBlockId,
         else_arm: Option<HElseArm>,
-    ) -> Option<BasicValueEnum<'ctx>> {
-        let cond_v = self
-            .emit_expr(fx, cond)
-            .expect("if cond produced no value")
-            .into_int_value();
+    ) -> Option<Operand<'ctx>> {
+        /// Close out one arm of an `if`: if the arm didn't diverge, store its
+        /// value into the result slot (when both exist) and branch to the
+        /// merge block. No-op if the arm terminated the BB on its own
+        /// (`return`/`break` in the arm body).
+        fn seal_arm<'a, 'ctx>(
+            codegen: &Codegen<'a, 'ctx>,
+            result_slot: Option<PointerValue<'ctx>>,
+            arm_val: Option<Operand<'ctx>>,
+            if_ty: TyId,
+            merge_bb: BasicBlock<'ctx>,
+        ) {
+            if codegen.is_terminated() {
+                return;
+            }
+            if let (Some(slot), Some(op)) = (result_slot, arm_val) {
+                codegen.store_into(slot, op, if_ty);
+            }
+            codegen
+                .builder
+                .build_unconditional_branch(merge_bb)
+                .unwrap();
+        }
+
+        let cond_ty = self.ty_of(cond);
+        let cond_op = self.emit_expr(fx, cond)?;
+        let cond_v = self.load_value(cond_op, cond_ty, "load").into_int_value();
         let parent = fx.fn_value;
         let then_bb = self.ctx.append_basic_block(parent, "if.then");
         let else_bb = self.ctx.append_basic_block(parent, "if.else");
@@ -1260,7 +1401,8 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             .unwrap();
 
         // Materialize a result slot iff the if expression has a real
-        // value type. For unit / never / divergent ifs we don't.
+        // value type. For unit / never ifs we skip — keeps IR clean even
+        // though the {} alloca would be harmless.
         let if_ty = self.ty_of(eid);
         let result_slot = if !is_void_ret(self.typeck_results.tys(), if_ty) {
             let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, if_ty);
@@ -1272,33 +1414,18 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         // then arm
         self.builder.position_at_end(then_bb);
         let then_val = self.emit_block(fx, then_block);
-        if !self.is_terminated() {
-            if let (Some(slot), Some(v)) = (result_slot, then_val) {
-                self.builder.build_store(slot, v).unwrap();
-            }
-            self.builder.build_unconditional_branch(merge_bb).unwrap();
-        }
+        seal_arm(self, result_slot, then_val, if_ty, merge_bb);
 
         // else arm
         self.builder.position_at_end(else_bb);
         match else_arm {
             Some(HElseArm::Block(bid)) => {
                 let else_val = self.emit_block(fx, bid);
-                if !self.is_terminated() {
-                    if let (Some(slot), Some(v)) = (result_slot, else_val) {
-                        self.builder.build_store(slot, v).unwrap();
-                    }
-                    self.builder.build_unconditional_branch(merge_bb).unwrap();
-                }
+                seal_arm(self, result_slot, else_val, if_ty, merge_bb);
             }
             Some(HElseArm::If(else_eid)) => {
                 let else_val = self.emit_expr(fx, else_eid);
-                if !self.is_terminated() {
-                    if let (Some(slot), Some(v)) = (result_slot, else_val) {
-                        self.builder.build_store(slot, v).unwrap();
-                    }
-                    self.builder.build_unconditional_branch(merge_bb).unwrap();
-                }
+                seal_arm(self, result_slot, else_val, if_ty, merge_bb);
             }
             None => {
                 self.builder.build_unconditional_branch(merge_bb).unwrap();
@@ -1317,9 +1444,11 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         match result_slot {
             Some(slot) => {
                 let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, if_ty);
-                Some(self.builder.build_load(llty, slot, "if.val").unwrap())
+                Some(Operand::Value(
+                    self.builder.build_load(llty, slot, "if.val").unwrap(),
+                ))
             }
-            None => None,
+            None => Some(Operand::Unit),
         }
     }
 
@@ -1346,7 +1475,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         cond: Option<HExprId>,
         update: Option<HExprId>,
         body: HBlockId,
-    ) -> Option<BasicValueEnum<'ctx>> {
+    ) -> Option<Operand<'ctx>> {
         let parent = fx.fn_value;
 
         // Always-present blocks. init / cond / update are appended only
@@ -1397,15 +1526,19 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         // cond: %c = <cond>; br i1 %c, body, end
         if let (Some(cbb), Some(cond_eid)) = (cond_bb, cond) {
             self.builder.position_at_end(cbb);
-            let cond_v = self
-                .emit_expr(fx, cond_eid)
-                .expect("loop cond produced no value")
-                .into_int_value();
-            if !self.is_terminated() {
-                self.builder
-                    .build_conditional_branch(cond_v, body_bb, end_bb)
-                    .unwrap();
+            let cond_ty = self.ty_of(cond_eid);
+            if let Some(cond_op) = self.emit_expr(fx, cond_eid) {
+                let cond_v = self.load_value(cond_op, cond_ty, "load").into_int_value();
+                if !self.is_terminated() {
+                    self.builder
+                        .build_conditional_branch(cond_v, body_bb, end_bb)
+                        .unwrap();
+                }
             }
+            // Cond diverged (`while return { … }`): cond_bb is now
+            // terminated, the back-edge from update/body still targets
+            // it, but no new path reaches body or end. The verifier
+            // accepts an unreachable cond_bb past its terminator.
         }
 
         // body: <body>; br continue_target_bb
@@ -1446,9 +1579,11 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         match result_slot {
             Some(slot) => {
                 let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, loop_ty);
-                Some(self.builder.build_load(llty, slot, "loop.val").unwrap())
+                Some(Operand::Value(
+                    self.builder.build_load(llty, slot, "loop.val").unwrap(),
+                ))
             }
-            None => None,
+            None => Some(Operand::Unit),
         }
     }
 
@@ -1463,12 +1598,13 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             .last()
             .expect("HIR ensured break is inside a loop");
         if let Some(eid) = expr {
-            let v = self.emit_expr(fx, eid);
+            let ty = self.ty_of(eid);
+            let op = self.emit_expr(fx, eid);
             if self.is_terminated() {
                 return;
             }
-            if let (Some(slot), Some(val)) = (target.result_slot, v) {
-                self.builder.build_store(slot, val).unwrap();
+            if let (Some(slot), Some(op)) = (target.result_slot, op) {
+                self.store_into(slot, op, ty);
             }
             self.builder
                 .build_unconditional_branch(target.end_bb)
@@ -1511,19 +1647,12 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             return;
         }
 
-        let is_array_ret = self.is_sized_array(ret_ty);
-        match val.and_then(|eid| self.emit_expr(fx, eid)) {
-            Some(v) if is_array_ret => {
-                // Array return — Path A: operand is a place ptr; load
-                // the aggregate before returning by value.
-                let arr_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, ret_ty);
-                let loaded = self
-                    .builder
-                    .build_load(arr_ll, v.into_pointer_value(), "ret.load")
-                    .unwrap();
-                self.builder.build_return(Some(&loaded)).unwrap();
-            }
-            Some(v) => {
+        match val.and_then(|eid| self.emit_expr(fx, eid).map(|op| (eid, op))) {
+            Some((eid, op)) => {
+                // Array return: Path A — load the place into an SSA aggregate
+                // before returning by value. load_value handles this uniformly
+                // (Place → load, Value → passthrough).
+                let v = self.load_value(op, self.ty_of(eid), "ret.load");
                 self.builder.build_return(Some(&v)).unwrap();
             }
             None => {
@@ -1541,26 +1670,34 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
     fn emit_let(&self, fx: &mut FnCodegenContext<'ctx>, lid: LocalId, init: Option<HExprId>) {
         let ty = self.local_ty(lid);
-
         let local = &self.hir.locals[lid];
 
-        let llty = if is_void_ret(self.typeck_results.tys(), ty) {
-            // Today's codegen has no representation for void-typed locals.
-            // Surface shapes that hit this: `let a = b = 1;` (a: ()),
-            // `let a = loop {};` (a: !), etc. Tracked in
-            // spec/BACKLOG/B005_VOID_TYPES_CODEGEN_MODEL.md.
-            panic!("void type for local {}", local.name);
-        } else {
-            lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, ty)
-        };
+        // `Never`-typed locals (`let a = loop {};`, `let a = return;`)
+        // cannot have storage — `lower_ty(Never)` panics by design (no
+        // value form ever exists). The init diverges, the BB terminates,
+        // and no downstream read of `a` can execute. Skip the alloca and
+        // just evaluate the init for its side-effecting BB termination.
+        if matches!(
+            self.typeck_results.tys().kind(ty),
+            crate::typeck::TyKind::Never
+        ) {
+            if let Some(init_eid) = init {
+                let _ = self.emit_expr(fx, init_eid);
+            }
+            return;
+        }
+
+        // `()`-typed locals lower to `{}` (zero-sized empty struct).
+        // The alloca is dead and gets DCE'd in any opt level.
+        let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, ty);
         let slot = self.alloca_in_entry(fx, llty, &format!("{}.{}.slot", local.name, lid.raw()));
         fx.locals.insert(lid, slot);
         if let Some(init_eid) = init {
             // None ⇒ divergent init (`let a = return;`); slot stays
             // uninitialized but the basic block is already terminated by
             // the diverge — no read can follow.
-            if let Some(v) = self.emit_expr(fx, init_eid) {
-                self.emit_store_into_slot(slot, ty, v);
+            if let Some(op) = self.emit_expr(fx, init_eid) {
+                self.store_into(slot, op, ty);
             }
         }
     }

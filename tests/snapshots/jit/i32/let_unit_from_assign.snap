@@ -1,0 +1,18 @@
+== ir ==
+; ModuleID = 'jit'
+source_filename = "jit"
+
+define i32 @main() {
+allocas:
+  %b.0.slot = alloca i32, align 4
+  %_a.1.slot = alloca {}, align 8
+  br label %body
+
+body:                                             ; preds = %allocas
+  store i32 0, ptr %b.0.slot, align 4
+  store i32 7, ptr %b.0.slot, align 4
+  %load = load i32, ptr %b.0.slot, align 4
+  ret i32 %load
+}
+== result ==
+7

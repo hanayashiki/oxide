@@ -47,9 +47,11 @@ pub fn prepare_adt_types<'ctx>(
     adt_ll
 }
 
-/// Lower a `TyId` to a `BasicTypeEnum`. Panics on `Unit`/`Never` (not
-/// a value), `Fn` (use `lower_fn_type`), or post-typeck poison
-/// (`Infer`/`Error`).
+/// Lower a `TyId` to a `BasicTypeEnum`. `Unit` lowers to LLVM `{}`
+/// (zero-sized empty struct, sole inhabitant `{} undef`). Panics on
+/// `Never` (no value form ever — `!`-typed expressions terminate the
+/// BB before any consumer reaches lower_ty), `Fn` (use `lower_fn_type`),
+/// or post-typeck poison (`Infer`/`Error`).
 pub fn lower_ty<'ctx>(
     ctx: &'ctx Context,
     tcx: &TyArena,
@@ -60,9 +62,11 @@ pub fn lower_ty<'ctx>(
         TyKind::Prim(p) => lower_prim(ctx, *p).into(),
         TyKind::Ptr(..) => ctx.ptr_type(inkwell::AddressSpace::default()).into(),
         TyKind::Adt(aid) => adt_ll[*aid].as_basic_type_enum(),
-        TyKind::Unit | TyKind::Never => {
-            panic!("lower_ty called on non-value type {}", tcx.render(ty))
-        }
+        TyKind::Unit => ctx.struct_type(&[], false).into(),
+        TyKind::Never => panic!(
+            "lower_ty called on Never — !-typed expressions terminate \
+             the BB before any consumer asks for a slot"
+        ),
         TyKind::Fn(_, _) => panic!("lower_ty called on Fn — use lower_fn_type"),
         TyKind::Array(elem, Some(n)) => {
             let elem_ll = lower_ty(ctx, tcx, adt_ll, *elem);
