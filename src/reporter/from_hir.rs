@@ -63,5 +63,15 @@ pub fn from_hir_error(err: &HirError, file: FileId) -> Diagnostic {
             "only places — locals, fields of places, and pointer derefs — \
              have a stable memory location to take the address of",
         ),
+        HirError::BreakOutsideLoop { span } => {
+            Diagnostic::error("E0263", "`break` outside of a loop")
+                .with_label(Label::primary(file, span.clone(), "cannot `break` here"))
+                .with_help("`break` is only valid inside `while`, `loop`, or `for`")
+        }
+        HirError::ContinueOutsideLoop { span } => {
+            Diagnostic::error("E0264", "`continue` outside of a loop")
+                .with_label(Label::primary(file, span.clone(), "cannot `continue` here"))
+                .with_help("`continue` is only valid inside `while`, `loop`, or `for`")
+        }
     }
 }

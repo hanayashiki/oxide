@@ -957,6 +957,18 @@ impl<'hir> Checker<'hir> {
             HirExprKind::Let { local, init } => self.infer_let(inf, local, init, &span),
             HirExprKind::Poison => self.tys.error,
             HirExprKind::ArrayLit(lit) => self.infer_array_lit(inf, lit, &span),
+            // Loop / break / continue land in HIR per spec/13_LOOPS.md;
+            // the typeck arms come in the follow-up PR. Programs without
+            // loops compile fine; programs that use them ICE here with a
+            // clear pointer to the spec.
+            HirExprKind::Loop { .. }
+            | HirExprKind::Break { .. }
+            | HirExprKind::Continue => {
+                unimplemented!(
+                    "typeck for while/loop/for/break/continue \
+                     not yet implemented (see spec/13_LOOPS.md)"
+                )
+            }
         };
         self.expr_tys[eid] = ty;
         ty

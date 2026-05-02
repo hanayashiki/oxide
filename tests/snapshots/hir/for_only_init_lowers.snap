@@ -1,0 +1,8 @@
+HirModule
+  Fn[0] f()
+    Block
+      tail:
+        Loop source:For has_break:false
+          init: Let(0, "i", mut, Int(0))
+          body:
+            Block

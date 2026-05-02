@@ -80,6 +80,21 @@ struct Lowerer<'a> {
     /// AST source for each adt's field decls, captured during pass 1 so
     /// pass 2 doesn't have to re-walk module items to find them.
     adt_field_sources: IndexVec<HAdtId, Vec<ast::FieldDecl>>,
+    /// Stack of enclosing loops, one frame per `Loop` whose body is
+    /// currently being lowered. The frame is pushed *after* the loop's
+    /// header (`init`/`cond`/`update`) is lowered and popped after the
+    /// body — so a `break` / `continue` in init/cond/update targets the
+    /// outer loop, matching spec/13_LOOPS.md "Lowering". `Break` lowers
+    /// flip the innermost frame's `has_break = true`; an empty stack at
+    /// `Break` / `Continue` time produces the matching HIR error.
+    loop_stack: Vec<LoopFrame>,
+}
+
+/// One stack entry per enclosing loop being lowered. `has_break` is set
+/// to `true` by `Break` lowering when this is the innermost frame; the
+/// final value is captured into the resulting `HirExprKind::Loop` node.
+struct LoopFrame {
+    has_break: bool,
 }
 
 impl<'a> Lowerer<'a> {
@@ -98,6 +113,7 @@ impl<'a> Lowerer<'a> {
             scopes: Vec::new(),
             ty_scopes: vec![HashMap::new()],
             adt_field_sources: IndexVec::new(),
+            loop_stack: Vec::new(),
         }
     }
 
@@ -391,19 +407,39 @@ impl<'a> Lowerer<'a> {
             }
             ast::ExprKind::Poison => HirExprKind::Poison,
             ast::ExprKind::ArrayLit(lit) => self.lower_array_lit(lit),
-            // TODO(spec/13_LOOPS.md): HIR lowering for loops + break/continue
-            // is the follow-up PR. For now, keep the parser working end-to-end
-            // by panicking here — programs that don't use loops compile fine,
-            // programs that do will ICE here with a clear pointer to the spec.
-            ast::ExprKind::While { .. }
-            | ast::ExprKind::Loop { .. }
-            | ast::ExprKind::For { .. }
-            | ast::ExprKind::Break { .. }
-            | ast::ExprKind::Continue => {
-                unimplemented!(
-                    "HIR lowering for while/loop/for/break/continue \
-                     not yet implemented (see spec/13_LOOPS.md)"
-                )
+            ast::ExprKind::While { cond, body } => {
+                self.lower_loop(None, Some(cond), None, body, LoopSource::While)
+            }
+            ast::ExprKind::Loop { body } => {
+                self.lower_loop(None, None, None, body, LoopSource::Loop)
+            }
+            ast::ExprKind::For {
+                init,
+                cond,
+                update,
+                body,
+            } => self.lower_loop(init, cond, update, body, LoopSource::For),
+            ast::ExprKind::Break { expr } => {
+                // Lower operand first so a nested loop inside the operand
+                // (e.g. `break (loop { break 5; })`) gets its own frame
+                // managed correctly before we touch this frame.
+                let expr = expr.map(|e| self.lower_expr(e));
+                if let Some(top) = self.loop_stack.last_mut() {
+                    top.has_break = true;
+                } else {
+                    self.errors.push(HirError::BreakOutsideLoop {
+                        span: span.clone(),
+                    });
+                }
+                HirExprKind::Break { expr }
+            }
+            ast::ExprKind::Continue => {
+                if self.loop_stack.is_empty() {
+                    self.errors.push(HirError::ContinueOutsideLoop {
+                        span: span.clone(),
+                    });
+                }
+                HirExprKind::Continue
             }
         };
 
@@ -415,6 +451,61 @@ impl<'a> Lowerer<'a> {
         match arm {
             ast::ElseArm::Block(bid) => HElseArm::Block(self.lower_block(bid)),
             ast::ElseArm::If(eid) => HElseArm::If(self.lower_expr(eid)),
+        }
+    }
+
+    /// Single point of truth for `while` / `loop` / `for` lowering. Each
+    /// surface form supplies a different subset of the optional header
+    /// slots; the structural rule (cond.is_some() / has_break) is what
+    /// drives later layers, not `source`.
+    ///
+    /// Scope shape (spec/13_LOOPS.md "Scope of the `Loop` node"):
+    ///
+    /// ```text
+    /// { for-scope ──────────────────────────────────────┐
+    ///     init / cond / update                          │
+    ///     { body-scope ────────────────────────┐        │
+    ///         body items                       │        │
+    ///     } ───────────────────────────────────┘        │
+    /// } ────────────────────────────────────────────────┘
+    /// ```
+    ///
+    /// We push the for-scope here so `let i = 0` in `init` is visible to
+    /// `cond` / `update` / `body` and gone after the loop. `lower_block`
+    /// adds its own body-scope on top — strict subset, matching C99
+    /// §6.8.5/5. The for-scope is pushed for `while` / `loop` too even
+    /// though they have no init; an empty extra scope is a no-op and
+    /// keeps this helper uniform.
+    fn lower_loop(
+        &mut self,
+        init: Option<ast::ExprId>,
+        cond: Option<ast::ExprId>,
+        update: Option<ast::ExprId>,
+        body: ast::BlockId,
+        source: LoopSource,
+    ) -> HirExprKind {
+        self.scopes.push(HashMap::new());
+
+        let init = init.map(|e| self.lower_expr(e));
+        let cond = cond.map(|e| self.lower_expr(e));
+        let update = update.map(|e| self.lower_expr(e));
+
+        // Loop frame is pushed *after* header lowering — a `break` inside
+        // init/cond/update targets the enclosing loop, not this one. See
+        // spec/13_LOOPS.md "Lowering" pseudocode.
+        self.loop_stack.push(LoopFrame { has_break: false });
+        let body = self.lower_block(body);
+        let frame = self.loop_stack.pop().expect("pushed above");
+
+        self.scopes.pop();
+
+        HirExprKind::Loop {
+            init,
+            cond,
+            update,
+            body,
+            has_break: frame.has_break,
+            source,
         }
     }
 

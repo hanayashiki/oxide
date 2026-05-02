@@ -6,7 +6,7 @@
 //! variants, specific `HirExprKind` / `HirTyKind` destructuring, and
 //! literal-payload identity.
 
-use oxide::hir::{HirError, HirExprKind, HirModule, HirTyKind, lower};
+use oxide::hir::{HirError, HirExprKind, HirModule, HirTyKind, LoopSource, lower};
 use oxide::lexer::lex;
 use oxide::parser::parse;
 
@@ -172,4 +172,108 @@ fn string_literal_lowers_through() {
     };
     assert_eq!(s, "hello");
     assert_eq!(s.len(), 5, "HIR payload must be source length, no \\0");
+}
+
+#[test]
+fn break_outside_loop_emits_e0263() {
+    let (_, errors) = lower_src("fn f() { break; }");
+    assert_eq!(errors.len(), 1);
+    let HirError::BreakOutsideLoop { .. } = &errors[0] else {
+        panic!("expected BreakOutsideLoop, got {:?}", errors[0]);
+    };
+}
+
+#[test]
+fn continue_outside_loop_emits_e0264() {
+    let (_, errors) = lower_src("fn f() { continue; }");
+    assert_eq!(errors.len(), 1);
+    let HirError::ContinueOutsideLoop { .. } = &errors[0] else {
+        panic!("expected ContinueOutsideLoop, got {:?}", errors[0]);
+    };
+}
+
+#[test]
+fn while_lowers_to_loop_with_while_source() {
+    // Companion to the `while_lowers` snapshot — covers the structural
+    // bits the rendered shape can't: `source: While`, `cond.is_some()`,
+    // `init`/`update` empty, `has_break: false`.
+    let (hir, errs) = lower_src("fn f(mut x: i32) { while x > 0 { x = x - 1; } }");
+    assert!(errs.is_empty(), "{errs:#?}");
+    let body = &hir.blocks[hir.fns[hir.root_fns[0]].body.unwrap()];
+    let HirExprKind::Loop {
+        init,
+        cond,
+        update,
+        has_break,
+        source,
+        ..
+    } = &hir.exprs[body.items[0].expr].kind
+    else {
+        panic!("expected Loop");
+    };
+    assert!(init.is_none());
+    assert!(cond.is_some(), "while must populate cond");
+    assert!(update.is_none());
+    assert!(!has_break);
+    assert_eq!(*source, LoopSource::While);
+}
+
+#[test]
+fn for_init_let_lives_only_inside_loop_scope() {
+    // The for-scope is popped after the loop, so a reference to `i`
+    // *after* the for-loop fails to resolve. This is the load-bearing
+    // scoping invariant the user emphasised: for-scope wraps
+    // init/cond/update; body-scope nests inside; both die at loop end.
+    let (_, errs) = lower_src("fn f() { for (let mut i = 0;;) { } i }");
+    assert_eq!(errs.len(), 1, "{errs:#?}");
+    let HirError::UnresolvedName { name, .. } = &errs[0] else {
+        panic!("expected UnresolvedName for trailing `i`, got {:?}", errs[0]);
+    };
+    assert_eq!(name, "i");
+}
+
+#[test]
+fn nested_loop_inner_break_targets_inner_only() {
+    // `loop { loop { break; } }` — the `break` flips only the inner
+    // loop's frame. The outer loop has `has_break: false`.
+    let (hir, errs) = lower_src("fn f() { loop { loop { break; } } }");
+    assert!(errs.is_empty(), "{errs:#?}");
+    let body = &hir.blocks[hir.fns[hir.root_fns[0]].body.unwrap()];
+    let HirExprKind::Loop {
+        body: outer_body,
+        has_break: outer_has_break,
+        ..
+    } = &hir.exprs[body.items[0].expr].kind
+    else {
+        panic!("outer expected Loop");
+    };
+    assert!(!outer_has_break, "outer loop has no break that targets it");
+    let outer_body = &hir.blocks[*outer_body];
+    let HirExprKind::Loop {
+        has_break: inner_has_break,
+        ..
+    } = &hir.exprs[outer_body.items[0].expr].kind
+    else {
+        panic!("inner expected Loop");
+    };
+    assert!(inner_has_break, "inner loop must record its break");
+}
+
+#[test]
+fn loop_with_break_value_records_has_break() {
+    let (hir, errs) = lower_src("fn f() -> i32 { loop { break 5; } }");
+    assert!(errs.is_empty(), "{errs:#?}");
+    let body = &hir.blocks[hir.fns[hir.root_fns[0]].body.unwrap()];
+    let HirExprKind::Loop {
+        cond,
+        has_break,
+        source,
+        ..
+    } = &hir.exprs[body.items[0].expr].kind
+    else {
+        panic!("expected Loop");
+    };
+    assert!(cond.is_none(), "loop has no cond");
+    assert!(has_break, "break inside body must flip has_break");
+    assert_eq!(*source, LoopSource::Loop);
 }

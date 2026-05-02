@@ -130,6 +130,16 @@ impl<'a> Printer<'a> {
                     self.print_expr(eid);
                 }
             }
+            HirExprKind::Loop { .. } => {
+                if is_value_producing {
+                    self.write_line("tail:");
+                    self.indent += 1;
+                    self.print_expr(eid);
+                    self.indent -= 1;
+                } else {
+                    self.print_expr(eid);
+                }
+            }
             HirExprKind::Let { .. } | HirExprKind::Return(_) => {
                 let mut buf = String::new();
                 self.append_expr(&mut buf, eid);
@@ -178,6 +188,38 @@ impl<'a> Printer<'a> {
                 self.indent -= 1;
             }
             HirExprKind::Block(bid) => self.print_block(*bid),
+            HirExprKind::Loop {
+                init,
+                cond,
+                update,
+                body,
+                has_break,
+                source,
+            } => {
+                self.write_line(&format!(
+                    "Loop source:{source:?} has_break:{has_break}"
+                ));
+                self.indent += 1;
+                if let Some(e) = init {
+                    let mut buf = String::from("init: ");
+                    self.append_expr(&mut buf, *e);
+                    self.write_line(&buf);
+                }
+                if let Some(e) = cond {
+                    let mut buf = String::from("cond: ");
+                    self.append_expr(&mut buf, *e);
+                    self.write_line(&buf);
+                }
+                if let Some(e) = update {
+                    let mut buf = String::from("update: ");
+                    self.append_expr(&mut buf, *e);
+                    self.write_line(&buf);
+                }
+                self.write_line("body:");
+                self.indent += 1;
+                self.print_block(*body);
+                self.indent -= 2;
+            }
             _ => {
                 let mut buf = String::new();
                 self.append_expr(&mut buf, eid);
@@ -312,6 +354,35 @@ impl<'a> Printer<'a> {
                 Some(eid) => vec![self.render_expr(*eid)],
                 None => vec![],
             },
+            HirExprKind::Loop {
+                init,
+                cond,
+                update,
+                body,
+                has_break,
+                source,
+            } => {
+                let mut out = vec![
+                    format!("{source:?}"),
+                    format!("has_break:{has_break}"),
+                ];
+                if let Some(e) = init {
+                    out.push(format!("init:{}", self.render_expr(*e)));
+                }
+                if let Some(e) = cond {
+                    out.push(format!("cond:{}", self.render_expr(*e)));
+                }
+                if let Some(e) = update {
+                    out.push(format!("update:{}", self.render_expr(*e)));
+                }
+                out.push(self.render_block_inline(*body));
+                out
+            }
+            HirExprKind::Break { expr } => match expr {
+                Some(eid) => vec![self.render_expr(*eid)],
+                None => vec![],
+            },
+            HirExprKind::Continue => vec![],
             HirExprKind::Let { local, init } => {
                 let l = &self.m.locals[*local];
                 let mut out = Vec::new();
@@ -390,6 +461,9 @@ fn expr_name(kind: &HirExprKind) -> &'static str {
         HirExprKind::If { .. } => "If",
         HirExprKind::Block(_) => "Block",
         HirExprKind::Return(_) => "Return",
+        HirExprKind::Loop { .. } => "Loop",
+        HirExprKind::Break { .. } => "Break",
+        HirExprKind::Continue => "Continue",
         HirExprKind::Let { .. } => "Let",
         HirExprKind::Poison => "Poison",
     }

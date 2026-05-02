@@ -1,0 +1,8 @@
+HirModule
+  Fn[0] f() -> i32
+    Block
+      tail:
+        Loop source:Loop has_break:true
+          body:
+            Block
+              ExprStmt Break(Int(5))

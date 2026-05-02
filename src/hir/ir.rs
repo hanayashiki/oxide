@@ -202,6 +202,30 @@ pub enum HirExprKind {
     /// `return e?` — type `!`. Operand was already lowered; this is the
     /// expression node.
     Return(Option<HExprId>),
+    /// Unified loop. Covers all three surface forms (`while` / `loop` /
+    /// C-style `for`). Each header slot is populated only when the
+    /// surface form supplied it; see spec/13_LOOPS.md "Design overview".
+    /// `cond.is_some()` and `has_break` together drive the structural
+    /// typing rule (`()` if cond is some, `!` if no break, fresh-infer
+    /// otherwise). `source` is diagnostic / pretty-print only.
+    Loop {
+        init: Option<HExprId>,
+        cond: Option<HExprId>,
+        update: Option<HExprId>,
+        body: HBlockId,
+        has_break: bool,
+        source: LoopSource,
+    },
+    /// `break expr?` — type `!`. Operand carries the value the
+    /// enclosing loop expression evaluates to. HIR-lower validates we're
+    /// inside a loop (emits `BreakOutsideLoop` otherwise); typeck
+    /// coerces `expr`'s type into the innermost loop's result-type slot.
+    Break {
+        expr: Option<HExprId>,
+    },
+    /// `continue` — type `!`. No operand in v0 (no labels). HIR-lower
+    /// validates we're inside a loop.
+    Continue,
     /// `let` binding. The `local` was already pushed to the locals arena
     /// and the current block's scope when lowering. This expression's own
     /// type is `()`.
@@ -211,6 +235,17 @@ pub enum HirExprKind {
     },
     /// Recovery placeholder — used for AST `Poison` and char-out-of-range.
     Poison,
+}
+
+/// Records which surface keyword produced a `HirExprKind::Loop`. Used
+/// only by HIR pretty-print and any diagnostic that wants to flavour
+/// its wording — does **not** drive the typing rule (see spec/13_LOOPS.md
+/// "Typing rule is structural, not source-driven").
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum LoopSource {
+    While,
+    Loop,
+    For,
 }
 
 #[derive(Clone, Debug)]
@@ -315,6 +350,12 @@ pub enum HirError {
     /// Operand of `&` / `&mut` is not a place expression. See
     /// spec/10_ADDRESS_OF.md "Place rule". Span points at the operand.
     AddrOfNonPlace { span: Span },
+    /// `break` outside any enclosing loop. Span points at the `break`
+    /// keyword's expression. See spec/13_LOOPS.md.
+    BreakOutsideLoop { span: Span },
+    /// `continue` outside any enclosing loop. Span points at the
+    /// `continue` keyword's expression. See spec/13_LOOPS.md.
+    ContinueOutsideLoop { span: Span },
 }
 
 impl HirError {
@@ -324,7 +365,9 @@ impl HirError {
             | Self::CharOutOfRange { span, .. }
             | Self::UnresolvedAdt { span, .. }
             | Self::InvalidAssignTarget { span }
-            | Self::AddrOfNonPlace { span } => span,
+            | Self::AddrOfNonPlace { span }
+            | Self::BreakOutsideLoop { span }
+            | Self::ContinueOutsideLoop { span } => span,
             Self::DuplicateFn { dup, .. }
             | Self::DuplicateAdt { dup, .. }
             | Self::DuplicateField { dup, .. } => dup,

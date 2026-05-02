@@ -1,0 +1,10 @@
+HirModule
+  Fn[0] f(n[Local(0)]: i32)
+    Block
+      tail:
+        Loop source:For has_break:false
+          init: Let(1, "i", mut, Int(0))
+          cond: Binary(Lt, Local(1, "i", place), Local(0, "n", place))
+          update: Assign(Eq, Local(1, "i", place), Binary(Add, Local(1, "i", place), Int(1)))
+          body:
+            Block

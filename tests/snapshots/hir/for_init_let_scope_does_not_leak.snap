@@ -1,0 +1,16 @@
+HirModule
+  Fn[0] f()
+    Block
+      Loop source:For has_break:false
+        init: Let(0, "i", mut, Int(0))
+        body:
+          Block
+      tail: Unresolved("i", place)
+== diagnostics ==
+[E0201] Error: cannot find `i` in scope
+   ╭─[ for_init_let_scope_does_not_leak.ox:1:36 ]
+   │
+ 1 │ fn f() { for (let mut i = 0;;) { } i }
+   │                                    ┬  
+   │                                    ╰── not found
+───╯

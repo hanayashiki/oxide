@@ -1,0 +1,12 @@
+HirModule
+  Fn[0] f()
+    Block
+      tail:
+        Loop source:Loop has_break:false
+          body:
+            Block
+              tail:
+                Loop source:Loop has_break:true
+                  body:
+                    Block
+                      ExprStmt Break()

@@ -451,6 +451,16 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             HirExprKind::Unresolved(_) | HirExprKind::Poison => {
                 panic!("v0 codegen: poisoned expr reached codegen")
             }
+            // Loop / break / continue land in HIR per spec/13_LOOPS.md;
+            // the codegen arms come in the follow-up PR.
+            HirExprKind::Loop { .. }
+            | HirExprKind::Break { .. }
+            | HirExprKind::Continue => {
+                unimplemented!(
+                    "codegen for while/loop/for/break/continue \
+                     not yet implemented (see spec/13_LOOPS.md)"
+                )
+            }
         }
     }
 

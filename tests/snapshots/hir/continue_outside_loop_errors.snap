@@ -1,0 +1,14 @@
+HirModule
+  Fn[0] f()
+    Block
+      ExprStmt Continue()
+== diagnostics ==
+[E0264] Error: `continue` outside of a loop
+   ╭─[ continue_outside_loop_errors.ox:1:10 ]
+   │
+ 1 │ fn f() { continue; }
+   │          ────┬───  
+   │              ╰───── cannot `continue` here
+   │ 
+   │ Help: `continue` is only valid inside `while`, `loop`, or `for`
+───╯
