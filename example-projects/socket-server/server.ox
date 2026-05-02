@@ -1,8 +1,8 @@
 // A minimal "Hello, world!" HTTP server in pure Oxide.
 //
 // Demonstrates: extern "C" FFI to libc / Darwin sockets, struct
-// construction, field assignment, address-of (&/&mut), recursion as
-// a substitute for the missing `while` loop.
+// construction, field assignment, address-of (&/&mut), and an
+// infinite `loop { }` for the accept loop.
 //
 // Tested on macOS (Darwin) — the sockaddr_in layout below matches
 // macOS's BSD-style struct (sin_len + 1-byte sin_family). Linux uses
@@ -37,8 +37,7 @@ extern "C" {
     fn puts(s: *const u8) -> i32;
 }
 
-// Accept one connection, write the canned response, close, recurse.
-// No `while`-loop yet — recursion is the v0 substitute.
+// Accept connections forever, writing the canned response to each.
 fn serve(server_fd: i32) -> i32 {
     let mut addr = sockaddr_in {
         sin_len: 16,
@@ -49,23 +48,24 @@ fn serve(server_fd: i32) -> i32 {
     };
     let mut addr_len: u32 = 16;
 
-    let client_fd = accept(server_fd, &mut addr, &mut addr_len);
-    if client_fd < 0 {
-        perror("accept");
-        return 1;
-    }
-
     // Hardcoded response. We deliberately don't read() the request —
     // toy server, doesn't dispatch on path / method. The kernel buffers
     // the request bytes; they get discarded on close.
     let response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 13\r\n\r\nHello, world!";
-    write(client_fd, response, 78);
-    close(client_fd);
 
-    // Tail-recurse to keep accepting. Without TCO this leaks stack
-    // per request — fine for the demo, would need real `while` for
-    // production.
-    serve(server_fd)
+    loop {
+        // accept() writes the actual address length back into addr_len,
+        // so reset to the buffer size before each call.
+        addr_len = 16;
+        let client_fd = accept(server_fd, &mut addr, &mut addr_len);
+        if client_fd < 0 {
+            perror("accept");
+            return 1;
+        }
+
+        write(client_fd, response, 78);
+        close(client_fd);
+    }
 }
 
 fn main() -> i32 {
