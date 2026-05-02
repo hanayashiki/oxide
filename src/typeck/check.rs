@@ -888,6 +888,9 @@ impl<'hir> Checker<'hir> {
                 let u8_ty = self.tys.u8;
                 self.tys.intern(TyKind::Ptr(u8_ty, Mutability::Const))
             }
+            HirExprKind::Null => todo!(
+                "typeck for Null — see spec/07_POINTER.md §Null literal Typeck changes"
+            ),
             HirExprKind::Local(lid) => self.local_tys[lid],
             HirExprKind::Fn(fid) => {
                 let sig = self.fn_sigs[fid].clone();
@@ -1274,9 +1277,9 @@ impl<'hir> Checker<'hir> {
     ///     `base` recursively.
     ///   - everything else → `None`.
     ///
-    /// `Unary { Deref, _ }` will join the place producers under
+    /// `Unary { Deref, _ }` joins the place producers under
     /// 07_POINTER §5; its mutability comes from the pointer's type
-    /// (`*mut T` → Mut, `*const T` → Const). TBD until that lands.
+    /// (`*mut T` → Mut, `*const T` → Const).
     fn place_mutability(&self, eid: HExprId) -> Option<Mutability> {
         match &self.hir.exprs[eid].kind {
             HirExprKind::Local(lid) => Some(if self.hir.locals[*lid].mutable {

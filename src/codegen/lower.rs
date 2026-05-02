@@ -530,6 +530,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             HirExprKind::CharLit(c) => Some(Operand::Value(
                 self.ctx.i8_type().const_int(c as u64, false).into(),
             )),
+            HirExprKind::Null => todo!(
+                "codegen for Null — see spec/07_POINTER.md §Null literal Codegen"
+            ),
             HirExprKind::Local(lid) => {
                 // Array-typed locals stay in place form (slot ptr, not
                 // loaded aggregate). `()`-typed locals materialize as

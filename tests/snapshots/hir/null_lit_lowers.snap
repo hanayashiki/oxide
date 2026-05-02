@@ -1,0 +1,4 @@
+HirModule
+  Fn[0] f()
+    Block
+      Let(0, "p", Null())

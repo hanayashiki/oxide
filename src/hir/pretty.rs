@@ -275,6 +275,7 @@ impl<'a> Printer<'a> {
             HirExprKind::BoolLit(b) => vec![b.to_string()],
             HirExprKind::CharLit(c) => vec![c.to_string()],
             HirExprKind::StrLit(s) => vec![format!("{s:?}")],
+            HirExprKind::Null => vec![],
             HirExprKind::Local(lid) => {
                 let name = &self.m.locals[*lid].name;
                 vec![lid.raw().to_string(), format!("{name:?}")]
@@ -444,6 +445,7 @@ fn expr_name(kind: &HirExprKind) -> &'static str {
         HirExprKind::BoolLit(_) => "Bool",
         HirExprKind::CharLit(_) => "Char",
         HirExprKind::StrLit(_) => "Str",
+        HirExprKind::Null => "Null",
         HirExprKind::Local(_) => "Local",
         HirExprKind::Fn(_) => "Fn",
         HirExprKind::Unresolved(_) => "Unresolved",

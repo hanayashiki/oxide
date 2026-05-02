@@ -1,0 +1,7 @@
+HirModule
+  Struct[0] Point
+    x: i32
+    y: i32
+  Fn[0] f(p[Local(0)]: *mut Adt(0))
+    Block
+      ExprStmt Assign(Eq, Field(Unary(Deref, Local(0, "p", place), place), "x", place), Int(7))

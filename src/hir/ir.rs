@@ -119,9 +119,8 @@ pub struct HirExpr {
     ///     diagnostics already filed at HIR/typeck for the underlying issue).
     ///   - everything else → not place.
     ///
-    /// `Unary { Deref, .. }` and `Index { .. }` will gain producer/projection
-    /// arms when their feature specs land (07_POINTER §5 for deref;
-    /// future array spec for index). Today they're not place.
+    /// `Unary { Deref, .. }` is a place per 07_POINTER §HIR; `Index` gains
+    /// it when array spec lands.
     pub is_place: bool,
 }
 
@@ -135,6 +134,10 @@ pub enum HirExprKind {
     /// String literal data carried through. Typeck rejects in v0 since
     /// strings need pointers/arrays.
     StrLit(String),
+    /// `null` — typed null pointer literal. Typeck assigns
+    /// `*mut α` (fresh inference var). See spec/07_POINTER.md
+    /// "Null literal".
+    Null,
     /// Resolved use of a let-binding or function parameter.
     Local(LocalId),
     /// Resolved use of a module-level function.

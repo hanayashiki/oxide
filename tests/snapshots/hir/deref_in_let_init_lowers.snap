@@ -1,0 +1,4 @@
+HirModule
+  Fn[0] f(p[Local(0)]: *const i32)
+    Block
+      Let(1, "v", Unary(Deref, Local(0, "p", place), place))

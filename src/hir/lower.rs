@@ -17,6 +17,7 @@ use std::collections::hash_map::Entry;
 use index_vec::IndexVec;
 
 use crate::lexer::Span;
+use crate::parser::ast::UnOp;
 use crate::parser::{Ident, StructLitField, ast};
 
 use super::ir::*;
@@ -25,8 +26,10 @@ use super::ir::*;
 /// Children are already in `exprs` (children-first lowering), so the
 /// projection arms can read child bits directly without recursion.
 ///
-/// Rules per spec/08_ADT.md "Place expressions":
+/// Rules per spec/08_ADT.md "Place expressions" and spec/07_POINTER.md:
 ///   - `Local(_)` — direct producer.
+///   - `Unary { Deref, .. }` — direct producer; the operand need not be
+///     a place (per 07_POINTER §HIR — `*make_ptr()` is fine).
 ///   - `Field { base, .. }` — projection; inherits from base.
 ///   - `Index { base, .. }` — projection; inherits from base. Indexing
 ///     itself is `UnsupportedFeature` at typeck today, but the place
@@ -36,12 +39,10 @@ use super::ir::*;
 ///     cascading "InvalidAssignTarget"-style errors when the underlying
 ///     issue (unresolved name, malformed expr) was already filed.
 ///   - everything else — value expression.
-///
-/// `Unary { Deref, .. }` will be place-shaped under 07_POINTER §5, but
-/// deref isn't in scope today.
 fn compute_is_place(kind: &HirExprKind, exprs: &IndexVec<HExprId, HirExpr>) -> bool {
     match kind {
         HirExprKind::Local(_) => true,
+        HirExprKind::Unary { op: UnOp::Deref, .. } => true,
         HirExprKind::Field { base, .. } => exprs[*base].is_place,
         HirExprKind::Index { base, .. } => exprs[*base].is_place,
         HirExprKind::Unresolved(_) | HirExprKind::Poison => true,
@@ -308,9 +309,7 @@ impl<'a> Lowerer<'a> {
             ast::ExprKind::BoolLit(b) => HirExprKind::BoolLit(b),
             ast::ExprKind::CharLit(c) => self.lower_char_lit(c, &span),
             ast::ExprKind::StrLit(s) => HirExprKind::StrLit(s),
-            ast::ExprKind::Null => {
-                todo!("HIR lowering for Null — see spec/07_POINTER.md §Null literal")
-            }
+            ast::ExprKind::Null => HirExprKind::Null,
             ast::ExprKind::Ident(id) => self.resolve_ident(&id),
             ast::ExprKind::Paren(_) => unreachable!("handled above"),
             ast::ExprKind::Unary { op, expr } => {
