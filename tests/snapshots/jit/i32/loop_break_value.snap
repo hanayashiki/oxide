@@ -1,0 +1,40 @@
+== ir ==
+; ModuleID = 'jit'
+source_filename = "jit"
+
+define i32 @main() {
+allocas:
+  %i.0.slot = alloca i32, align 4
+  %loop.slot = alloca i32, align 4
+  br label %body
+
+body:                                             ; preds = %allocas
+  store i32 0, ptr %i.0.slot, align 4
+  br label %loop.body
+
+loop.body:                                        ; preds = %if.end, %body
+  %load = load i32, ptr %i.0.slot, align 4
+  %eq = icmp eq i32 %load, 7
+  br i1 %eq, label %if.then, label %if.else
+
+loop.end:                                         ; preds = %if.then
+  %loop.val = load i32, ptr %loop.slot, align 4
+  ret i32 %loop.val
+
+if.then:                                          ; preds = %loop.body
+  %load1 = load i32, ptr %i.0.slot, align 4
+  %mul = mul i32 %load1, 2
+  store i32 %mul, ptr %loop.slot, align 4
+  br label %loop.end
+
+if.else:                                          ; preds = %loop.body
+  br label %if.end
+
+if.end:                                           ; preds = %if.else
+  %load2 = load i32, ptr %i.0.slot, align 4
+  %add = add i32 %load2, 1
+  store i32 %add, ptr %i.0.slot, align 4
+  br label %loop.body
+}
+== result ==
+14

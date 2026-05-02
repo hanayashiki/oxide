@@ -125,6 +125,30 @@ struct FnCodegenContext<'ctx> {
     /// `simplifycfg` in optimized builds.
     allocas_bb: BasicBlock<'ctx>,
     locals: HashMap<LocalId, PointerValue<'ctx>>,
+    /// One frame per `Loop` whose body is currently being emitted.
+    /// Pushed before emitting the body, popped after. `Break` / `Continue`
+    /// read `last()` for their target. HIR-lower already filed
+    /// E0263/E0264 if break/continue is outside a loop, so an empty
+    /// stack here is an ICE-worthy invariant violation.
+    /// See spec/13_LOOPS.md "FnCodegenContext gains a single LoopTargets
+    /// shape".
+    loop_targets: Vec<LoopTargets<'ctx>>,
+}
+
+/// Per-loop targets read by `emit_break` / `emit_continue`. Pushed onto
+/// `FnCodegenContext::loop_targets` while lowering the loop body.
+///
+/// `end_bb` is where `break` jumps (always the loop's `loop.end` block —
+/// no labels, so there's nowhere else to go). `continue_target_bb` is
+/// the "top of the next iteration": `update_bb` if Some, else `cond_bb`
+/// if Some, else `body_bb`. `result_slot` is `Some` only when the
+/// loop's typeck'd type is a value type — see spec/13_LOOPS.md
+/// "Result-slot rule".
+#[derive(Copy, Clone)]
+struct LoopTargets<'ctx> {
+    end_bb: BasicBlock<'ctx>,
+    continue_target_bb: BasicBlock<'ctx>,
+    result_slot: Option<PointerValue<'ctx>>,
 }
 
 impl<'a, 'ctx> Codegen<'a, 'ctx> {
@@ -304,6 +328,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             fn_value: fnv,
             allocas_bb,
             locals: HashMap::new(),
+            loop_targets: Vec::new(),
         };
 
         // Alloca slots for params and store the incoming arg values.
@@ -451,15 +476,25 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             HirExprKind::Unresolved(_) | HirExprKind::Poison => {
                 panic!("v0 codegen: poisoned expr reached codegen")
             }
-            // Loop / break / continue land in HIR per spec/13_LOOPS.md;
-            // the codegen arms come in the follow-up PR.
-            HirExprKind::Loop { .. }
-            | HirExprKind::Break { .. }
-            | HirExprKind::Continue => {
-                unimplemented!(
-                    "codegen for while/loop/for/break/continue \
-                     not yet implemented (see spec/13_LOOPS.md)"
-                )
+            // `has_break` and `source` are read by typeck for the value
+            // type and by HIR pretty-print respectively; codegen reads
+            // `self.ty_of(eid)` directly to decide whether to allocate
+            // a result slot, so it ignores them here.
+            HirExprKind::Loop {
+                init,
+                cond,
+                update,
+                body,
+                has_break: _,
+                source: _,
+            } => self.emit_loop(fx, eid, init, cond, update, body),
+            HirExprKind::Break { expr } => {
+                self.emit_break(fx, expr);
+                None
+            }
+            HirExprKind::Continue => {
+                self.emit_continue(fx);
+                None
             }
         }
     }
@@ -1259,6 +1294,179 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 Some(self.builder.build_load(llty, slot, "if.val").unwrap())
             }
             None => None,
+        }
+    }
+
+    // ---------- loop / break / continue ----------
+
+    /// Emit a unified loop (`while` / `loop` / C-style `for`). All three
+    /// surface forms collapse to the same C-style skeleton with each of
+    /// `init` / `cond` / `update` independently optional. See
+    /// spec/13_LOOPS.md "One unified IR skeleton".
+    ///
+    /// CFG shape:
+    /// ```text
+    /// init?  -> cond? -> body -> update? -> (back-edge to cond/body)
+    ///           |  ^                   ^
+    ///           |  +-- false:          +-- continue jumps here
+    ///           +----- true:           (= update_bb if Some, else cond_bb if Some, else body_bb)
+    ///                                  break jumps to end_bb
+    /// ```
+    fn emit_loop(
+        &self,
+        fx: &mut FnCodegenContext<'ctx>,
+        eid: HExprId,
+        init: Option<HExprId>,
+        cond: Option<HExprId>,
+        update: Option<HExprId>,
+        body: HBlockId,
+    ) -> Option<BasicValueEnum<'ctx>> {
+        let parent = fx.fn_value;
+
+        // Always-present blocks. init / cond / update are appended only
+        // when their respective slot is Some.
+        let body_bb = self.ctx.append_basic_block(parent, "loop.body");
+        let end_bb = self.ctx.append_basic_block(parent, "loop.end");
+        let init_bb = init
+            .is_some()
+            .then(|| self.ctx.append_basic_block(parent, "loop.init"));
+        let cond_bb = cond
+            .is_some()
+            .then(|| self.ctx.append_basic_block(parent, "loop.cond"));
+        let update_bb = update
+            .is_some()
+            .then(|| self.ctx.append_basic_block(parent, "loop.update"));
+
+        // continue_target_bb (also the back-edge target from body):
+        // first-Some of [update, cond, body]. break always lands in
+        // end_bb.
+        let continue_target_bb = update_bb.or(cond_bb).unwrap_or(body_bb);
+
+        // Result slot: allocate iff the loop's typeck'd type is a value
+        // type (non-`()`, non-`!`). Concretely fires only for
+        // `cond.is_none() && has_break` with at least one valued break.
+        let loop_ty = self.ty_of(eid);
+        let result_slot = if !is_void_ret(self.typeck_results.tys(), loop_ty) {
+            let llty =
+                lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, loop_ty);
+            Some(self.alloca_in_entry(fx, llty, "loop.slot"))
+        } else {
+            None
+        };
+
+        // Caller block jumps into the first existing of init/cond/body.
+        let entry_jump = init_bb.or(cond_bb).unwrap_or(body_bb);
+        self.builder.build_unconditional_branch(entry_jump).unwrap();
+
+        // init: <init>; br cond_or_body
+        if let (Some(ibb), Some(init_eid)) = (init_bb, init) {
+            self.builder.position_at_end(ibb);
+            let _ = self.emit_expr(fx, init_eid);
+            if !self.is_terminated() {
+                self.builder
+                    .build_unconditional_branch(cond_bb.unwrap_or(body_bb))
+                    .unwrap();
+            }
+        }
+
+        // cond: %c = <cond>; br i1 %c, body, end
+        if let (Some(cbb), Some(cond_eid)) = (cond_bb, cond) {
+            self.builder.position_at_end(cbb);
+            let cond_v = self
+                .emit_expr(fx, cond_eid)
+                .expect("loop cond produced no value")
+                .into_int_value();
+            if !self.is_terminated() {
+                self.builder
+                    .build_conditional_branch(cond_v, body_bb, end_bb)
+                    .unwrap();
+            }
+        }
+
+        // body: <body>; br continue_target_bb
+        fx.loop_targets.push(LoopTargets {
+            end_bb,
+            continue_target_bb,
+            result_slot,
+        });
+        self.builder.position_at_end(body_bb);
+        let _body_val = self.emit_block(fx, body);
+        if !self.is_terminated() {
+            self.builder
+                .build_unconditional_branch(continue_target_bb)
+                .unwrap();
+        }
+        fx.loop_targets.pop();
+
+        // update: <update>; br cond_or_body
+        if let (Some(ubb), Some(update_eid)) = (update_bb, update) {
+            self.builder.position_at_end(ubb);
+            let _ = self.emit_expr(fx, update_eid);
+            if !self.is_terminated() {
+                self.builder
+                    .build_unconditional_branch(cond_bb.unwrap_or(body_bb))
+                    .unwrap();
+            }
+        }
+
+        // end: load result slot if any. If end has no preds — divergent
+        // loop, no break ever reaches here — terminate with `unreachable`
+        // so the verifier accepts the fn (mirrors emit_if's both-arms-
+        // diverged handling).
+        self.builder.position_at_end(end_bb);
+        if merge_bb_has_no_preds(end_bb) {
+            self.builder.build_unreachable().unwrap();
+            return None;
+        }
+        match result_slot {
+            Some(slot) => {
+                let llty =
+                    lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, loop_ty);
+                Some(self.builder.build_load(llty, slot, "loop.val").unwrap())
+            }
+            None => None,
+        }
+    }
+
+    /// Emit `break expr?`. Stores `expr`'s value into the innermost
+    /// loop's result slot (if any) before branching to its `end_bb`.
+    /// Mirrors `emit_return`'s "compute operand, then exit" shape — the
+    /// difference is that return calls `build_return` while break stores
+    /// to a slot and branches.
+    fn emit_break(&self, fx: &mut FnCodegenContext<'ctx>, expr: Option<HExprId>) {
+        let target = *fx
+            .loop_targets
+            .last()
+            .expect("HIR ensured break is inside a loop");
+        if let Some(eid) = expr {
+            let v = self.emit_expr(fx, eid);
+            if self.is_terminated() {
+                return;
+            }
+            if let (Some(slot), Some(val)) = (target.result_slot, v) {
+                self.builder.build_store(slot, val).unwrap();
+            }
+            self.builder
+                .build_unconditional_branch(target.end_bb)
+                .unwrap();
+        } else if !self.is_terminated() {
+            self.builder
+                .build_unconditional_branch(target.end_bb)
+                .unwrap();
+        }
+    }
+
+    /// Emit `continue` — branch to the innermost loop's
+    /// `continue_target_bb`. No operand in v0.
+    fn emit_continue(&self, fx: &mut FnCodegenContext<'ctx>) {
+        let target = *fx
+            .loop_targets
+            .last()
+            .expect("HIR ensured continue is inside a loop");
+        if !self.is_terminated() {
+            self.builder
+                .build_unconditional_branch(target.continue_target_bb)
+                .unwrap();
         }
     }
 

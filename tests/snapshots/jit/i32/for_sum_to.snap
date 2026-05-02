@@ -1,0 +1,54 @@
+== ir ==
+; ModuleID = 'jit'
+source_filename = "jit"
+
+define i32 @sum_to(i32 %n) {
+allocas:
+  %n.0.slot = alloca i32, align 4
+  %s.1.slot = alloca i32, align 4
+  %i.2.slot = alloca i32, align 4
+  br label %body
+
+body:                                             ; preds = %allocas
+  store i32 %n, ptr %n.0.slot, align 4
+  store i32 0, ptr %s.1.slot, align 4
+  br label %loop.init
+
+loop.body:                                        ; preds = %loop.cond
+  %load2 = load i32, ptr %s.1.slot, align 4
+  %load3 = load i32, ptr %i.2.slot, align 4
+  %add = add i32 %load2, %load3
+  store i32 %add, ptr %s.1.slot, align 4
+  br label %loop.update
+
+loop.end:                                         ; preds = %loop.cond
+  %load6 = load i32, ptr %s.1.slot, align 4
+  ret i32 %load6
+
+loop.init:                                        ; preds = %body
+  store i32 0, ptr %i.2.slot, align 4
+  br label %loop.cond
+
+loop.cond:                                        ; preds = %loop.update, %loop.init
+  %load = load i32, ptr %i.2.slot, align 4
+  %load1 = load i32, ptr %n.0.slot, align 4
+  %lt = icmp slt i32 %load, %load1
+  br i1 %lt, label %loop.body, label %loop.end
+
+loop.update:                                      ; preds = %loop.body
+  %load4 = load i32, ptr %i.2.slot, align 4
+  %add5 = add i32 %load4, 1
+  store i32 %add5, ptr %i.2.slot, align 4
+  br label %loop.cond
+}
+
+define i32 @main() {
+allocas:
+  br label %body
+
+body:                                             ; preds = %allocas
+  %call = call i32 @sum_to(i32 5)
+  ret i32 %call
+}
+== result ==
+10

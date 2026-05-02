@@ -1,0 +1,43 @@
+== ir ==
+; ModuleID = 'jit'
+source_filename = "jit"
+
+define i32 @count_down(i32 %n) {
+allocas:
+  %n.0.slot = alloca i32, align 4
+  %last.1.slot = alloca i32, align 4
+  br label %body
+
+body:                                             ; preds = %allocas
+  store i32 %n, ptr %n.0.slot, align 4
+  store i32 0, ptr %last.1.slot, align 4
+  br label %loop.cond
+
+loop.body:                                        ; preds = %loop.cond
+  %load1 = load i32, ptr %n.0.slot, align 4
+  store i32 %load1, ptr %last.1.slot, align 4
+  %load2 = load i32, ptr %n.0.slot, align 4
+  %sub = sub i32 %load2, 1
+  store i32 %sub, ptr %n.0.slot, align 4
+  br label %loop.cond
+
+loop.end:                                         ; preds = %loop.cond
+  %load3 = load i32, ptr %last.1.slot, align 4
+  ret i32 %load3
+
+loop.cond:                                        ; preds = %loop.body, %body
+  %load = load i32, ptr %n.0.slot, align 4
+  %gt = icmp sgt i32 %load, 0
+  br i1 %gt, label %loop.body, label %loop.end
+}
+
+define i32 @main() {
+allocas:
+  br label %body
+
+body:                                             ; preds = %allocas
+  %call = call i32 @count_down(i32 3)
+  ret i32 %call
+}
+== result ==
+1

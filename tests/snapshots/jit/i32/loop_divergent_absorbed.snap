@@ -1,0 +1,31 @@
+== ir ==
+; ModuleID = 'jit'
+source_filename = "jit"
+
+define i32 @main() {
+allocas:
+  %if.slot = alloca i32, align 4
+  br label %body
+
+body:                                             ; preds = %allocas
+  br i1 true, label %if.then, label %if.else
+
+if.then:                                          ; preds = %body
+  store i32 0, ptr %if.slot, align 4
+  br label %if.end
+
+if.else:                                          ; preds = %body
+  br label %loop.body
+
+if.end:                                           ; preds = %if.then
+  %if.val = load i32, ptr %if.slot, align 4
+  ret i32 %if.val
+
+loop.body:                                        ; preds = %loop.body, %if.else
+  br label %loop.body
+
+loop.end:                                         ; No predecessors!
+  unreachable
+}
+== result ==
+0
