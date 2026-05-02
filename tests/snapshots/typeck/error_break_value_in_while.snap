@@ -1,0 +1,14 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `()`, found `i32`
+   ╭─[ error_break_value_in_while.ox:2:21 ]
+   │
+ 2 │     while c { break 5; }
+   │                     ┬  
+   │                     ╰── type mismatch here
+───╯
+== types ==
+Fn[0] f(c[Local(0)]: bool) -> ()
+  HExprId(0) : bool
+  HExprId(1) : i32
+  HExprId(2) : !
+  HExprId(3) : ()

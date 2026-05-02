@@ -1,0 +1,12 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `bool`, found `i32`
+   ╭─[ error_for_cond_not_bool.ox:1:17 ]
+   │
+ 1 │ fn f() { for (; 1;) { } }
+   │                 ┬  
+   │                 ╰── type mismatch here
+───╯
+== types ==
+Fn[0] f() -> ()
+  HExprId(0) : i32
+  HExprId(1) : ()

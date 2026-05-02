@@ -1,0 +1,4 @@
+== diagnostics ==
+== types ==
+Fn[0] spin() -> i32
+  HExprId(0) : !

@@ -1,0 +1,18 @@
+== diagnostics ==
+== types ==
+Fn[0] count_down(mut n[Local(0)]: i32) -> i32
+  HExprId(0) : i32
+  HExprId(1) : ()
+  HExprId(2) : i32
+  HExprId(3) : i32
+  HExprId(4) : bool
+  HExprId(5) : i32
+  HExprId(6) : i32
+  HExprId(7) : ()
+  HExprId(8) : i32
+  HExprId(9) : i32
+  HExprId(10) : i32
+  HExprId(11) : i32
+  HExprId(12) : ()
+  HExprId(13) : ()
+  HExprId(14) : i32

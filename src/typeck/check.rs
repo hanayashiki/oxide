@@ -165,6 +165,14 @@ struct Inferer {
     /// by the `Return` arm of `infer_expr`; doesn't change for the
     /// lifetime of this Inferer.
     cur_ret: TyId,
+    /// Stack of "expected type of the enclosing loop expression," one
+    /// frame per loop currently being checked. Pushed before
+    /// `infer_block(body)` and popped after; the innermost frame is
+    /// `Break`'s coerce target. Always non-empty inside `Break` /
+    /// `Continue` arms — HIR-lower already filed E0263/E0264 for stray
+    /// uses, so the typeck-side `last()` is an invariant assertion.
+    /// See spec/13_LOOPS.md "Type rule".
+    loop_tys: Vec<TyId>,
 }
 
 impl Inferer {
@@ -176,6 +184,7 @@ impl Inferer {
             errors: Vec::new(),
             obligations: Vec::new(),
             cur_ret,
+            loop_tys: Vec::new(),
         }
     }
     fn new_var(&mut self, int_default: bool) -> InferId {
@@ -957,18 +966,19 @@ impl<'hir> Checker<'hir> {
             HirExprKind::Let { local, init } => self.infer_let(inf, local, init, &span),
             HirExprKind::Poison => self.tys.error,
             HirExprKind::ArrayLit(lit) => self.infer_array_lit(inf, lit, &span),
-            // Loop / break / continue land in HIR per spec/13_LOOPS.md;
-            // the typeck arms come in the follow-up PR. Programs without
-            // loops compile fine; programs that use them ICE here with a
-            // clear pointer to the spec.
-            HirExprKind::Loop { .. }
-            | HirExprKind::Break { .. }
-            | HirExprKind::Continue => {
-                unimplemented!(
-                    "typeck for while/loop/for/break/continue \
-                     not yet implemented (see spec/13_LOOPS.md)"
-                )
-            }
+            // `source` is destructured but ignored — the typing rule is
+            // structural (driven by `cond.is_some()` and `has_break`),
+            // not source-driven. See spec/13_LOOPS.md.
+            HirExprKind::Loop {
+                init,
+                cond,
+                update,
+                body,
+                has_break,
+                source: _,
+            } => self.infer_loop(inf, init, cond, update, body, has_break),
+            HirExprKind::Break { expr } => self.infer_break_expr(inf, expr, &span),
+            HirExprKind::Continue => self.infer_continue_expr(inf, &span),
         };
         self.expr_tys[eid] = ty;
         ty
@@ -1363,6 +1373,98 @@ impl<'hir> Checker<'hir> {
                 self.join_never(inf, then_ty, else_ty)
             }
         }
+    }
+
+    /// Unified `while` / `loop` / `for` typing. Headers (`init`, `cond`,
+    /// `update`) are typed for side-effects; only `cond` carries a
+    /// constraint (must coerce to `bool`). The loop expression's value
+    /// type is decided **structurally** — by whether `cond` is present
+    /// and whether the body holds a `break` — not by the `LoopSource`
+    /// tag. Per spec/13_LOOPS.md "Typing rule is structural".
+    fn infer_loop(
+        &mut self,
+        inf: &mut Inferer,
+        init: Option<HExprId>,
+        cond: Option<HExprId>,
+        update: Option<HExprId>,
+        body: HBlockId,
+        has_break: bool,
+    ) -> TyId {
+        // Header slots are typed for side-effects (and so any errors
+        // inside them surface), but their values are discarded — `init`
+        // is typically `Let`, `update` typically `Assign`, both `()`.
+        // `cond` is the one with a real constraint.
+        if let Some(i) = init {
+            let _ = self.infer_expr(inf, i);
+        }
+        if let Some(c) = cond {
+            let cond_ty = self.infer_expr(inf, c);
+            let cond_span = self.hir.exprs[c].span.clone();
+            let bool_ty = self.tys.bool;
+            self.unify(inf, cond_ty, bool_ty, cond_span);
+        }
+        if let Some(u) = update {
+            let _ = self.infer_expr(inf, u);
+        }
+
+        // Structural rule:
+        //   cond.is_some()  ⇒ unit       (loop can fall out the bottom)
+        //   no cond, no break ⇒ never    (truly infinite)
+        //   no cond, has break ⇒ fresh   (break-driven; binds to first
+        //                                 valued break, then unifies)
+        let target = if cond.is_some() {
+            self.tys.unit
+        } else if has_break {
+            self.fresh_infer(inf, false)
+        } else {
+            self.tys.never
+        };
+
+        inf.loop_tys.push(target);
+        let body_ty = self.infer_block(inf, body);
+        inf.loop_tys.pop();
+
+        // Body must be statement-shaped — same constraint
+        // `if`-without-`else` enforces on its then-arm. `coerce` handles
+        // `!` short-circuit; an `i32` tail emits TypeMismatch (E0250).
+        let body_span = self.hir.blocks[body].span.clone();
+        let unit = self.tys.unit;
+        self.coerce(inf, body_ty, unit, body_span);
+
+        target
+    }
+
+    /// `break expr?` — coerce the operand (or `()` if elided) into the
+    /// innermost loop's target slot, return `!`. Mirrors `Return`'s
+    /// shape. The operand's span is the coerce site so type-mismatch
+    /// errors point at the value, not the `break` keyword.
+    fn infer_break_expr(
+        &mut self,
+        inf: &mut Inferer,
+        expr: Option<HExprId>,
+        span: &Span,
+    ) -> TyId {
+        let target = *inf
+            .loop_tys
+            .last()
+            .expect("HIR enforced break is inside a loop");
+        let (operand_ty, operand_span) = match expr {
+            Some(e) => (self.infer_expr(inf, e), self.hir.exprs[e].span.clone()),
+            None => (self.tys.unit, span.clone()),
+        };
+        self.coerce(inf, operand_ty, target, operand_span);
+        self.tys.never
+    }
+
+    /// `continue` — diverges, no operand. The `last()` check turns a
+    /// silent stack-discipline bug into a loud panic; HIR-lower already
+    /// filed E0264 for `continue` outside any loop.
+    fn infer_continue_expr(&mut self, inf: &mut Inferer, _span: &Span) -> TyId {
+        let _ = inf
+            .loop_tys
+            .last()
+            .expect("HIR enforced continue is inside a loop");
+        self.tys.never
     }
 
     /// Unify two `if`-arm types. Symmetric — neither arm is "the

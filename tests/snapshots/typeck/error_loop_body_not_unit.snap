@@ -1,0 +1,13 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `()`, found `i32`
+   ╭─[ error_loop_body_not_unit.ox:2:16 ]
+   │
+ 2 │     while true { 5 }
+   │                ──┬──  
+   │                  ╰──── type mismatch here
+───╯
+== types ==
+Fn[0] f() -> ()
+  HExprId(0) : bool
+  HExprId(1) : i32
+  HExprId(2) : ()
