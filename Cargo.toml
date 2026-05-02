@@ -8,6 +8,12 @@ ariadne = "0.6.0"
 chumsky = { version = "0.12.0", features = ["pratt"] }
 index_vec = "0.1.4"
 inkwell = { version = "0.5", features = ["llvm18-0"] }
+serde = { version = "1", features = ["derive"], optional = true }
+target-lexicon = "0.13"
+
+[features]
+default = []
+serde = ["dep:serde", "target-lexicon/serde_support"]
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }

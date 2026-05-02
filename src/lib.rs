@@ -1,6 +1,9 @@
 pub mod codegen;
+pub mod config;
 pub mod hir;
 pub mod lexer;
+pub mod loader;
 pub mod parser;
 pub mod reporter;
+pub mod session;
 pub mod typeck;

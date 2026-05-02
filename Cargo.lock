@@ -325,6 +325,8 @@ dependencies = [
  "expect-test",
  "index_vec",
  "inkwell",
+ "serde",
+ "target-lexicon",
 ]
 
 [[package]]
@@ -448,6 +450,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "target-lexicon"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
