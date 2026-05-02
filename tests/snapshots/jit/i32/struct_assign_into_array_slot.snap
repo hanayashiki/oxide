@@ -1,0 +1,85 @@
+== ir ==
+; ModuleID = 'jit'
+source_filename = "jit"
+
+%S = type { i32, i32 }
+
+define i32 @main() {
+allocas:
+  %arr.0.slot = alloca [3 x %S], align 8
+  %lit.slot = alloca [3 x %S], align 8
+  br label %body
+
+body:                                             ; preds = %allocas
+  %lit.gep = getelementptr inbounds [3 x %S], ptr %lit.slot, i64 0, i64 0
+  store %S { i32 1, i32 2 }, ptr %lit.gep, align 4
+  %lit.gep1 = getelementptr inbounds [3 x %S], ptr %lit.slot, i64 0, i64 1
+  store %S { i32 3, i32 4 }, ptr %lit.gep1, align 4
+  %lit.gep2 = getelementptr inbounds [3 x %S], ptr %lit.slot, i64 0, i64 2
+  store %S { i32 5, i32 6 }, ptr %lit.gep2, align 4
+  call void @llvm.memcpy.p0.p0.i64(ptr align 1 %arr.0.slot, ptr align 1 %lit.slot, i64 ptrtoint (ptr getelementptr ([3 x %S], ptr null, i32 1) to i64), i1 false)
+  br i1 false, label %bounds.trap, label %bounds.ok
+
+bounds.trap:                                      ; preds = %body
+  call void @llvm.trap()
+  unreachable
+
+bounds.ok:                                        ; preds = %body
+  %idx.gep = getelementptr inbounds [3 x %S], ptr %arr.0.slot, i64 0, i64 1
+  store %S { i32 100, i32 200 }, ptr %idx.gep, align 4
+  br i1 false, label %bounds.trap3, label %bounds.ok4
+
+bounds.trap3:                                     ; preds = %bounds.ok
+  call void @llvm.trap()
+  unreachable
+
+bounds.ok4:                                       ; preds = %bounds.ok
+  %idx.gep5 = getelementptr inbounds [3 x %S], ptr %arr.0.slot, i64 0, i64 0
+  %fld.gep = getelementptr inbounds %S, ptr %idx.gep5, i32 0, i32 0
+  %fld.load = load i32, ptr %fld.gep, align 4
+  br i1 false, label %bounds.trap6, label %bounds.ok7
+
+bounds.trap6:                                     ; preds = %bounds.ok4
+  call void @llvm.trap()
+  unreachable
+
+bounds.ok7:                                       ; preds = %bounds.ok4
+  %idx.gep8 = getelementptr inbounds [3 x %S], ptr %arr.0.slot, i64 0, i64 1
+  %fld.gep9 = getelementptr inbounds %S, ptr %idx.gep8, i32 0, i32 0
+  %fld.load10 = load i32, ptr %fld.gep9, align 4
+  %add = add i32 %fld.load, %fld.load10
+  br i1 false, label %bounds.trap11, label %bounds.ok12
+
+bounds.trap11:                                    ; preds = %bounds.ok7
+  call void @llvm.trap()
+  unreachable
+
+bounds.ok12:                                      ; preds = %bounds.ok7
+  %idx.gep13 = getelementptr inbounds [3 x %S], ptr %arr.0.slot, i64 0, i64 1
+  %fld.gep14 = getelementptr inbounds %S, ptr %idx.gep13, i32 0, i32 1
+  %fld.load15 = load i32, ptr %fld.gep14, align 4
+  %add16 = add i32 %add, %fld.load15
+  br i1 false, label %bounds.trap17, label %bounds.ok18
+
+bounds.trap17:                                    ; preds = %bounds.ok12
+  call void @llvm.trap()
+  unreachable
+
+bounds.ok18:                                      ; preds = %bounds.ok12
+  %idx.gep19 = getelementptr inbounds [3 x %S], ptr %arr.0.slot, i64 0, i64 2
+  %fld.gep20 = getelementptr inbounds %S, ptr %idx.gep19, i32 0, i32 1
+  %fld.load21 = load i32, ptr %fld.gep20, align 4
+  %add22 = add i32 %add16, %fld.load21
+  ret i32 %add22
+}
+
+; Function Attrs: nocallback nofree nounwind willreturn memory(argmem: readwrite)
+declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg) #0
+
+; Function Attrs: cold noreturn nounwind memory(inaccessiblemem: write)
+declare void @llvm.trap() #1
+
+attributes #0 = { nocallback nofree nounwind willreturn memory(argmem: readwrite) }
+attributes #1 = { cold noreturn nounwind memory(inaccessiblemem: write) }
+== result ==
+307
