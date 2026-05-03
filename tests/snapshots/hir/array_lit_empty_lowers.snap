@@ -1,4 +1,5 @@
-HirModule
-  Fn[0] empty()
-    Block
-      Let(0, "a", :[i32; 0], ArrayLit())
+HirProgram
+  Module array_lit_empty_lowers.ox (root)
+    Fn[0] empty()
+      Block
+        Let(0, "a", :[i32; 0], ArrayLit())

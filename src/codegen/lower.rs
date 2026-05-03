@@ -17,9 +17,8 @@ use inkwell::values::{
     UnnamedAddress,
 };
 
-use crate::codegen;
 use crate::hir::{
-    FieldIdx, FnId, HBlockId, HElseArm, HExprId, HirArrayLit, HirConst, HirExprKind, HirModule,
+    FieldIdx, FnId, HBlockId, HElseArm, HExprId, HirArrayLit, HirConst, HirExprKind, HirProgram,
     LocalId, VariantIdx,
 };
 use crate::parser::ast::{AssignOp, BinOp, UnOp};
@@ -30,11 +29,11 @@ use super::ty::{
     prepare_adt_types,
 };
 
-/// Lower an entire `HirModule` to an LLVM `Module`. Verifies before
+/// Lower an entire `HirProgram` to an LLVM `Module`. Verifies before
 /// returning; verifier failures panic.
 pub fn codegen<'ctx>(
     ctx: &'ctx Context,
-    hir: &HirModule,
+    hir: &HirProgram,
     typeck_results: &TypeckResults,
     module_name: &str,
 ) -> Module<'ctx> {
@@ -95,7 +94,7 @@ struct Codegen<'a, 'ctx> {
     ctx: &'ctx Context,
     module: Module<'ctx>,
     builder: Builder<'ctx>,
-    hir: &'a HirModule,
+    hir: &'a HirProgram,
     typeck_results: &'a TypeckResults,
     fn_decls: IndexVec<FnId, FunctionValue<'ctx>>,
     /// LLVM struct type per `AdtId`, populated up front by

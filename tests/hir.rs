@@ -6,14 +6,14 @@
 //! variants, specific `HirExprKind` / `HirTyKind` destructuring, and
 //! literal-payload identity.
 
-use oxide::hir::{HirError, HirExprKind, HirModule, HirTyKind, LoopSource, lower};
+use oxide::hir::{HirError, HirExprKind, HirProgram, HirTyKind, LoopSource, lower};
 use oxide::lexer::lex;
 use oxide::parser::parse;
 use oxide::reporter::FileId;
 
 const FID: FileId = FileId(0);
 
-fn lower_src(src: &str) -> (HirModule, Vec<HirError>) {
+fn lower_src(src: &str) -> (HirProgram, Vec<HirError>) {
     let tokens = lex(src, FID);
     let (ast, parse_errs) = parse(&tokens, FID);
     assert!(parse_errs.is_empty(), "parse errors: {parse_errs:#?}");
@@ -46,7 +46,7 @@ fn type_names_pass_through_untouched() {
     // Both `i32` and `blarg` lower to `HirTyKind::Named(...)`.
     let (hir, errors) = lower_src("fn f(x: i32) -> blarg { 0 }");
     assert!(errors.is_empty(), "HIR shouldn't error on unknown types: {errors:#?}");
-    let f = &hir.fns[hir.root_fns[0]];
+    let f = &hir.fns[hir.root_fns()[0]];
     let i32_ty = hir.locals[f.params[0]].ty.as_ref().unwrap();
     let blarg_ty = f.ret_ty.as_ref().unwrap();
     assert!(matches!(&i32_ty.kind, HirTyKind::Named(n) if n == "i32"));
@@ -62,7 +62,7 @@ fn if_else_branches_resolve_to_correct_locals() {
     let tokens = lex("fn f(c: bool, a: i32, b: i32) -> i32 { if c { a } else { b } }", FID);
     let (ast, _) = parse(&tokens, FID);
     let (hir, _) = lower(&ast);
-    let f = &hir.fns[hir.root_fns[0]];
+    let f = &hir.fns[hir.root_fns()[0]];
     let body = &hir.blocks[f.body.expect("local fn has body")];
     let if_item = body.items.first().expect("if as item");
     assert!(!if_item.has_semi, "if/else without `;` should be the value-producing item");
@@ -88,7 +88,7 @@ fn extern_block_lowers_to_bodyless_hir_fn() {
     let (hir, errs) = lower_src(r#"extern "C" { fn print_int(x: i32) -> i32; }"#);
     assert!(errs.is_empty(), "{errs:#?}");
     assert_eq!(hir.fns.len(), 1);
-    let f = &hir.fns[hir.root_fns[0]];
+    let f = &hir.fns[hir.root_fns()[0]];
     assert_eq!(f.name, "print_int");
     assert!(f.is_extern, "extern block child must have is_extern = true");
     assert!(f.body.is_none(), "extern fn must have no body");
@@ -103,7 +103,7 @@ fn extern_fn_call_resolves_to_fn() {
            fn main() -> i32 { print_int(42); 0 }"#,
     );
     assert!(errs.is_empty(), "{errs:#?}");
-    let main_fid = hir.root_fns.iter().find(|&&fid| hir.fns[fid].name == "main").copied().expect("main fn");
+    let main_fid = hir.root_fns().iter().find(|&&fid| hir.fns[fid].name == "main").copied().expect("main fn");
     let main = &hir.fns[main_fid];
     let body_id = main.body.expect("main has body");
     let body = &hir.blocks[body_id];
@@ -120,9 +120,39 @@ fn extern_fn_call_resolves_to_fn() {
 #[test]
 fn local_fn_marks_is_extern_false() {
     let (hir, _) = lower_src("fn add(a: i32, b: i32) -> i32 { a + b }");
-    let f = &hir.fns[hir.root_fns[0]];
+    let f = &hir.fns[hir.root_fns()[0]];
     assert!(!f.is_extern);
     assert!(f.body.is_some());
+}
+
+#[test]
+fn bodyless_fn_at_module_scope_emits_e0209() {
+    let (_, errors) = lower_src("fn f();");
+    assert_eq!(errors.len(), 1);
+    let HirError::BodylessFnOutsideExtern { name, .. } = &errors[0] else {
+        panic!("expected BodylessFnOutsideExtern, got {:?}", errors[0]);
+    };
+    assert_eq!(name, "f");
+}
+
+#[test]
+fn extern_fn_with_body_emits_e0210() {
+    let (_, errors) = lower_src(r#"extern "C" { fn f() { 0 } }"#);
+    assert_eq!(errors.len(), 1);
+    let HirError::ExternFnHasBody { name, .. } = &errors[0] else {
+        panic!("expected ExternFnHasBody, got {:?}", errors[0]);
+    };
+    assert_eq!(name, "f");
+}
+
+#[test]
+fn non_fn_inside_extern_emits_e0211() {
+    let (_, errors) = lower_src(r#"extern "C" { struct S { x: i32 } }"#);
+    assert_eq!(errors.len(), 1);
+    let HirError::UnsupportedExternItem { kind, .. } = &errors[0] else {
+        panic!("expected UnsupportedExternItem, got {:?}", errors[0]);
+    };
+    assert_eq!(*kind, "struct");
 }
 
 #[test]
@@ -130,7 +160,7 @@ fn pointer_type_lowers_with_mutability() {
     use oxide::parser::ast::Mutability;
     let (hir, errs) = lower_src(r#"extern "C" { fn puts(s: *const u8) -> i32; }"#);
     assert!(errs.is_empty(), "{errs:#?}");
-    let f = &hir.fns[hir.root_fns[0]];
+    let f = &hir.fns[hir.root_fns()[0]];
     let param = &hir.locals[f.params[0]];
     let HirTyKind::Ptr { mutability, pointee } = &param.ty.as_ref().unwrap().kind else {
         panic!("expected Ptr type");
@@ -144,7 +174,7 @@ fn nested_pointer_type_preserves_each_layer() {
     use oxide::parser::ast::Mutability;
     let (hir, errs) = lower_src(r#"extern "C" { fn f(s: *const *mut u8); }"#);
     assert!(errs.is_empty(), "{errs:#?}");
-    let f = &hir.fns[hir.root_fns[0]];
+    let f = &hir.fns[hir.root_fns()[0]];
     let param = &hir.locals[f.params[0]];
     let HirTyKind::Ptr { mutability, pointee } = &param.ty.as_ref().unwrap().kind else {
         panic!("expected Ptr at outer layer");
@@ -163,7 +193,7 @@ fn string_literal_lowers_through() {
     // appended only at codegen time (spec/07_POINTER.md, point 4).
     let (hir, errs) = lower_src(r#"fn f() { let s = "hello"; }"#);
     assert!(errs.is_empty(), "{errs:#?}");
-    let f = &hir.fns[hir.root_fns[0]];
+    let f = &hir.fns[hir.root_fns()[0]];
     let body = &hir.blocks[f.body.unwrap()];
     let let_item = &body.items[0];
     assert!(let_item.has_semi, "let always carries `;`");
@@ -202,7 +232,7 @@ fn while_lowers_to_loop_with_while_source() {
     // `init`/`update` empty, `has_break: false`.
     let (hir, errs) = lower_src("fn f(mut x: i32) { while x > 0 { x = x - 1; } }");
     assert!(errs.is_empty(), "{errs:#?}");
-    let body = &hir.blocks[hir.fns[hir.root_fns[0]].body.unwrap()];
+    let body = &hir.blocks[hir.fns[hir.root_fns()[0]].body.unwrap()];
     let HirExprKind::Loop {
         init,
         cond,
@@ -241,7 +271,7 @@ fn nested_loop_inner_break_targets_inner_only() {
     // loop's frame. The outer loop has `has_break: false`.
     let (hir, errs) = lower_src("fn f() { loop { loop { break; } } }");
     assert!(errs.is_empty(), "{errs:#?}");
-    let body = &hir.blocks[hir.fns[hir.root_fns[0]].body.unwrap()];
+    let body = &hir.blocks[hir.fns[hir.root_fns()[0]].body.unwrap()];
     let HirExprKind::Loop {
         body: outer_body,
         has_break: outer_has_break,
@@ -266,7 +296,7 @@ fn nested_loop_inner_break_targets_inner_only() {
 fn loop_with_break_value_records_has_break() {
     let (hir, errs) = lower_src("fn f() -> i32 { loop { break 5; } }");
     assert!(errs.is_empty(), "{errs:#?}");
-    let body = &hir.blocks[hir.fns[hir.root_fns[0]].body.unwrap()];
+    let body = &hir.blocks[hir.fns[hir.root_fns()[0]].body.unwrap()];
     let HirExprKind::Loop {
         cond,
         has_break,

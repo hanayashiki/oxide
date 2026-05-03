@@ -1,10 +1,11 @@
-HirModule
-  Fn[0] f(mut x[Local(0)]: i32)
-    Block
-      tail:
-        Loop source:While has_break:false
-          cond: Binary(Gt, Local(0, "x", place), Int(0))
-          body:
-            Block
-              ExprStmt Assign(Eq, Local(0, "x", place), Binary(Sub, Local(0, "x", place), Int(1)))
-              ExprStmt Continue()
+HirProgram
+  Module while_with_continue_lowers.ox (root)
+    Fn[0] f(mut x[Local(0)]: i32)
+      Block
+        tail:
+          Loop source:While has_break:false
+            cond: Binary(Gt, Local(0, "x", place), Int(0))
+            body:
+              Block
+                ExprStmt Assign(Eq, Local(0, "x", place), Binary(Sub, Local(0, "x", place), Int(1)))
+                ExprStmt Continue()

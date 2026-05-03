@@ -1,4 +1,5 @@
-HirModule
-  Fn[0] f(c[Local(0)]: bool) -> i32
-    Block
-      tail: Binary(Add, Int(1), If(Local(0, "c", place), { Int(2) }, { Int(3) }))
+HirProgram
+  Module inline_if_under_binary_renders_contents.ox (root)
+    Fn[0] f(c[Local(0)]: bool) -> i32
+      Block
+        tail: Binary(Add, Int(1), If(Local(0, "c", place), { Int(2) }, { Int(3) }))

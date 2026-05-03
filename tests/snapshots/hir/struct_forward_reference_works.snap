@@ -1,7 +1,8 @@
-HirModule
-  Struct[0] Point
-    x: i32
-    y: i32
-  Fn[0] make() -> Adt(0)
-    Block
-      tail: StructLit(0, "Point", x: Int(0), y: Int(0))
+HirProgram
+  Module struct_forward_reference_works.ox (root)
+    Struct[0] Point
+      x: i32
+      y: i32
+    Fn[0] make() -> Adt(0)
+      Block
+        tail: StructLit(0, "Point", x: Int(0), y: Int(0))

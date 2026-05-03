@@ -1,10 +1,11 @@
-HirModule
-  Struct[0] Point
-    x: i32
-    y: i32
-  Fn[0] f()
-    Block
-      ExprStmt Assign(Eq, StructLit(0, "Point", x: Int(0), y: Int(0)), StructLit(0, "Point", x: Int(1), y: Int(2)))
+HirProgram
+  Module assign_to_struct_lit_invalid.ox (root)
+    Struct[0] Point
+      x: i32
+      y: i32
+    Fn[0] f()
+      Block
+        ExprStmt Assign(Eq, StructLit(0, "Point", x: Int(0), y: Int(0)), StructLit(0, "Point", x: Int(1), y: Int(2)))
 == diagnostics ==
 [E0207] Error: left-hand side of assignment is not a place expression
    ╭─[ assign_to_struct_lit_invalid.ox:4:5 ]

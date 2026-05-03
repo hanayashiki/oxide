@@ -1,7 +1,8 @@
-HirModule
-  Struct[0] Point
-    x: i32
-    y: i32
-  Fn[0] f(p[Local(0)]: Adt(0))
-    Block
-      ExprStmt Field(Local(0, "p", place), "x", place)
+HirProgram
+  Module is_place_field_of_local.ox (root)
+    Struct[0] Point
+      x: i32
+      y: i32
+    Fn[0] f(p[Local(0)]: Adt(0))
+      Block
+        ExprStmt Field(Local(0, "p", place), "x", place)

@@ -1,0 +1,9 @@
+HirProgram
+  Module main.ox (root)
+    Fn[0] area(p[Local(0)]: Adt(0)) -> i32
+      Block
+        tail: Field(Local(0, "p", place), "x", place)
+  Module shapes.ox
+    Struct[0] Point
+      x: i32
+      y: i32

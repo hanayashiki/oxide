@@ -1,6 +1,7 @@
-HirModule
-  Struct[0] Foo
-    x: i32
+HirProgram
+  Module struct_duplicate_field_errors.ox (root)
+    Struct[0] Foo
+      x: i32
 == diagnostics ==
 [E0205] Error: field `x` is declared multiple times in `Foo`
    ╭─[ struct_duplicate_field_errors.ox:1:22 ]

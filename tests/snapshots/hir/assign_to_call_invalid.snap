@@ -1,10 +1,11 @@
-HirModule
-  Fn[0] make() -> i32
-    Block
-      tail: Int(0)
-  Fn[1] f()
-    Block
-      ExprStmt Assign(Eq, Call(Fn(0, "make")), Int(1))
+HirProgram
+  Module assign_to_call_invalid.ox (root)
+    Fn[0] make() -> i32
+      Block
+        tail: Int(0)
+    Fn[1] f()
+      Block
+        ExprStmt Assign(Eq, Call(Fn(0, "make")), Int(1))
 == diagnostics ==
 [E0207] Error: left-hand side of assignment is not a place expression
    ╭─[ assign_to_call_invalid.ox:4:5 ]

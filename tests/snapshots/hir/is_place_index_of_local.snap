@@ -1,4 +1,5 @@
-HirModule
-  Fn[0] f(a[Local(0)]: i32)
-    Block
-      ExprStmt Index(Local(0, "a", place), Int(0), place)
+HirProgram
+  Module is_place_index_of_local.ox (root)
+    Fn[0] f(a[Local(0)]: i32)
+      Block
+        ExprStmt Index(Local(0, "a", place), Int(0), place)

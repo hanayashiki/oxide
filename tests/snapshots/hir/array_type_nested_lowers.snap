@@ -1,3 +1,4 @@
-HirModule
-  Fn[0] matrix(m[Local(0)]: [[i32; 2]; 3])
-    Block
+HirProgram
+  Module array_type_nested_lowers.ox (root)
+    Fn[0] matrix(m[Local(0)]: [[i32; 2]; 3])
+      Block

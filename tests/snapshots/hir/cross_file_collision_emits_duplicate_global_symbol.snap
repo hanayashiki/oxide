@@ -1,0 +1,70 @@
+HirProgram
+  Module main.ox (root)
+    Fn[0] main() -> i32
+      Block
+        tail: Int(0)
+  Module a.ox
+    Struct[0] Shared
+      x: i32
+    Fn[1] helper() -> i32
+      Block
+        tail: Int(1)
+  Module b.ox
+    Struct[1] Shared
+      y: i32
+    Fn[2] helper() -> i32
+      Block
+        tail: Int(2)
+== diagnostics ==
+[E0202] Error: the function `helper` is defined multiple times
+   ╭─[ b.ox:1:1 ]
+   │
+ 1 │ fn helper() -> i32 { 2 }
+   │ ────────────┬───────────  
+   │             ╰───────────── duplicate definition
+   │
+   ├─[ a.ox:1:1 ]
+   │
+ 1 │ fn helper() -> i32 { 1 }
+   │ ────────────┬───────────  
+   │             ╰───────────── first defined here
+───╯
+[E0204] Error: the type `Shared` is defined multiple times
+   ╭─[ b.ox:2:1 ]
+   │
+ 2 │ struct Shared { y: i32 }
+   │ ────────────┬───────────  
+   │             ╰───────────── duplicate definition
+   │
+   ├─[ a.ox:2:1 ]
+   │
+ 2 │ struct Shared { x: i32 }
+   │ ────────────┬───────────  
+   │             ╰───────────── first defined here
+───╯
+[E0272] Error: the symbol `helper` is defined more than once across imported files
+   ╭─[ b.ox:1:1 ]
+   │
+ 1 │ fn helper() -> i32 { 2 }
+   │ ────────────┬───────────  
+   │             ╰───────────── duplicate definition
+   │
+   ├─[ a.ox:1:1 ]
+   │
+ 1 │ fn helper() -> i32 { 1 }
+   │ ────────────┬───────────  
+   │             ╰───────────── first defined here
+───╯
+[E0272] Error: the symbol `Shared` is defined more than once across imported files
+   ╭─[ b.ox:2:1 ]
+   │
+ 2 │ struct Shared { y: i32 }
+   │ ────────────┬───────────  
+   │             ╰───────────── duplicate definition
+   │
+   ├─[ a.ox:2:1 ]
+   │
+ 2 │ struct Shared { x: i32 }
+   │ ────────────┬───────────  
+   │             ╰───────────── first defined here
+───╯

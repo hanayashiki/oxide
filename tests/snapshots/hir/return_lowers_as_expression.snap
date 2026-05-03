@@ -1,5 +1,6 @@
-HirModule
-  Fn[0] f() -> i32
-    Block
-      Let(0, "b", :i32, Return(Int(1)))
-      tail: Local(0, "b", place)
+HirProgram
+  Module return_lowers_as_expression.ox (root)
+    Fn[0] f() -> i32
+      Block
+        Let(0, "b", :i32, Return(Int(1)))
+        tail: Local(0, "b", place)

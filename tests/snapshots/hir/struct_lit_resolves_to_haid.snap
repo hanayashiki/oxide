@@ -1,7 +1,8 @@
-HirModule
-  Struct[0] Point
-    x: i32
-    y: i32
-  Fn[0] make(a[Local(0)]: i32, b[Local(1)]: i32) -> Adt(0)
-    Block
-      tail: StructLit(0, "Point", x: Local(0, "a", place), y: Local(1, "b", place))
+HirProgram
+  Module struct_lit_resolves_to_haid.ox (root)
+    Struct[0] Point
+      x: i32
+      y: i32
+    Fn[0] make(a[Local(0)]: i32, b[Local(1)]: i32) -> Adt(0)
+      Block
+        tail: StructLit(0, "Point", x: Local(0, "a", place), y: Local(1, "b", place))

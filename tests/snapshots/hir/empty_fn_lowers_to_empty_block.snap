@@ -1,3 +1,4 @@
-HirModule
-  Fn[0] f()
-    Block
+HirProgram
+  Module empty_fn_lowers_to_empty_block.ox (root)
+    Fn[0] f()
+      Block

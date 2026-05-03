@@ -1,8 +1,9 @@
-HirModule
-  Fn[0] f() -> i32
-    Block
-      tail:
-        Loop source:Loop has_break:true
-          body:
-            Block
-              ExprStmt Break(Int(5))
+HirProgram
+  Module loop_break_with_value_lowers.ox (root)
+    Fn[0] f() -> i32
+      Block
+        tail:
+          Loop source:Loop has_break:true
+            body:
+              Block
+                ExprStmt Break(Int(5))

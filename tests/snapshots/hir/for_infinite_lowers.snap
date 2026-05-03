@@ -1,7 +1,8 @@
-HirModule
-  Fn[0] f()
-    Block
-      tail:
-        Loop source:For has_break:false
-          body:
-            Block
+HirProgram
+  Module for_infinite_lowers.ox (root)
+    Fn[0] f()
+      Block
+        tail:
+          Loop source:For has_break:false
+            body:
+              Block

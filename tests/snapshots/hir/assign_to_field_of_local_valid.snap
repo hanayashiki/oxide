@@ -1,7 +1,8 @@
-HirModule
-  Struct[0] Point
-    x: i32
-    y: i32
-  Fn[0] f(p[Local(0)]: Adt(0))
-    Block
-      ExprStmt Assign(Eq, Field(Local(0, "p", place), "x", place), Int(1))
+HirProgram
+  Module assign_to_field_of_local_valid.ox (root)
+    Struct[0] Point
+      x: i32
+      y: i32
+    Fn[0] f(p[Local(0)]: Adt(0))
+      Block
+        ExprStmt Assign(Eq, Field(Local(0, "p", place), "x", place), Int(1))

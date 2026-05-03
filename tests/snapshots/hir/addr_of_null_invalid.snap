@@ -1,7 +1,8 @@
-HirModule
-  Fn[0] f()
-    Block
-      ExprStmt AddrOf(const, Null())
+HirProgram
+  Module addr_of_null_invalid.ox (root)
+    Fn[0] f()
+      Block
+        ExprStmt AddrOf(const, Null())
 == diagnostics ==
 [E0208] Error: cannot take the address of a non-place expression
    ╭─[ addr_of_null_invalid.ox:1:11 ]

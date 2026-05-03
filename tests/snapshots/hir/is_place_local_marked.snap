@@ -1,4 +1,5 @@
-HirModule
-  Fn[0] f(x[Local(0)]: i32)
-    Block
-      ExprStmt Local(0, "x", place)
+HirProgram
+  Module is_place_local_marked.ox (root)
+    Fn[0] f(x[Local(0)]: i32)
+      Block
+        ExprStmt Local(0, "x", place)

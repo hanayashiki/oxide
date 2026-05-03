@@ -1,4 +1,5 @@
-HirModule
-  Struct[0] Point
-    x: i32
-    y: i32
+HirProgram
+  Module struct_decl_resolves_fields.ox (root)
+    Struct[0] Point
+      x: i32
+      y: i32

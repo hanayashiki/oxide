@@ -1,0 +1,17 @@
+HirProgram
+  Module main.ox (root)
+    Fn[0] main() -> i32
+      Block
+        tail: Int(0)
+  Module a.ox
+    Fn[1] from_a() -> i32
+      Block
+        tail: Call(Fn(3, "helper"))
+  Module b.ox
+    Fn[2] from_b() -> i32
+      Block
+        tail: Call(Fn(3, "helper"))
+  Module util.ox
+    Fn[3] helper() -> i32
+      Block
+        tail: Int(42)

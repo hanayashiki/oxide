@@ -1,2 +1,3 @@
-HirModule
-  ExternFn[0] use_buf(p[Local(0)]: *const [i32])
+HirProgram
+  Module array_type_unsized_lowers.ox (root)
+    ExternFn[0] use_buf(p[Local(0)]: *const [i32])

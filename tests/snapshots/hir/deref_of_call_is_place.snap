@@ -1,5 +1,6 @@
-HirModule
-  ExternFn[0] make_ptr() -> *mut i32
-  Fn[1] f()
-    Block
-      ExprStmt Assign(Eq, Unary(Deref, Call(Fn(0, "make_ptr")), place), Int(1))
+HirProgram
+  Module deref_of_call_is_place.ox (root)
+    ExternFn[0] make_ptr() -> *mut i32
+    Fn[1] f()
+      Block
+        ExprStmt Assign(Eq, Unary(Deref, Call(Fn(0, "make_ptr")), place), Int(1))

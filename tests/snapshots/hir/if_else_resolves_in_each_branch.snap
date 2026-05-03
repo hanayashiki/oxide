@@ -1,11 +1,12 @@
-HirModule
-  Fn[0] f(c[Local(0)]: bool, a[Local(1)]: i32, b[Local(2)]: i32) -> i32
-    Block
-      tail:
-        If Local(0, "c", place)
-          then:
-            Block
-              tail: Local(1, "a", place)
-          else:
-            Block
-              tail: Local(2, "b", place)
+HirProgram
+  Module if_else_resolves_in_each_branch.ox (root)
+    Fn[0] f(c[Local(0)]: bool, a[Local(1)]: i32, b[Local(2)]: i32) -> i32
+      Block
+        tail:
+          If Local(0, "c", place)
+            then:
+              Block
+                tail: Local(1, "a", place)
+            else:
+              Block
+                tail: Local(2, "b", place)

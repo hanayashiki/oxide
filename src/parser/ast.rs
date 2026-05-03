@@ -31,11 +31,15 @@ pub struct Item {
 
 #[derive(Clone, Debug)]
 pub enum ItemKind {
-    /// Defined function. Body is required by the grammar at item position
-    /// (`body` is always `Some` here in well-formed AST).
+    /// Function declaration. `body` shape varies by surrounding context:
+    /// at module scope `body` must be `Some(_)`; inside an `extern "C"`
+    /// block `body` must be `None`. The parser accepts both shapes
+    /// uniformly; HIR lowering enforces context-dependent rules
+    /// (`BodylessFnOutsideExtern` / `ExternFnHasBody`).
     Fn(FnDecl),
-    /// `extern "C" { ... }` — group of foreign function declarations.
-    /// Each child `FnDecl` has `body: None` (no block in the grammar).
+    /// `extern "C" { ... }` — group of foreign declarations. Children
+    /// are `ItemId`s into the enclosing `Module.items` arena, so each
+    /// child is addressable like any top-level item.
     ExternBlock(ExternBlock),
     /// `struct Name { f: T, ... }` — record struct declaration.
     Struct(StructDecl),
@@ -44,6 +48,19 @@ pub enum ItemKind {
     /// loader and `lower_program` land; until then HIR lowering skips
     /// it. See spec/14_MODULES.md.
     Import(ImportItem),
+}
+
+impl ItemKind {
+    /// Short human label for diagnostics ("fn" / "struct" / "import" /
+    /// "extern block").
+    pub fn label(&self) -> &'static str {
+        match self {
+            ItemKind::Fn(_) => "fn",
+            ItemKind::ExternBlock(_) => "extern block",
+            ItemKind::Struct(_) => "struct",
+            ItemKind::Import(_) => "import",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -82,7 +99,7 @@ pub struct FnDecl {
 pub struct ExternBlock {
     /// ABI string, e.g. `"C"`. Only `"C"` is accepted at parse time in v0.
     pub abi: String,
-    pub items: Vec<FnDecl>,
+    pub items: Vec<ItemId>,
     pub span: Span,
 }
 

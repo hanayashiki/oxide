@@ -53,12 +53,12 @@ fn main() -> ExitCode {
     if !hir_errors.is_empty() {
         let mut out = stderr.lock();
         for err in &hir_errors {
-            let diag = from_hir_error(err, file);
+            let diag = from_hir_error(err);
             emit(&diag, &map, &mut out, color).expect("write to stderr failed");
         }
         return ExitCode::from(1);
     }
 
-    print!("{}", pretty_print(&hir));
+    print!("{}", pretty_print(&hir, &map));
     ExitCode::SUCCESS
 }

@@ -1,3 +1,4 @@
-HirModule
-  Struct[0] Node
-    next: *const Adt(0)
+HirProgram
+  Module struct_recursive_via_ptr_works.ox (root)
+    Struct[0] Node
+      next: *const Adt(0)

@@ -1,7 +1,8 @@
-HirModule
-  Fn[0] f()
-    Block
-      ExprStmt Break()
+HirProgram
+  Module break_outside_loop_errors.ox (root)
+    Fn[0] f()
+      Block
+        ExprStmt Break()
 == diagnostics ==
 [E0263] Error: `break` outside of a loop
    ╭─[ break_outside_loop_errors.ox:1:10 ]

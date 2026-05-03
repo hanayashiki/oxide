@@ -1,7 +1,8 @@
-HirModule
-  Fn[0] f()
-    Block
-      Let(0, "x", Int(1))
+HirProgram
+  Module block_scoping_shadows_then_restores.ox (root)
+    Fn[0] f()
       Block
-        Let(1, "x", Int(2))
-      ExprStmt Local(0, "x", place)
+        Let(0, "x", Int(1))
+        Block
+          Let(1, "x", Int(2))
+        ExprStmt Local(0, "x", place)

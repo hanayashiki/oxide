@@ -1,6 +1,10 @@
 use std::fmt::Write;
 
+use index_vec::IndexVec;
+
 use super::ast::*;
+use crate::loader::LoadedFile;
+use crate::reporter::{FileId, SourceMap};
 
 /// Tree-shaped renderer of a `Module`. Walks the arenas from `root_items`,
 /// dereferencing IDs inline so the output reads like a syntax tree rather
@@ -14,6 +18,44 @@ pub fn pretty_print(module: &Module) -> String {
         p.print_item(iid);
         p.indent -= 1;
     }
+    out
+}
+
+/// Multi-file variant: prints every loaded file under a
+/// `Module <path>` header (looked up via `source_map`). The `root` file
+/// is emitted first; remaining files follow in `FileId` order. Mirrors
+/// the input shape of `lower_program`.
+pub fn pretty_print_program(
+    files: &IndexVec<FileId, LoadedFile>,
+    source_map: &SourceMap,
+    root: FileId,
+) -> String {
+    let mut out = String::new();
+
+    let mut order: Vec<FileId> = vec![root];
+    for (fid, _) in files.iter_enumerated() {
+        if fid != root {
+            order.push(fid);
+        }
+    }
+
+    for fid in order {
+        let module = &files[fid].ast;
+        let path = source_map.get(fid).path.display();
+        let header = if fid == root {
+            format!("Module {} (root)", path)
+        } else {
+            format!("Module {}", path)
+        };
+        let mut p = Printer { out: &mut out, m: module, indent: 0 };
+        p.write_line(&header);
+        for &iid in &module.root_items {
+            p.indent += 1;
+            p.print_item(iid);
+            p.indent -= 1;
+        }
+    }
+
     out
 }
 
@@ -54,8 +96,8 @@ impl<'a> Printer<'a> {
                 write!(self.out, "{:?}", b.abi).unwrap();
                 self.end_line();
                 self.indent += 1;
-                for f in &b.items {
-                    self.print_fn(f);
+                for &child_iid in &b.items {
+                    self.print_item(child_iid);
                 }
                 self.indent -= 1;
             }

@@ -1,5 +1,6 @@
-HirModule
-  Fn[0] f()
-    Block
-      Let(0, "x", :i32, Int(1))
-      Let(1, "x", Local(0, "x", place))
+HirProgram
+  Module let_x_eq_x_does_not_see_new_binding.ox (root)
+    Fn[0] f()
+      Block
+        Let(0, "x", :i32, Int(1))
+        Let(1, "x", Local(0, "x", place))

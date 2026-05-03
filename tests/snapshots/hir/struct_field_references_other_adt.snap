@@ -1,5 +1,6 @@
-HirModule
-  Struct[0] A
-    b: Adt(1)
-  Struct[1] B
-    x: i32
+HirProgram
+  Module struct_field_references_other_adt.ox (root)
+    Struct[0] A
+      b: Adt(1)
+    Struct[1] B
+      x: i32

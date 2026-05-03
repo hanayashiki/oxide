@@ -1,0 +1,9 @@
+HirProgram
+  Module main.ox (root)
+    Fn[0] main() -> i32
+      Block
+        tail: Call(Fn(1, "add_one"), Int(41))
+  Module util.ox
+    Fn[1] add_one(x[Local(0)]: i32) -> i32
+      Block
+        tail: Binary(Add, Local(0, "x", place), Int(1))

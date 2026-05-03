@@ -1,3 +1,4 @@
-HirModule
-  ExternFn[0] use_buf(p[Local(0)]: *const [i32])
-  ExternFn[1] use_buf_mut(p[Local(1)]: *mut [i32])
+HirProgram
+  Module pointer_to_unsized_array_ok.ox (root)
+    ExternFn[0] use_buf(p[Local(0)]: *const [i32])
+    ExternFn[1] use_buf_mut(p[Local(1)]: *mut [i32])

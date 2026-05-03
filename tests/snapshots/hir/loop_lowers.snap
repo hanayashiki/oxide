@@ -1,7 +1,8 @@
-HirModule
-  Fn[0] f()
-    Block
-      tail:
-        Loop source:Loop has_break:false
-          body:
-            Block
+HirProgram
+  Module loop_lowers.ox (root)
+    Fn[0] f()
+      Block
+        tail:
+          Loop source:Loop has_break:false
+            body:
+              Block

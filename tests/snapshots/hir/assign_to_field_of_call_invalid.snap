@@ -1,13 +1,14 @@
-HirModule
-  Struct[0] Point
-    x: i32
-    y: i32
-  Fn[0] make() -> Adt(0)
-    Block
-      tail: Call(Fn(0, "make"))
-  Fn[1] f()
-    Block
-      ExprStmt Assign(Eq, Field(Call(Fn(0, "make")), "x"), Int(1))
+HirProgram
+  Module assign_to_field_of_call_invalid.ox (root)
+    Struct[0] Point
+      x: i32
+      y: i32
+    Fn[0] make() -> Adt(0)
+      Block
+        tail: Call(Fn(0, "make"))
+    Fn[1] f()
+      Block
+        ExprStmt Assign(Eq, Field(Call(Fn(0, "make")), "x"), Int(1))
 == diagnostics ==
 [E0207] Error: left-hand side of assignment is not a place expression
    ╭─[ assign_to_field_of_call_invalid.ox:6:5 ]

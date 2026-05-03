@@ -1,4 +1,5 @@
-HirModule
-  Fn[0] f()
-    Block
-      Let(0, "p", Null())
+HirProgram
+  Module null_lit_lowers.ox (root)
+    Fn[0] f()
+      Block
+        Let(0, "p", Null())

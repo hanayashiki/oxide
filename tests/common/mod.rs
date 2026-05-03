@@ -16,24 +16,31 @@
 
 #![allow(dead_code)]
 
+pub mod multi_file;
+
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use index_vec::IndexVec;
 use inkwell::OptimizationLevel;
 use inkwell::context::Context;
 use inkwell::execution_engine::JitFunction;
 
 use oxide::codegen::codegen;
-use oxide::hir::lower;
+use oxide::hir::{lower, lower_program};
 use oxide::hir::pretty::pretty_print as hir_pretty_print;
 use oxide::lexer::lex;
-use oxide::parser::parse;
+use oxide::loader::{BuilderHost, LoadedFile};
 use oxide::parser::pretty::pretty_print as parser_pretty_print;
+use oxide::parser::{ItemKind, parse};
 use oxide::reporter::{
     Diagnostic, FileId, SourceMap, emit, from_hir_error, from_parse_error, from_typeck_error,
 };
 use oxide::typeck::check;
+
+use self::multi_file::{build_vfs, split_fixture};
 
 fn render_diagnostics(diags: &[Diagnostic], map: &SourceMap) -> String {
     let mut buf: Vec<u8> = Vec::new();
@@ -168,21 +175,70 @@ pub fn render_parser(file_name: &str, src: &str) -> String {
 }
 
 pub fn render_hir(file_name: &str, src: &str) -> String {
-    let (map, file) = make_map(file_name, src);
-    let tokens = lex(src, file);
-    let (module, parse_errs) = parse(&tokens, file);
-    assert!(
-        parse_errs.is_empty(),
-        "parse errors in {file_name}: {parse_errs:#?}"
-    );
-    let (hir, errors) = lower(&module);
-    let mut out = hir_pretty_print(&hir);
+    let (map, hir, errors) = lower_fixture(file_name, src);
+    let mut out = hir_pretty_print(&hir, &map);
     if !errors.is_empty() {
-        let diags: Vec<_> = errors.iter().map(|e| from_hir_error(e, file)).collect();
+        let diags: Vec<_> = errors.iter().map(from_hir_error).collect();
         out.push_str("== diagnostics ==\n");
         out.push_str(&render_diagnostics(&diags, &map));
     }
     out
+}
+
+/// Drive lex/parse/lower for a fixture that may contain multiple
+/// `/// path` segments. Single-segment fixtures (no headers) lower
+/// through the same code path as a one-element file list. The first
+/// segment is treated as the program root.
+fn lower_fixture(
+    file_name: &str,
+    src: &str,
+) -> (
+    SourceMap,
+    oxide::hir::HirProgram,
+    Vec<oxide::hir::HirError>,
+) {
+    let segments = split_fixture(src, Path::new(file_name)).expect("split fixture");
+    let host = build_vfs(segments.clone());
+
+    let mut map = SourceMap::new();
+    let mut path_to_file: HashMap<PathBuf, FileId> = HashMap::new();
+    let mut files: Vec<LoadedFile> = Vec::with_capacity(segments.len());
+    for (path, source) in &segments {
+        let file = map.add(path.clone(), source.clone());
+        path_to_file.insert(path.clone(), file);
+        let tokens = lex(source, file);
+        let (ast, parse_errs) = parse(&tokens, file);
+        assert!(
+            parse_errs.is_empty(),
+            "parse errors in {}: {parse_errs:#?}",
+            path.display()
+        );
+        files.push(LoadedFile {
+            file,
+            path: path.clone(),
+            ast,
+            direct_imports: Vec::new(),
+        });
+    }
+
+    // Resolve each file's `import` items against the in-memory VFS so
+    // `lower_program` sees the same import edges the real loader would.
+    for lf in files.iter_mut() {
+        for &iid in &lf.ast.root_items {
+            if let ItemKind::Import(imp) = &lf.ast.items[iid].kind {
+                if let Ok(canon) = host.resolve(&lf.path, &imp.path) {
+                    if let Some(&fid) = path_to_file.get(&canon) {
+                        lf.direct_imports.push(fid);
+                    }
+                }
+            }
+        }
+    }
+
+    let root = files[0].file;
+    let files: IndexVec<FileId, LoadedFile> = files.into();
+    let (program, errors) = lower_program(files, root);
+    (map, program, errors)
 }
 
 /// JIT-compile `src` end-to-end (lex → parse → HIR → typeck → codegen)

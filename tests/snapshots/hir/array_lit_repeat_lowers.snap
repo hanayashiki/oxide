@@ -1,4 +1,5 @@
-HirModule
-  Fn[0] buf()
-    Block
-      Let(0, "b", ArrayRepeat(Int(0), 5))
+HirProgram
+  Module array_lit_repeat_lowers.ox (root)
+    Fn[0] buf()
+      Block
+        Let(0, "b", ArrayRepeat(Int(0), 5))

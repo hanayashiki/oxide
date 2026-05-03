@@ -1,29 +1,58 @@
 use std::fmt::Write;
 
 use super::ir::*;
+use crate::reporter::{FileId, SourceMap};
 
-/// Tree-shaped renderer of a `HirModule`. Walks from `root_adts` then
-/// `root_fns`, resolving IDs inline. Local references show their
-/// `LocalId`, Fn references show their `FnId`, ADT references show
-/// their `HAdtId`, so the user can confirm name resolution at a glance.
+/// Tree-shaped renderer of a `HirProgram`. Walks every loaded module —
+/// root file first, then the rest in `FileId` order — and prints each
+/// under a `Module <path>` header so the reader can tell which file
+/// each item came from. File names are looked up via `source_map`.
+///
+/// Within each module, `root_adts` then `root_fns` are walked,
+/// resolving IDs inline. Local references show their `LocalId`, Fn
+/// references show their `FnId`, ADT references show their `HAdtId`,
+/// so the user can confirm name resolution at a glance.
 ///
 /// Inline expression rendering uses a uniform `Name(arg1, arg2, …, place?)`
 /// form. The optional `place` arg appears as the last positional argument
 /// when `HirExpr::is_place == true`. Block-as-expression is the one
 /// exception: it renders as `{ item1; item2; tail }` (no `Name` prefix)
 /// since braces already disambiguate and blocks are never places.
-pub fn pretty_print(module: &HirModule) -> String {
+pub fn pretty_print(program: &HirProgram, source_map: &SourceMap) -> String {
     let mut out = String::new();
-    let mut p = Printer { out: &mut out, m: module, indent: 0 };
-    p.write_line("HirModule");
-    for &haid in &module.root_adts {
-        p.indent += 1;
-        p.print_adt(haid);
-        p.indent -= 1;
+    let mut p = Printer { out: &mut out, m: program, indent: 0 };
+    p.write_line("HirProgram");
+
+    // Root first so the reader sees the entry-point file at the top;
+    // remaining modules follow in FileId order.
+    let root = program.root;
+    let mut order: Vec<FileId> = vec![root];
+    for (fid, _) in program.modules.iter_enumerated() {
+        if fid != root {
+            order.push(fid);
+        }
     }
-    for &fid in &module.root_fns {
+
+    for fid in order {
+        let module = &program.modules[fid];
+        let path = source_map.get(fid).path.display();
+        let header = if fid == root {
+            format!("Module {} (root)", path)
+        } else {
+            format!("Module {}", path)
+        };
         p.indent += 1;
-        p.print_fn(fid);
+        p.write_line(&header);
+        for &haid in &module.root_adts {
+            p.indent += 1;
+            p.print_adt(haid);
+            p.indent -= 1;
+        }
+        for &fid in &module.root_fns {
+            p.indent += 1;
+            p.print_fn(fid);
+            p.indent -= 1;
+        }
         p.indent -= 1;
     }
     out
@@ -31,7 +60,7 @@ pub fn pretty_print(module: &HirModule) -> String {
 
 struct Printer<'a> {
     out: &'a mut String,
-    m: &'a HirModule,
+    m: &'a HirProgram,
     indent: usize,
 }
 

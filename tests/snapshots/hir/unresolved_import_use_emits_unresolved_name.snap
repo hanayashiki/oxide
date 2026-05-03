@@ -1,0 +1,17 @@
+HirProgram
+  Module main.ox (root)
+    Fn[0] main() -> i32
+      Block
+        tail: Call(Unresolved("add_one", place), Int(41))
+  Module util.ox
+    Fn[1] add_one(x[Local(0)]: i32) -> i32
+      Block
+        tail: Binary(Add, Local(0, "x", place), Int(1))
+== diagnostics ==
+[E0201] Error: cannot find `add_one` in scope
+   ╭─[ main.ox:1:20 ]
+   │
+ 1 │ fn main() -> i32 { add_one(41) }
+   │                    ───┬───  
+   │                       ╰───── not found
+───╯

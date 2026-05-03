@@ -28,7 +28,7 @@ use index_vec::IndexVec;
 
 use crate::hir::{
     FnId, HBlockId, HElseArm, HExprId, HirArrayLit, HirConst, HirExpr, HirExprKind, HirLocal,
-    HirModule, HirStructLitField, HirTy, HirTyKind, LocalId, VariantIdx,
+    HirProgram, HirStructLitField, HirTy, HirTyKind, LocalId, VariantIdx,
 };
 use crate::parser::ast::{AssignOp, BinOp, Mutability, UnOp};
 use crate::reporter::Span;
@@ -149,7 +149,7 @@ impl TypeckResults {
     }
 }
 
-pub fn check(hir: &HirModule) -> (TypeckResults, Vec<TypeError>) {
+pub fn check(hir: &HirProgram) -> (TypeckResults, Vec<TypeError>) {
     let mut cx = Checker::new(hir);
     decl::resolve_decls(&mut cx);
     for (fid, _) in hir.fns.iter_enumerated() {
@@ -166,7 +166,7 @@ pub fn check(hir: &HirModule) -> (TypeckResults, Vec<TypeError>) {
 }
 
 struct Checker<'hir> {
-    hir: &'hir HirModule,
+    hir: &'hir HirProgram,
     tys: TyArena,
     adts: IndexVec<AdtId, AdtDef>,
     fn_sigs: IndexVec<FnId, FnSig>,
@@ -248,7 +248,7 @@ impl Inferer {
 }
 
 impl<'hir> Checker<'hir> {
-    fn new(hir: &'hir HirModule) -> Self {
+    fn new(hir: &'hir HirProgram) -> Self {
         let tys = TyArena::new();
         let placeholder = tys.error;
         let local_tys: IndexVec<LocalId, TyId> =

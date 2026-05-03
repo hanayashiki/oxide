@@ -1,7 +1,8 @@
-HirModule
-  Fn[0] f()
-    Block
-      ExprStmt Continue()
+HirProgram
+  Module continue_outside_loop_errors.ox (root)
+    Fn[0] f()
+      Block
+        ExprStmt Continue()
 == diagnostics ==
 [E0264] Error: `continue` outside of a loop
    ╭─[ continue_outside_loop_errors.ox:1:10 ]

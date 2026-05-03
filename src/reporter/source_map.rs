@@ -3,7 +3,21 @@ use std::path::PathBuf;
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Default)]
 pub struct FileId(pub u32);
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+// Hand-rolled `index_vec::Idx` impl so `IndexVec<FileId, _>` works.
+// FileId stays a `pub u32` newtype (kept hand-rolled for ergonomic
+// construction at fixed indices, e.g. `FileId(0)` in tests) — the
+// `define_index_type!` macro form would force `from_raw`/`raw`
+// access patterns we don't need elsewhere.
+impl index_vec::Idx for FileId {
+    fn from_usize(value: usize) -> Self {
+        FileId(value as u32)
+    }
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
 pub struct BytePos {
     pub offset: usize,
 }
@@ -14,7 +28,7 @@ impl BytePos {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
 pub struct LspPos {
     pub line: u32,
     pub character: u32,
@@ -26,7 +40,7 @@ impl LspPos {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Default)]
 pub struct Span {
     pub file: FileId,
     pub start: BytePos,

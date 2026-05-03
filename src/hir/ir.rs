@@ -4,8 +4,8 @@
 
 use index_vec::IndexVec;
 
-use crate::reporter::Span;
 use crate::parser::ast::{AssignOp, BinOp, Mutability, UnOp};
+use crate::reporter::{FileId, Span};
 
 index_vec::define_index_type! { pub struct FnId        = u32; }
 index_vec::define_index_type! { pub struct LocalId     = u32; }
@@ -15,14 +15,54 @@ index_vec::define_index_type! { pub struct HAdtId      = u32; }
 index_vec::define_index_type! { pub struct VariantIdx  = u32; }
 index_vec::define_index_type! { pub struct FieldIdx    = u32; }
 
+/// Top-level HIR. Owns globally-unique arenas — every `FnId` /
+/// `HAdtId` / `LocalId` / `HExprId` / `HBlockId` is unique program-
+/// wide. Per-file structure lives in `modules`; each `HirModule`
+/// records which IDs belong to that file but doesn't store the items
+/// itself. See spec/14_MODULES.md.
 #[derive(Clone, Debug)]
-pub struct HirModule {
+pub struct HirProgram {
     pub fns: IndexVec<FnId, HirFn>,
     pub adts: IndexVec<HAdtId, HirAdt>,
     pub locals: IndexVec<LocalId, HirLocal>,
     pub exprs: IndexVec<HExprId, HirExpr>,
     pub blocks: IndexVec<HBlockId, HirBlock>,
+
+    /// One `HirModule` per loaded file, indexed by `FileId`.
+    pub modules: IndexVec<FileId, HirModule>,
+    /// The root file the driver was invoked on.
+    pub root: FileId,
+}
+
+impl HirProgram {
+    /// Convenience: top-level fns of the root module, the iteration
+    /// order callers historically used. Same shape as the old
+    /// `HirModule.root_fns`.
+    pub fn root_fns(&self) -> &[FnId] {
+        &self.modules[self.root].root_fns
+    }
+
+    /// Convenience: top-level ADTs of the root module.
+    pub fn root_adts(&self) -> &[HAdtId] {
+        &self.modules[self.root].root_adts
+    }
+}
+
+/// Per-file HIR metadata. Records which globally-allocated IDs belong
+/// to this file; the items themselves live in the `HirProgram`'s
+/// arenas.
+#[derive(Clone, Debug)]
+pub struct HirModule {
+    pub file: FileId,
+    /// Every `FnId` whose definition lives in this file (including
+    /// extern-block children). Useful for per-file walks.
+    pub fns: Vec<FnId>,
+    /// Every `HAdtId` declared in this file.
+    pub adts: Vec<HAdtId>,
+    /// Top-level fns in source order. Today this equals `fns`; the
+    /// distinction is reserved for nested item shapes.
     pub root_fns: Vec<FnId>,
+    /// Top-level ADTs in source order.
     pub root_adts: Vec<HAdtId>,
     pub span: Span,
 }
@@ -30,16 +70,18 @@ pub struct HirModule {
 /// Algebraic data type definition. v0 is record-struct only; the
 /// variants-list shape is the rustc-style umbrella so enums and unions
 /// fit by adding variants/AdtKind without reshaping.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct HirAdt {
     pub name: String,
     pub kind: AdtKind,
     pub variants: IndexVec<VariantIdx, HirVariant>,
+    /// Source span — origin file is `span.file`.
     pub span: Span,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum AdtKind {
+    #[default]
     Struct,
     // Enum, Union — future
 }
@@ -59,7 +101,7 @@ pub struct HirField {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct HirFn {
     pub name: String,
     pub params: Vec<LocalId>,
@@ -74,6 +116,7 @@ pub struct HirFn {
     /// `true` if this fn was declared inside an `extern "C"` block —
     /// linker resolves the symbol against an external object file.
     pub is_extern: bool,
+    /// Source span — origin file is `span.file`.
     pub span: Span,
 }
 
@@ -320,60 +363,10 @@ pub enum HirTyKind {
     Error,
 }
 
-#[derive(Clone, Debug)]
-pub enum HirError {
-    /// Value-namespace lookup failed.
-    UnresolvedName { name: String, span: Span },
-    /// Two `fn`s in one module share a name.
-    DuplicateFn {
-        name: String,
-        first: Span,
-        dup: Span,
-    },
-    /// `'\xHH'` whose value exceeds `u8::MAX`, or a multibyte char literal.
-    CharOutOfRange { ch: char, span: Span },
-    /// Two ADTs (struct/enum/union) in one module share a name.
-    DuplicateAdt {
-        name: String,
-        first: Span,
-        dup: Span,
-    },
-    /// Two fields in one ADT share a name.
-    DuplicateField {
-        adt: String,
-        name: String,
-        first: Span,
-        dup: Span,
-    },
-    /// Type-namespace lookup failed in a struct-literal position.
-    UnresolvedAdt { name: String, span: Span },
-    /// Left-hand side of `=` (or compound assign) is not a place
-    /// expression. See spec/08_ADT.md "Place expressions and `is_place`".
-    InvalidAssignTarget { span: Span },
-    /// Operand of `&` / `&mut` is not a place expression. See
-    /// spec/10_ADDRESS_OF.md "Place rule". Span points at the operand.
-    AddrOfNonPlace { span: Span },
-    /// `break` outside any enclosing loop. Span points at the `break`
-    /// keyword's expression. See spec/13_LOOPS.md.
-    BreakOutsideLoop { span: Span },
-    /// `continue` outside any enclosing loop. Span points at the
-    /// `continue` keyword's expression. See spec/13_LOOPS.md.
-    ContinueOutsideLoop { span: Span },
-}
-
-impl HirError {
-    pub fn span(&self) -> &Span {
-        match self {
-            Self::UnresolvedName { span, .. }
-            | Self::CharOutOfRange { span, .. }
-            | Self::UnresolvedAdt { span, .. }
-            | Self::InvalidAssignTarget { span }
-            | Self::AddrOfNonPlace { span }
-            | Self::BreakOutsideLoop { span }
-            | Self::ContinueOutsideLoop { span } => span,
-            Self::DuplicateFn { dup, .. }
-            | Self::DuplicateAdt { dup, .. }
-            | Self::DuplicateField { dup, .. } => dup,
-        }
-    }
+/// Which name namespace a collision happened in. See
+/// spec/14_MODULES.md "Name resolution — two namespaces".
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Namespace {
+    Types,
+    Values,
 }

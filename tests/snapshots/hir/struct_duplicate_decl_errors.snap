@@ -1,8 +1,9 @@
-HirModule
-  Struct[0] Foo
-    x: i32
-  Struct[1] Foo
-    y: i32
+HirProgram
+  Module struct_duplicate_decl_errors.ox (root)
+    Struct[0] Foo
+      x: i32
+    Struct[1] Foo
+      y: i32
 == diagnostics ==
 [E0204] Error: the type `Foo` is defined multiple times
    ╭─[ struct_duplicate_decl_errors.ox:2:1 ]

@@ -1,4 +1,5 @@
-HirModule
-  Fn[0] f(p[Local(0)]: *const i32)
-    Block
-      Let(1, "v", Unary(Deref, Local(0, "p", place), place))
+HirProgram
+  Module deref_in_let_init_lowers.ox (root)
+    Fn[0] f(p[Local(0)]: *const i32)
+      Block
+        Let(1, "v", Unary(Deref, Local(0, "p", place), place))

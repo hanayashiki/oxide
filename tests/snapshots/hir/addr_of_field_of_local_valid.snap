@@ -1,9 +1,10 @@
-HirModule
-  Struct[0] Point
-    x: i32
-    y: i32
-  Fn[0] f()
-    Block
-      Let(0, "p", mut, StructLit(0, "Point", x: Int(1), y: Int(2)))
-      ExprStmt AddrOf(const, Field(Local(0, "p", place), "x", place))
-      ExprStmt AddrOf(mut, Field(Local(0, "p", place), "y", place))
+HirProgram
+  Module addr_of_field_of_local_valid.ox (root)
+    Struct[0] Point
+      x: i32
+      y: i32
+    Fn[0] f()
+      Block
+        Let(0, "p", mut, StructLit(0, "Point", x: Int(1), y: Int(2)))
+        ExprStmt AddrOf(const, Field(Local(0, "p", place), "x", place))
+        ExprStmt AddrOf(mut, Field(Local(0, "p", place), "y", place))

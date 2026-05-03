@@ -1,5 +1,6 @@
-HirModule
-  Fn[0] f(p[Local(0)]: *mut i32)
-    Block
-      ExprStmt AddrOf(const, Unary(Deref, Local(0, "p", place), place))
-      ExprStmt AddrOf(mut, Unary(Deref, Local(0, "p", place), place))
+HirProgram
+  Module addr_of_deref_no_error.ox (root)
+    Fn[0] f(p[Local(0)]: *mut i32)
+      Block
+        ExprStmt AddrOf(const, Unary(Deref, Local(0, "p", place), place))
+        ExprStmt AddrOf(mut, Unary(Deref, Local(0, "p", place), place))

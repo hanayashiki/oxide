@@ -62,16 +62,6 @@ fn non_c_abi_is_a_parse_error() {
 }
 
 #[test]
-fn bodyless_fn_outside_extern_block_is_a_parse_error() {
-    let tokens = lex("fn f();", FID);
-    let (_, errors) = parse(&tokens, FID);
-    assert!(
-        !errors.is_empty(),
-        "bodyless fn outside extern block must not parse"
-    );
-}
-
-#[test]
 fn pointer_without_mutability_is_parse_error() {
     let tokens = lex("fn f(s: *u8) {}", FID);
     let (_, errors) = parse(&tokens, FID);

@@ -1,4 +1,5 @@
-HirModule
-  Fn[0] f() -> i32
-    Block
-      tail: Int(0)
+HirProgram
+  Module return_type_is_passed_through_as_named.ox (root)
+    Fn[0] f() -> i32
+      Block
+        tail: Int(0)

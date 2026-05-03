@@ -1,10 +1,11 @@
-HirModule
-  Struct[0] Point
-    x: i32
-    y: i32
-  Fn[0] make() -> Adt(0)
-    Block
-      tail: Call(Fn(0, "make"))
-  Fn[1] f()
-    Block
-      ExprStmt Field(Call(Fn(0, "make")), "x")
+HirProgram
+  Module is_place_field_of_call_not_place.ox (root)
+    Struct[0] Point
+      x: i32
+      y: i32
+    Fn[0] make() -> Adt(0)
+      Block
+        tail: Call(Fn(0, "make"))
+    Fn[1] f()
+      Block
+        ExprStmt Field(Call(Fn(0, "make")), "x")

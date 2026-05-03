@@ -1,4 +1,5 @@
-HirModule
-  Fn[0] f(x[Local(0)]: i32)
-    Block
-      ExprStmt Assign(Eq, Local(0, "x", place), Int(1))
+HirProgram
+  Module assign_to_local_valid.ox (root)
+    Fn[0] f(x[Local(0)]: i32)
+      Block
+        ExprStmt Assign(Eq, Local(0, "x", place), Int(1))

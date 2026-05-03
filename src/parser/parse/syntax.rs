@@ -755,9 +755,9 @@ where
 }
 
 /// Parse a fn signature plus either `{ block }` or `;`. The grammar is
-/// the same in both top-level and `extern "C"`-block positions; each call
-/// site validates the body's presence/absence and emits a clear error if
-/// the wrong shape was used.
+/// the same in both top-level and `extern "C"`-block positions; HIR
+/// lowering validates the body's presence/absence against the surrounding
+/// item context (`BodylessFnOutsideExtern` / `ExternFnHasBody`).
 fn fn_decl_parser<'a, I>() -> impl Parser<'a, I, FnDecl, Extra<'a>> + Clone
 where
     I: OValueInput<'a>,
@@ -785,27 +785,18 @@ where
     I: OValueInput<'a>,
 {
     fn_decl_parser()
-        .validate(|fn_decl, e: &mut OMapExtra<'_, '_, I>, emitter| {
-            if fn_decl.body.is_none() {
-                emitter.emit(Rich::custom(
-                    e.span(),
-                    format!(
-                        "bodyless `fn {}` must be inside an `extern \"C\" {{ ... }}` block",
-                        fn_decl.name.name
-                    ),
-                ));
-            }
-            fn_decl
-        })
         .map_with(|fn_decl, e| e.push_item(ItemKind::Fn(fn_decl)))
         .labelled("function")
 }
 
-/// `extern "C" { fn name(args) -> ret; ... }`. Only `"C"` is a valid
-/// ABI string in v0. Each child fn is validated to be bodyless.
-fn extern_block_parser<'a, I>() -> impl Parser<'a, I, ItemId, Extra<'a>> + Clone
+/// `extern "C" { items... }`. Only `"C"` is a valid ABI string in v0.
+/// Children are arbitrary items pushed via `item` (so the same combinator
+/// chain is reused at top level and inside a block); HIR lowering decides
+/// which item shapes are legal here and validates fn body presence.
+fn extern_block_parser<'a, I, P>(item: P) -> impl Parser<'a, I, ItemId, Extra<'a>> + Clone
 where
     I: OValueInput<'a>,
+    P: Parser<'a, I, ItemId, Extra<'a>> + Clone + 'a,
 {
     let abi = any().try_map(|tok: TokenKind, span: SimpleSpan| match tok {
         TokenKind::Str(s) if s == "C" => Ok(s),
@@ -819,20 +810,7 @@ where
         )),
     });
 
-    let items = fn_decl_parser()
-        .validate(|mut fn_decl, e: &mut OMapExtra<'_, '_, I>, emitter| {
-            if fn_decl.body.is_some() {
-                emitter.emit(Rich::custom(
-                    e.span(),
-                    format!(
-                        "extern \"C\" fn `{}` must not have a body",
-                        fn_decl.name.name
-                    ),
-                ));
-                fn_decl.body = None;
-            }
-            fn_decl
-        })
+    let items = item
         .repeated()
         .collect::<Vec<_>>()
         .delimited_by(just(TokenKind::LBrace), just(TokenKind::RBrace));
@@ -906,15 +884,29 @@ where
         .labelled("struct declaration")
 }
 
+/// Reusable item-position combinator. `recursive` is required because
+/// `extern_block_parser` parses items as children, producing
+/// `item → extern_block → item` mutual recursion.
+fn item_parser<'a, I>() -> impl Parser<'a, I, ItemId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+{
+    recursive(|item| {
+        choice((
+            import_item_parser(),
+            extern_block_parser(item.clone()),
+            struct_item_parser(),
+            fn_item_parser(),
+        ))
+    })
+}
+
 pub(super) fn module_parser<'a, I>() -> impl Parser<'a, I, Vec<ItemId>, Extra<'a>>
 where
     I: OValueInput<'a>,
 {
-    let item = choice((
-        import_item_parser(),
-        extern_block_parser(),
-        struct_item_parser(),
-        fn_item_parser(),
-    ));
-    item.repeated().collect::<Vec<_>>().then_ignore(end())
+    item_parser()
+        .repeated()
+        .collect::<Vec<_>>()
+        .then_ignore(end())
 }

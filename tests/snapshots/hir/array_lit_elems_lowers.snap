@@ -1,4 +1,5 @@
-HirModule
-  Fn[0] make()
-    Block
-      Let(0, "a", ArrayLit(Int(1), Int(2), Int(3)))
+HirProgram
+  Module array_lit_elems_lowers.ox (root)
+    Fn[0] make()
+      Block
+        Let(0, "a", ArrayLit(Int(1), Int(2), Int(3)))

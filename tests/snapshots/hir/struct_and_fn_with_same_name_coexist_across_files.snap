@@ -1,0 +1,12 @@
+HirProgram
+  Module main.ox (root)
+    Fn[0] main() -> i32
+      Block
+        tail: Int(0)
+  Module shapes.ox
+    Struct[0] A
+      x: i32
+  Module ctors.ox
+    Fn[1] A() -> i32
+      Block
+        tail: Int(7)

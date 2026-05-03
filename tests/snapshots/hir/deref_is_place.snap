@@ -1,5 +1,6 @@
-HirModule
-  Fn[0] f(p[Local(0)]: *mut i32)
-    Block
-      ExprStmt Unary(Deref, Local(0, "p", place), place)
-      ExprStmt Assign(Eq, Unary(Deref, Local(0, "p", place), place), Int(1))
+HirProgram
+  Module deref_is_place.ox (root)
+    Fn[0] f(p[Local(0)]: *mut i32)
+      Block
+        ExprStmt Unary(Deref, Local(0, "p", place), place)
+        ExprStmt Assign(Eq, Unary(Deref, Local(0, "p", place), place), Int(1))

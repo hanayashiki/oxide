@@ -1,6 +1,7 @@
-HirModule
-  Fn[0] a()
-    Block
-      tail: Call(Fn(1, "b"))
-  Fn[1] b()
-    Block
+HirProgram
+  Module forward_fn_reference_resolves.ox (root)
+    Fn[0] a()
+      Block
+        tail: Call(Fn(1, "b"))
+    Fn[1] b()
+      Block
