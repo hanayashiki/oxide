@@ -349,6 +349,7 @@ impl<'hir> Checker<'hir> {
             | TypeError::WrongArgCount { .. }
             | TypeError::UnsupportedFeature { .. }
             | TypeError::CannotInfer { .. }
+            | TypeError::CyclicType { .. }
             | TypeError::StructLitUnknownField { .. }
             | TypeError::StructLitMissingField { .. }
             | TypeError::StructLitDuplicateField { .. }

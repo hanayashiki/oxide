@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # 1. Oxide source -> LLVM IR
-cargo run --quiet --example oxide-codegen-example -- -f hello.ox -o hello.ll
+cargo run --quiet --bin oxide -- hello.ox --emit ir -o hello.ll
 
 # 2. LLVM IR -> object file
 cc -c hello.ll -o target/hello.o

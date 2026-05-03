@@ -27,6 +27,12 @@ pub enum TypeError {
     UnsupportedFeature { feature: &'static str, span: Span },
     /// Couldn't infer a type — escaped finalization without resolution. E0256.
     CannotInfer { span: Span },
+    /// Inference would have to construct a self-referential type to make
+    /// the program type-check (e.g. `let mut p = null; p = &mut p` forces
+    /// `α := *mut α`). Caught by the occurs check at the Infer-binding
+    /// site; without it, downstream walks (`resolve_fully`, `discharge_*`,
+    /// renderer) would loop on the cyclic binding. E0271.
+    CyclicType { span: Span },
     /// Pointer mutability subtype rule violated. The shapes match
     /// (caught earlier by unify) but a mutability tag would be silently
     /// upgraded — `*const T → *mut T`, or any inner-position mismatch.
@@ -169,6 +175,7 @@ impl TypeError {
             | Self::WrongArgCount { span, .. }
             | Self::UnsupportedFeature { span, .. }
             | Self::CannotInfer { span }
+            | Self::CyclicType { span }
             | Self::PointerMutabilityMismatch { span, .. }
             | Self::StructLitUnknownField { span, .. }
             | Self::NoFieldOnAdt { span, .. }

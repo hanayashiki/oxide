@@ -338,7 +338,41 @@ fn bind_infer_checked(
             return;
         }
     }
+    if occurs_in(cx, inf, id, target) {
+        // Self-referential bind would create a cyclic type (e.g.
+        // `α := *mut α` from `let mut p = null; p = &mut p`). Allowing
+        // it would break the bindings-form-a-DAG invariant that
+        // `resolve_fully` and the discharge walks rely on.
+        inf.errors.push(TypeError::CyclicType { span });
+        inf.bind(id, cx.tys.error);
+        return;
+    }
     inf.bind(id, target);
+}
+
+/// Walk `ty` (resolving Infer chains as we go) checking whether
+/// `Infer(id)` appears anywhere inside. Private — used only by
+/// `bind_infer_checked` to guard the one site that mutates
+/// `inf.bindings`.
+///
+/// Termination: precondition is that `inf.bindings` currently forms a
+/// DAG. Every prior `bind_infer_checked` enforced this same invariant,
+/// so the resolved tree at this call is finite, and ordinary
+/// structural induction terminates.
+fn occurs_in(cx: &Checker, inf: &Inferer, id: InferId, ty: TyId) -> bool {
+    let resolved = cx.resolve(inf, ty);
+    match cx.tys.kind(resolved).clone() {
+        TyKind::Infer(other) => other == id,
+        TyKind::Ptr(pointee, _) => occurs_in(cx, inf, id, pointee),
+        TyKind::Array(elem, _) => occurs_in(cx, inf, id, elem),
+        TyKind::Fn(params, ret) => {
+            params.iter().any(|p| occurs_in(cx, inf, id, *p))
+                || occurs_in(cx, inf, id, ret)
+        }
+        // Adt is nominal-leaf (identity-only); Prim/Unit/Never/Error
+        // are leaves with no Infer inside.
+        _ => false,
+    }
 }
 
 // ===== Discharge API =====

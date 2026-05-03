@@ -1,5 +1,7 @@
-; ModuleID = 'oxide'
-source_filename = "oxide"
+; ModuleID = '03_if'
+source_filename = "03_if"
+target datalayout = "e-m:o-i64:64-i128:128-n32:64-S128"
+target triple = "arm64-apple-darwin25.2.0"
 
 define i32 @max(i32 %a, i32 %b) {
 allocas:

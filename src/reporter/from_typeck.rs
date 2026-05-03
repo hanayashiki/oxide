@@ -54,6 +54,17 @@ pub fn from_typeck_error(err: &TypeError, file: FileId, tys: &TyArena) -> Diagno
             .with_label(Label::primary(file, span.clone(), "ambiguous type"))
             .with_help("add a type annotation to disambiguate"),
 
+        TypeError::CyclicType { span } => Diagnostic::error("E0271", "cannot infer cyclic type")
+            .with_label(Label::primary(
+                file,
+                span.clone(),
+                "type would refer to itself",
+            ))
+            .with_help(
+                "the inferred type for this expression would have to contain itself \
+                 (e.g. `α := *mut α`); add a type annotation to break the cycle",
+            ),
+
         TypeError::PointerMutabilityMismatch {
             expected,
             actual,

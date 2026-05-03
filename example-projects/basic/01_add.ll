@@ -1,5 +1,7 @@
-; ModuleID = 'oxide'
-source_filename = "oxide"
+; ModuleID = '01_add'
+source_filename = "01_add"
+target datalayout = "e-m:o-i64:64-i128:128-n32:64-S128"
+target triple = "arm64-apple-darwin25.2.0"
 
 define i32 @add(i32 %a, i32 %b) {
 allocas:

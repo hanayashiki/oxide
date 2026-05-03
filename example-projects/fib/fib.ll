@@ -1,5 +1,7 @@
-; ModuleID = 'oxide'
-source_filename = "oxide"
+; ModuleID = 'fib'
+source_filename = "fib"
+target datalayout = "e-m:o-i64:64-i128:128-n32:64-S128"
+target triple = "arm64-apple-darwin25.2.0"
 
 declare i32 @print_int(i32)
 

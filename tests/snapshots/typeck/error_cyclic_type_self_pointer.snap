@@ -1,0 +1,19 @@
+== diagnostics ==
+[E0271] Error: cannot infer cyclic type
+   ╭─[ error_cyclic_type_self_pointer.ox:3:5 ]
+   │
+ 3 │     p = &mut p;
+   │     ─────┬────  
+   │          ╰────── type would refer to itself
+   │ 
+   │ Help: the inferred type for this expression would have to contain itself (e.g. `α := *mut α`); add a type annotation to break the cycle
+───╯
+== types ==
+Fn[0] main() -> i32
+  HExprId(0) : *mut {error}
+  HExprId(1) : ()
+  HExprId(2) : *mut {error}
+  HExprId(3) : *mut {error}
+  HExprId(4) : *mut *mut {error}
+  HExprId(5) : ()
+  HExprId(6) : i32
