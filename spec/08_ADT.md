@@ -869,21 +869,42 @@ and is threaded into every `lower_ty` / `lower_fn_type` call.
 
 Self-reference via `Ptr` resolves cleanly because pointers lower
 to opaque `ptr` (no recursion into the pointee). Direct
-self-reference (`struct A { x: A }`) would loop in phase B —
-**TBD-T2** must catch it before we reach codegen.
+self-reference (`struct A { x: A }`) is rejected by typeck before
+codegen — see "Recursive type rejection" below (E0273).
 
 `set_body(_, packed: false)` — natural alignment, padding inserted
 per LLVM's target data layout. Matches the C ABI on common targets;
 the day `repr(packed)` lands, the second arg toggles.
 
+## Recursive type rejection
+
+After phase 0.5 (when every `AdtDef` has its fields resolved to
+`TyId`s), `decl::check_recursive_adts` runs a tri-color DFS over
+the ADT field-type graph:
+
+- **White / Gray / Black** — unvisited / on the current DFS stack /
+  fully explored cycle-free.
+- An edge `A → B` exists for each field of `A` whose type, after
+  walking through any `Array(T, Some(_))` layers, lands on
+  `Adt(B)`. A `Ptr(_, _)` layer is the cycle-breaker: pointers
+  lower to opaque `ptr`, so we don't enter the pointee
+  structurally.
+- Hitting a **Gray** child during DFS is a back-edge — the cycle
+  closes there. Emit `RecursiveAdt { adt, span }` (E0273) with the
+  offending field's span and don't descend into that subtree.
+
+Result: `struct A { x: A }`, `struct A { b: B } / struct B { a: A }`,
+and `struct A { xs: [A; 3] }` are all rejected with E0273;
+`struct Node { next: *const Node }` (and any `Ptr`-mediated cycle)
+is accepted, since codegen lowers the pointer to opaque `ptr` and
+the recursion never bottoms out into infinite size.
+
+Complexity: `O(V + E)` over the ADT graph, V = `|adts|`, E = sum
+of "ADT-typed leaves" across all field types after walking through
+sized arrays.
+
 ## Remaining TBDs
 
-- **TBD-T2**: recursive type cycle detection (`struct A { x: A }`
-  rejected as infinite-size; `struct A { x: *const A }` accepted).
-  Independent of the phase machinery above — runs after phase 0.5
-  as a graph walk over field-type dependencies. Until this lands,
-  a directly-self-referential struct passes typeck and infinite-loops
-  in codegen's `prepare_adt_types` phase B.
 - **TBD-T6**: mutability and field assignment.
   Most of this is now resolved:
   - `place_mutability` walks `Local` and `Field` in

@@ -405,7 +405,8 @@ impl<'hir> Checker<'hir> {
             | TypeError::StructLitDuplicateField { .. }
             | TypeError::NoFieldOnAdt { .. }
             | TypeError::MutateImmutable { .. }
-            | TypeError::UnsizedArrayAsValue { .. } => {}
+            | TypeError::UnsizedArrayAsValue { .. }
+            | TypeError::RecursiveAdt { .. } => {}
         }
     }
 

@@ -23,15 +23,17 @@
 use index_vec::IndexVec;
 
 use crate::hir::HAdtId;
+use crate::reporter::Span;
 
 use super::super::error::{ParamOrReturn, SizedPos, TypeError};
-use super::super::ty::{AdtDef, AdtId, FieldDef, FnSig, TyKind, VariantDef};
+use super::super::ty::{AdtDef, AdtId, FieldDef, FnSig, TyId, TyKind, VariantDef};
 use super::Checker;
 use super::obligation::Obligation;
 
 pub(super) fn resolve_decls(cx: &mut Checker<'_>) {
     alloc_partial_adts(cx);
     resolve_adt_fields(cx);
+    check_recursive_adts(cx);
     resolve_fn_sigs(cx);
 }
 
@@ -96,6 +98,82 @@ fn resolve_adt_fields(cx: &mut Checker<'_>) {
 
         cx.adts[aid].variants = variants;
         cx.adts[aid].partial = false;
+    }
+}
+
+/// Phase 0.6 — reject ADTs whose field-type graph contains a cycle
+/// without a `Ptr` indirection layer. `Ptr(_, _)` lowers to opaque
+/// `ptr` and breaks the cycle (the pointee isn't entered
+/// structurally); `Array(T, Some(_))` propagates through `T`; every
+/// other `TyKind` is a leaf for this purpose.
+///
+/// Tri-color DFS over the ADT graph: white = unvisited,
+/// gray = currently on the DFS stack, black = fully explored. A gray
+/// child is a back-edge — the cycle closes there. Emit one
+/// `RecursiveAdt` per back-edge with the offending field's span. See
+/// spec/08_ADT.md "Recursive type rejection" and
+/// spec/BACKLOG/B013_RECURSIVE_ADT_ACCEPTED.md.
+fn check_recursive_adts(cx: &mut Checker<'_>) {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Color {
+        White,
+        Gray,
+        Black,
+    }
+
+    let mut color: IndexVec<AdtId, Color> =
+        IndexVec::from_vec(vec![Color::White; cx.adts.len()]);
+
+    for raw in 0..cx.adts.len() {
+        let aid = AdtId::from_raw(raw as u32);
+        if color[aid] == Color::White {
+            visit(cx, aid, &mut color);
+        }
+    }
+
+    fn visit(cx: &mut Checker<'_>, a: AdtId, color: &mut IndexVec<AdtId, Color>) {
+        color[a] = Color::Gray;
+        // Snapshot the outgoing edges before recursing — the call to
+        // `visit(cx, ...)` needs `&mut cx`, which conflicts with a
+        // live `&cx.adts` borrow held by an iterator.
+        let edges = collect_adt_edges(cx, a);
+        for (child, field_span) in edges {
+            match color[child] {
+                Color::Gray => {
+                    let name = cx.adts[a].name.clone();
+                    cx.errors.push(TypeError::RecursiveAdt {
+                        adt: name,
+                        span: field_span,
+                    });
+                }
+                Color::White => visit(cx, child, color),
+                Color::Black => {}
+            }
+        }
+        color[a] = Color::Black;
+    }
+
+    fn collect_adt_edges(cx: &Checker<'_>, a: AdtId) -> Vec<(AdtId, Span)> {
+        let mut out = Vec::new();
+        for variant in &cx.adts[a].variants {
+            for field in &variant.fields {
+                walk_ty(cx, field.ty, &field.span, &mut out);
+            }
+        }
+        out
+    }
+
+    fn walk_ty(cx: &Checker<'_>, ty: TyId, span: &Span, out: &mut Vec<(AdtId, Span)>) {
+        match cx.tys.kind(ty) {
+            TyKind::Adt(child) => out.push((*child, span.clone())),
+            TyKind::Array(elem, Some(_)) => walk_ty(cx, *elem, span, out),
+            // Ptr breaks the cycle; Prim / Unit / Never / Fn / Infer /
+            // Error don't contribute edges. Unsized arrays
+            // (Array(_, None)) at field position are rejected earlier
+            // by the Sized obligation (E0269), but treating them as
+            // non-edges here is harmless.
+            _ => {}
+        }
     }
 }
 

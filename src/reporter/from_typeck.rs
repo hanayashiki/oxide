@@ -284,5 +284,19 @@ pub fn from_typeck_error(err: &TypeError, file: FileId, tys: &TyArena) -> Diagno
             "variadic args must be an integer, pointer, or `bool` — wrap structs/arrays \
              in a `*const T` if you mean to pass by reference.",
         ),
+
+        TypeError::RecursiveAdt { adt, span } => Diagnostic::error(
+            "E0273",
+            format!("recursive type `{adt}` has infinite size"),
+        )
+        .with_label(Label::primary(
+            file,
+            span.clone(),
+            "recursive without indirection",
+        ))
+        .with_help(
+            "wrap the field in a pointer (`*const T` / `*mut T`) so the cycle \
+             goes through an indirection",
+        ),
     }
 }

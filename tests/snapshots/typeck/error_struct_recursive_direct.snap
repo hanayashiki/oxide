@@ -1,0 +1,13 @@
+== diagnostics ==
+[E0273] Error: recursive type `A` has infinite size
+   ╭─[ error_struct_recursive_direct.ox:1:12 ]
+   │
+ 1 │ struct A { x: A }
+   │            ──┬─  
+   │              ╰─── recursive without indirection
+   │ 
+   │ Help: wrap the field in a pointer (`*const T` / `*mut T`) so the cycle goes through an indirection
+───╯
+== types ==
+Fn[0] main() -> i32
+  HExprId(0) : i32

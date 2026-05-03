@@ -151,6 +151,15 @@ pub enum TypeError {
     /// `Infer(_)`. `Error` is silently absorbed. See
     /// spec/15_VARIADIC.md "check_variadic_promotable". E0272.
     VariadicArgUnsupported { found: TyId, span: Span },
+
+    /// ADT field types form a cycle without a `Ptr` indirection layer
+    /// (`struct A { x: A }`, mutual `A { b: B } / B { a: A }`, or via
+    /// sized arrays `struct A { xs: [A; 3] }`). Codegen would lower
+    /// such an ADT to an LLVM struct of infinite size. The fix is to
+    /// wrap the offending field in `*const T` / `*mut T`. Detected by
+    /// the post-phase-0.5 tri-color DFS in `decl::check_recursive_adts`.
+    /// See spec/08_ADT.md "Recursive type rejection". E0273.
+    RecursiveAdt { adt: String, span: Span },
 }
 
 /// Discriminator on `ArrayByValueAtExternC` so the diagnostic can
@@ -207,7 +216,8 @@ impl TypeError {
             | Self::IndexNotUsize { span, .. }
             | Self::ArrayLitElementMismatch { span, .. }
             | Self::DerefNonPointer { span, .. }
-            | Self::VariadicArgUnsupported { span, .. } => span,
+            | Self::VariadicArgUnsupported { span, .. }
+            | Self::RecursiveAdt { span, .. } => span,
             Self::StructLitMissingField { lit_span, .. } => lit_span,
             Self::StructLitDuplicateField { dup, .. } => dup,
         }
