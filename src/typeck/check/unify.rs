@@ -226,8 +226,12 @@ fn relate_with_ctx(
     match (kf, ke) {
         (TyKind::Error, _) | (_, TyKind::Error) => {}
         (TyKind::Never, TyKind::Never) => {}
-        (TyKind::Infer(id), other) => bind_infer_checked(cx, inf, id, expected, &other, span),
-        (other, TyKind::Infer(id)) => bind_infer_checked(cx, inf, id, found, &other, span),
+        (TyKind::Infer(id), other) => {
+            bind_infer_checked(cx, inf, id, expected, &other, expected, found, ctx, span)
+        }
+        (other, TyKind::Infer(id)) => {
+            bind_infer_checked(cx, inf, id, found, &other, expected, found, ctx, span)
+        }
         (TyKind::Prim(p), TyKind::Prim(q)) if p == q => {}
         (TyKind::Unit, TyKind::Unit) => {}
         (TyKind::Fn(params_f, ret_f, var_f), TyKind::Fn(params_e, ret_e, var_e)) => {
@@ -305,12 +309,25 @@ fn relate_with_ctx(
 /// being bound to non-integer concrete types. Private — only the
 /// `relate_with_ctx` body binds; callers cannot bypass the
 /// equate/subtype machinery to bind directly.
+///
+/// `expected` and `found` carry the original (post-resolve) sides so
+/// that the int-flagged mismatch error labels them correctly regardless
+/// of which arm of `relate_with_ctx` made the call: the int-flagged
+/// `Infer(id)` may sit on either side, and the diagnostic's
+/// `expected`/`found` must reflect the user's directional intent (e.g.
+/// inside `subtype(value, target)`).
+#[allow(clippy::too_many_arguments)]
 fn bind_infer_checked(
     cx: &mut Checker,
     inf: &mut Inferer,
     id: InferId,
     target: TyId,
     target_kind: &TyKind,
+
+    expected: TyId,
+    found: TyId,
+    
+    ctx: UnifyContext,
     span: Span,
 ) {
     let int_flagged = inf.int_default[id];
@@ -321,19 +338,16 @@ fn bind_infer_checked(
             _ => false,
         };
         if !allowed {
-            let infer_ty = cx.tys.intern(TyKind::Infer(id));
-            inf.errors.push(TypeError::TypeMismatch {
-                expected: target,
-                found: infer_ty,
-                span,
-            });
+            inf.errors
+                .push(build_mismatch(ctx.mismatch, expected, found, span));
             // Bind to i32 (the int-flagged var's natural default)
             // rather than `error`. The mismatch is already pushed;
             // binding to the default lets the captured
-            // `found: Infer(id)` resolve to `i32` for the renderer
-            // and lets sibling expressions typed by this infer var
-            // surface as `i32` in the types table — which matches
-            // what the user wrote.
+            // `Infer(id)` (still in `expected`/`found` of the pushed
+            // error) resolve to `i32` for the renderer, and lets
+            // sibling expressions typed by this infer var surface as
+            // `i32` in the types table — which matches what the user
+            // wrote.
             inf.bind(id, cx.tys.i32);
             return;
         }
@@ -346,6 +360,19 @@ fn bind_infer_checked(
         inf.errors.push(TypeError::CyclicType { span });
         inf.bind(id, cx.tys.error);
         return;
+    }
+    // Propagate defaulting flags across an Infer-to-Infer bind so the
+    // surviving (still-unbound) var keeps the original literal-default
+    // intent at finalize. Without this, `let n = 1;` flags the literal's
+    // var int_default but binds it to the unflagged local var, and the
+    // local falls through to `error` at finalize.
+    if let TyKind::Infer(target_id) = *target_kind {
+        if inf.int_default[id] {
+            inf.int_default[target_id] = true;
+        }
+        if inf.unit_default[id] {
+            inf.unit_default[target_id] = true;
+        }
     }
     inf.bind(id, target);
 }

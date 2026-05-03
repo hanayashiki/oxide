@@ -1,17 +1,15 @@
 == diagnostics ==
 [E0250] Error: type mismatch: expected `i32`, found `bool`
-   ╭─[ error_loop_break_values_disagree.ox:1:15 ]
+   ╭─[ error_loop_break_values_disagree.ox:2:27 ]
    │
- 1 │ ╭─▶ fn f() -> i32 {
-   ┆ ┆   
- 3 │ ├─▶ }
-   │ │       
-   │ ╰─────── type mismatch here
+ 2 │     loop { break 5; break true; }
+   │                           ──┬─  
+   │                             ╰─── type mismatch here
 ───╯
 == types ==
 Fn[0] f() -> i32
-  HExprId(0) : bool
+  HExprId(0) : i32
   HExprId(1) : !
   HExprId(2) : bool
   HExprId(3) : !
-  HExprId(4) : bool
+  HExprId(4) : i32
