@@ -66,7 +66,7 @@ Integer literals default to `i32`. Widen or narrow with `as`.
 `bool`.  No `f32` / `f64` yet. The unit type is `()` and is
 written by omitting the return type on a function.
 
-> Use `u8` instead of `char`.
+> Use `u8` instead of `char`
 
 ### Strings and pointers
 
@@ -141,6 +141,32 @@ p.x = 5;        // requires `let mut p`
 
 Mutability is per-binding, not per-field. To mutate a single field,
 the whole struct binding must be `mut`.
+
+### Pointer usage
+
+As in C, you can dereference a pointer on either side of an assignment:
+
+```rust
+let mut n = 1;
+let ptr_to_n = &mut n;           // *mut i32
+
+*ptr_to_n = 42;                  // writes through the pointer; n is now 42
+let m = *ptr_to_n;               // loads through the pointer; m is 42
+```
+
+`&` produces `*const T` (read-only); `&mut` produces `*mut T` (write-through).
+
+Field access on a struct pointer automatically dereferences, so there's
+no need for the explicit `(*ptr).field` form (and Oxide has no `->`
+operator):
+
+```rust
+let mut p = Point { x: 1, y: 2 };
+let ptr_to_p = &mut p;
+
+ptr_to_p.x = 5;                  // auto-deref
+(*ptr_to_p).x = 5;               // explicit form, equivalent
+```
 
 ### `extern "C"` and variadics
 
