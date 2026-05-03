@@ -127,7 +127,6 @@ struct Binding {
     /// — zero runtime cost (`[(); 0]` is zero bytes; length is 0).
     /// Intentional v0 deviation from Rust's E0282; see spec/09_ARRAY.md.
     unit_default: bool,
-    #[allow(dead_code)] // consumed by `finalize`'s CannotInfer fallback (next commit)
     creation_span: Span,
 }
 
@@ -238,24 +237,44 @@ impl<'hir> Checker<'hir> {
     fn finalize(&mut self, mut inf: Inferer) {
         // Default unconstrained vars per their flagged-default precedence:
         // int_default → i32 (most numeric literals); unit_default → ()
-        // (empty `[]` elem, see spec/09_ARRAY.md); else → error (silent
-        // — implicit "{error}" propagation; cascading mismatches were
-        // already reported).
+        // (empty `[]` elem, see spec/09_ARRAY.md); else → an explicit
+        // `CannotInfer` diagnostic at the var's creation site plus
+        // `error` for the type table.
+        //
+        // Silently defaulting to `error` here (the original behavior)
+        // swallowed real failures: an unconstrained `null` literal or
+        // a value-less `loop { break; }` produces an unbound non-
+        // flagged var with no prior cascade, and the user would see
+        // `{error}` types with no diagnostic. Now we emit one.
+        //
+        // Dedup against already-pushed diagnostics by span — when an
+        // outer unify failed (e.g. `let x: i32 = null;` mismatches
+        // `i32` against `*mut α` before recursing into α), the user
+        // already got an actionable error at that site, and a
+        // `CannotInfer` for α at the same span would be redundant
+        // noise that contradicts the help text the user just read.
         let i32_id = self.tys.i32;
         let unit_id = self.tys.unit;
         let error_id = self.tys.error;
+        let prior_error_spans: std::collections::HashSet<Span> =
+            inf.errors.iter().map(|e| e.span().clone()).collect();
 
-        inf.bindings.iter_mut().for_each(|b| {
+        for b in inf.bindings.iter_mut() {
             if b.ty.is_none() {
                 b.ty = Some(if b.int_default {
                     i32_id
                 } else if b.unit_default {
                     unit_id
                 } else {
+                    if !prior_error_spans.contains(&b.creation_span) {
+                        inf.errors.push(TypeError::CannotInfer {
+                            span: b.creation_span.clone(),
+                        });
+                    }
                     error_id
                 });
             }
-        });
+        }
 
         // Resolve any Infer-typed entries in this fn's contributions.
         // `iter_mut_enumerated` is unavailable here — the closure would

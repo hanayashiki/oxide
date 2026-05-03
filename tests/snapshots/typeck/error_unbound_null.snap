@@ -1,0 +1,16 @@
+== diagnostics ==
+[E0256] Error: could not infer a type
+   ╭─[ error_unbound_null.ox:2:13 ]
+   │
+ 2 │     let p = null;
+   │             ──┬─  
+   │               ╰─── ambiguous type
+   │ 
+   │ Help: add a type annotation to disambiguate
+───╯
+== types ==
+Fn[0] f() -> ()
+  HExprId(0) : *mut {error}
+  HExprId(1) : ()
+  HExprId(2) : *mut {error}
+  HExprId(3) : ()
