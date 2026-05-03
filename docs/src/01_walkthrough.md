@@ -63,8 +63,10 @@ Integer literals default to `i32`. Widen or narrow with `as`.
 ### Primitives
 
 `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `isize`, `usize`,
-`bool`, `char`. No `f32` / `f64` yet. The unit type is `()` and is
+`bool`.  No `f32` / `f64` yet. The unit type is `()` and is
 written by omitting the return type on a function.
+
+> Use `u8` instead of `char`.
 
 ### Strings and pointers
 

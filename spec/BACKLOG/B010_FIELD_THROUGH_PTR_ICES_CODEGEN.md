@@ -91,3 +91,70 @@ Recommend **B** — matches the precedent already used for
   dance for indexing. Same shape.
 - B009 (`as` cast unvalidated) — adjacent example of typeck and
   codegen disagreeing on what types reach the lowering layer.
+
+## Update 2026-05-04 — extended symptoms from docs walkthrough audit
+
+`docs/src/01_walkthrough.md:155-163` claimed `(*ptr_to_p).x = 5;` was
+the same as `ptr_to_p.x = 5;` (auto-deref). That's the design intent
+typeck encodes via `auto_deref_ptr`, but the bug surfaces in two
+different ways depending on how the pointer is bound:
+
+### Variant 1 — concrete pointer type → codegen ICE (covered by original report)
+
+```rust
+struct Point { x: i32, y: i32 }
+
+// Form A: fn parameter
+fn read(q: *mut Point) -> i32 { q.x }            // ICE @ lower.rs:738
+
+// Form B: let-binding with explicit type annotation
+fn main() -> i32 {
+    let mut p = Point { x: 1, y: 2 };
+    let ptr: *mut Point = &mut p;                // explicit Ptr
+    ptr.x = 5;                                   // ICE @ lower.rs:690
+    ptr.x                                        // ICE @ lower.rs:738
+}
+```
+
+Both forms panic in codegen with `Field {base lvalue,rvalue}: non-Adt
+base type Ptr(...)`.
+
+### Variant 2 — inferred pointer type → typeck E0256 (new finding)
+
+```rust
+fn main() -> i32 {
+    let mut p = Point { x: 1, y: 2 };
+    let ptr = &mut p;            // inferred — type is an unresolved Infer var
+    ptr.x = 5;                   // E0256 "could not infer a type" + E0263
+    ptr.x                        // E0256
+}
+```
+
+Adding `: *mut Point` on the `let` rescues us into Variant 1 (codegen
+ICE). Without the annotation, `&mut <place>` produces a type that
+`auto_deref_ptr` apparently doesn't peel — the field-base type stays
+ambiguous and typeck bails with E0256 before HIR reaches codegen. So
+the bug *also* manifests as a confusing typeck error, not just a
+codegen panic.
+
+This means a fix for the codegen side is **necessary but not sufficient**
+— the typeck inference for `let ptr = &mut p; ptr.x` also needs to
+resolve `&mut p` to `*mut Point` before `auto_deref_ptr` can do its
+job. Probably a small change in how addr-of's result type interacts
+with the inferer when the pointee is a struct.
+
+### Doc fallout
+
+`docs/src/01_walkthrough.md:155-163` was rewritten 2026-05-04 to say
+auto-deref is **not** supported and to require explicit `(*ptr).x`
+syntax. Once B010 is fixed, the docs paragraph reverts to the
+original "auto-deref works" form. Mark this issue as gating the doc
+revert.
+
+### Severity bump
+
+**Critical for UX** — combines a misleading typeck diagnostic
+("ambiguous type" when the user wrote a perfectly natural
+`ptr.x = 5`) with a codegen ICE on the slightly-more-explicit form.
+The two failure modes look unrelated to a user, multiplying the
+debugging cost.
