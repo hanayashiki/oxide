@@ -1,5 +1,14 @@
 # B010 — Field access through pointer base ICEs codegen (auto-deref mismatch)
 
+## Status
+
+**Resolved.** Codegen ICE fixed by mirroring `emit_index_place`'s
+peel-loop into `lvalue(Field)` and `emit_field`'s Place path
+(`src/codegen/lower.rs`). Variant 2 (inferred pointer type → typeck
+E0256) fixed by having `auto_deref_ptr` resolve through Infer-binding
+chains as it peels, so `&mut p` on a known place no longer requires an
+explicit `*mut Point` annotation to typecheck (`src/typeck/check.rs`).
+
 ## Original report
 
 Surfaced by the soundness audit on 2026-05-03.

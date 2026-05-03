@@ -543,14 +543,22 @@ impl<'hir> Checker<'hir> {
     /// codegen gap) is a HIR-rewrite pass inserting explicit `Deref`
     /// nodes, after which this helper retires; not in scope here.
     /// See spec/09_ARRAY.md.
-    fn auto_deref_ptr(&self, ty: TyId) -> (TyId, Option<Mutability>) {
-        let mut cur = ty;
+    fn auto_deref_ptr(&self, inf: &Inferer, ty: TyId) -> (TyId, Option<Mutability>) {
+        // Resolve through Infer-binding chains as we peel. Without the
+        // resolves, `let ptr = &mut p; ptr.x` (no annotation) emits a
+        // spurious E0256: `&mut p` is built as `Ptr(Infer(γ), Mut)`
+        // where γ is `p`'s own infer var (already bound to `Adt(Point)`),
+        // and the outer Ptr peel returns `Infer(γ)` — `infer_field`'s
+        // `TyKind::Infer(_)` arm fires even though γ is bound. With
+        // resolves, the loop chases γ → Adt(Point) and the Adt arm
+        // takes over.
+        let mut cur = self.resolve(inf, ty);
         let mut innermost_mut: Option<Mutability> = None;
         loop {
             match self.tys.kind(cur) {
                 TyKind::Ptr(pointee, m) => {
                     innermost_mut = Some(*m);
-                    cur = *pointee;
+                    cur = self.resolve(inf, *pointee);
                 }
                 _ => return (cur, innermost_mut),
             }
@@ -707,14 +715,13 @@ impl<'hir> Checker<'hir> {
                     MismatchCtx::IndexNotUsize,
                 );
 
-                let base_resolved = self.resolve(inf, base_ty);
-                let (peeled, _ptr_mut) = self.auto_deref_ptr(base_resolved);
+                let (peeled, _ptr_mut) = self.auto_deref_ptr(inf, base_ty);
                 match self.tys.kind(peeled).clone() {
                     TyKind::Array(elem, _) => elem,
                     TyKind::Error | TyKind::Infer(_) => self.tys.error,
                     _ => {
                         inf.errors.push(TypeError::NotIndexable {
-                            ty: base_resolved,
+                            ty: peeled,
                             span: span.clone(),
                         });
                         self.tys.error
@@ -859,8 +866,7 @@ impl<'hir> Checker<'hir> {
     ///   - anything else (Prim/Unit/Fn/Array/...) — `TypeNotFieldable`.
     fn infer_field(&mut self, inf: &mut Inferer, base: HExprId, name: &str, span: &Span) -> TyId {
         let base_ty = self.infer_expr(inf, base);
-        let resolved = self.resolve(inf, base_ty);
-        let (peeled, _ptr_mut) = self.auto_deref_ptr(resolved);
+        let (peeled, _ptr_mut) = self.auto_deref_ptr(inf, base_ty);
         match self.tys.kind(peeled).clone() {
             TyKind::Adt(aid) => {
                 let adt_def = &self.adts[aid];
@@ -889,7 +895,7 @@ impl<'hir> Checker<'hir> {
             TyKind::Error => self.tys.error,
             TyKind::Prim(_) | TyKind::Unit | TyKind::Fn(_, _, _) | TyKind::Array(_, _) => {
                 inf.errors.push(TypeError::TypeNotFieldable {
-                    ty: resolved,
+                    ty: peeled,
                     span: span.clone(),
                 });
                 self.tys.error
@@ -1059,7 +1065,7 @@ impl<'hir> Checker<'hir> {
         // Mutability of the target. `None` means "not a place" — HIR has
         // already filed `InvalidAssignTarget`, so we don't double-report.
         // See spec/10_ADDRESS_OF.md "Mutability check for `&mut`".
-        if let Some(Mutability::Const) = self.place_mutability(target) {
+        if let Some(Mutability::Const) = self.place_mutability(inf, target) {
             let target_span = self.hir.exprs[target].span.clone();
             inf.errors.push(TypeError::MutateImmutable {
                 op: MutateOp::Assign,
@@ -1077,7 +1083,7 @@ impl<'hir> Checker<'hir> {
         let inner_ty = self.infer_expr(inf, expr);
         if let Mutability::Mut = mutability {
             // None ⇒ HIR already filed `AddrOfNonPlace`; suppress.
-            if let Some(Mutability::Const) = self.place_mutability(expr) {
+            if let Some(Mutability::Const) = self.place_mutability(inf, expr) {
                 let span = self.hir.exprs[expr].span.clone();
                 inf.errors.push(TypeError::MutateImmutable {
                     op: MutateOp::BorrowMut,
@@ -1104,7 +1110,7 @@ impl<'hir> Checker<'hir> {
     /// `Unary { Deref, _ }` joins the place producers under
     /// 07_POINTER §5; its mutability comes from the pointer's type
     /// (`*mut T` → Mut, `*const T` → Const).
-    fn place_mutability(&self, eid: HExprId) -> Option<Mutability> {
+    fn place_mutability(&self, inf: &Inferer, eid: HExprId) -> Option<Mutability> {
         match &self.hir.exprs[eid].kind {
             HirExprKind::Local(lid) => Some(if self.hir.locals[*lid].mutable {
                 Mutability::Mut
@@ -1113,7 +1119,7 @@ impl<'hir> Checker<'hir> {
             }),
             HirExprKind::Field { base, .. } | HirExprKind::Index { base, .. } => {
                 let base_ty = self.expr_tys[*base];
-                let (_, ptr_mut) = self.auto_deref_ptr(base_ty);
+                let (_, ptr_mut) = self.auto_deref_ptr(inf, base_ty);
                 match ptr_mut {
                     // ≥1 Ptr peeled: the innermost ptr-mut governs the
                     // resulting place. The base binding's mut is
@@ -1121,7 +1127,7 @@ impl<'hir> Checker<'hir> {
                     // binding, mut pointer) makes `p[i] = x` allowed.
                     Some(m) => Some(m),
                     // Bare ADT / Array place: inherit from base.
-                    None => self.place_mutability(*base),
+                    None => self.place_mutability(inf, *base),
                 }
             }
             // `*p` — outer mut of the operand pointer governs.
