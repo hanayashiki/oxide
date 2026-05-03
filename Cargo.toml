@@ -12,9 +12,21 @@ inkwell = { version = "0.5", features = ["llvm18-0"] }
 serde = { version = "1", features = ["derive"], optional = true }
 target-lexicon = "0.13"
 
+[[bin]]
+name = "oxide"
+path = "src/bin/oxide.rs"
+
+[[bin]]
+name = "oxide-local"
+path = "src/bin/oxide.rs"
+
 [features]
 default = []
 serde = ["dep:serde", "target-lexicon/serde_support"]
 
 [dev-dependencies]
 expect-test = "1.5.1"
+
+[profile.release]
+lto = true
+codegen-units = 1

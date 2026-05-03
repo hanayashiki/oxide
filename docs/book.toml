@@ -2,3 +2,6 @@
 title = "The Oxide Language"
 authors = ["hanayashiki"]
 language = "en"
+
+[output.html]
+git-repository-url = "https://github.com/hanayashiki/oxide"

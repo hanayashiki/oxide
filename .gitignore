@@ -7,8 +7,15 @@ target/
 *.tmp
 node_modules
 dist
+!docs/src/dist/
 build
 coverage
+
+# pre-built release binaries staged for the doc site
+docs/src/dist/oxide-*
+
+# mdbook build output
+docs/book/
 *.bak
 *.swp
 *.swo

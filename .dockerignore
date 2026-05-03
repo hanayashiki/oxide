@@ -1,0 +1,28 @@
+# Cargo's build cache — host artifacts, not useful in the container and
+# routinely several hundred MB. The container does its own clean build.
+target/
+**/target/
+
+# mdbook output and the staged release binaries — they're outputs of
+# this very build pipeline; copying them in would be circular.
+docs/book/
+docs/src/dist/oxide-*
+
+# Local-only state.
+.git/
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+*.bak
+*.log
+*.tmp
+
+# Editor / OS / playground noise.
+playground/
+node_modules/
+
+# Don't ship .env or anything secret-looking into a build context.
+.env
+*.zip
