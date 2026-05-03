@@ -38,10 +38,16 @@ ENV LLVM_SYS_180_PREFIX=/usr/lib/llvm-18
 WORKDIR /src
 COPY . .
 
-# `--platform=linux/amd64` above already pins the container's host triple
-# to x86_64-unknown-linux-gnu, so a plain `cargo build --release` produces
-# the desired binary natively (no cross-compile toolchain required).
-RUN cargo build --release
+# `docker build --platform=linux/amd64` (in scripts/build-release.sh)
+# pins the container's host triple to x86_64-unknown-linux-gnu, so a
+# plain `cargo build --release` produces the desired binary natively
+# (no cross-compile toolchain required).
+#
+# gzip the result before extraction so the binary fits under Cloudflare
+# Pages' 25 MiB per-file cap. Debug symbols are intentionally preserved
+# (no `strip`) so crash reports stay actionable.
+RUN cargo build --release \
+    && gzip -9 -f target/release/oxide
 
 FROM scratch AS export
-COPY --from=builder /src/target/release/oxide /oxide
+COPY --from=builder /src/target/release/oxide.gz /oxide.gz

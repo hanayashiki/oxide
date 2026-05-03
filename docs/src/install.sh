@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-BASE_URL="${OXIDE_DIST_URL:-https://oxide.cwang.io/dist}"
+BASE_URL="${OXIDE_DIST_URL:-https://pub-f12e260f473e43a39a3049bce3cd8c06.r2.dev}"
 INSTALL_DIR="${OXIDE_HOME:-$HOME/.oxide}"
 INSTALL_BIN="$INSTALL_DIR/bin"
 
@@ -40,13 +40,27 @@ if ! command -v curl >/dev/null 2>&1; then
     exit 1
 fi
 
-URL="$BASE_URL/oxide-$TRIPLE"
+URL="$BASE_URL/oxide-$TRIPLE.gz"
 TMPFILE="$(mktemp -t oxide-install.XXXXXX)"
 trap 'rm -f "$TMPFILE"' EXIT
 
+if ! command -v gunzip >/dev/null 2>&1; then
+    echo "error: gunzip not found on \$PATH — install gzip first" >&2
+    exit 1
+fi
+
 echo "downloading $URL"
-if ! curl -fsSL "$URL" -o "$TMPFILE"; then
-    echo "error: download failed (URL: $URL)" >&2
+# Stream the gzipped binary through gunzip directly to a tempfile, so
+# the decompressed binary never has to fit in shell pipe buffers all at
+# once. `set -o pipefail` (via `set -euo pipefail` above) makes a curl
+# failure abort before gunzip hands us a half-empty file.
+if ! curl -fsSL "$URL" | gunzip > "$TMPFILE"; then
+    echo "error: download or decompress failed (URL: $URL)" >&2
+    exit 1
+fi
+
+if [[ ! -s "$TMPFILE" ]]; then
+    echo "error: downloaded file is empty (URL: $URL)" >&2
     exit 1
 fi
 

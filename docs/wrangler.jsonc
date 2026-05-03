@@ -1,0 +1,14 @@
+// Wrangler config for the Oxide doc site.
+//
+// With this file in cwd, `npx wrangler pages deploy` (no extra flags)
+// uploads ./book to the `oxide` Pages project.
+//
+// Schema: https://developers.cloudflare.com/workers/wrangler/configuration/
+// If your `npx wrangler login` token spans more than one CF account,
+// also export CLOUDFLARE_ACCOUNT_ID=<id> before running `wrangler pages
+// deploy` (the Pages config schema rejects `account_id` here).
+{
+    "name": "oxide",
+    "compatibility_date": "2026-01-01",
+    "pages_build_output_dir": "./book"
+}

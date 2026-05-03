@@ -7,15 +7,17 @@ target/
 *.tmp
 node_modules
 dist
-!docs/src/dist/
 build
 coverage
 
-# pre-built release binaries staged for the doc site
-docs/src/dist/oxide-*
+# pre-built release binaries (staged locally; uploaded to R2 by scripts/publish.sh)
+releases/
 
 # mdbook build output
 docs/book/
+
+# wrangler local state
+.wrangler/
 *.bak
 *.swp
 *.swo

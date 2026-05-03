@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 #
 # Build release binaries for the supported targets and stage them under
-# docs/src/dist/ so the next `mdbook build` picks them up.
+# releases/ at the repo root.
 #
 #   - macOS aarch64  → native cargo build (only on Darwin/arm64 host)
 #   - Linux x86_64   → docker build via docker/linux-x86_64.Dockerfile
 #
-# Run this whenever you want to publish a new build. After a successful
-# run, `cd docs && mdbook build` and deploy `docs/book/`.
+# This script does NOT upload anywhere — see scripts/publish.sh for that.
+# Run order: build-release.sh → publish.sh → cd docs && mdbook build →
+# wrangler pages deploy docs/book.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DIST_DIR="$REPO_ROOT/docs/src/dist"
+DIST_DIR="$REPO_ROOT/releases"
 
 mkdir -p "$DIST_DIR"
 
@@ -28,10 +29,12 @@ if [[ "$HOST_OS/$HOST_ARCH" == "Darwin/arm64" ]]; then
     rustup target list --installed 2>/dev/null | grep -qx aarch64-apple-darwin \
         || rustup target add aarch64-apple-darwin
     (cd "$REPO_ROOT" && cargo build --release --target aarch64-apple-darwin)
-    install -m 0755 \
-        "$REPO_ROOT/target/aarch64-apple-darwin/release/oxide" \
-        "$DIST_DIR/oxide-aarch64-apple-darwin"
-    echo "    → $DIST_DIR/oxide-aarch64-apple-darwin"
+    # gzip into dist (debug symbols preserved). gzip -9 -c lets us stage
+    # straight at the final filename without a temporary copy.
+    gzip -9 -c "$REPO_ROOT/target/aarch64-apple-darwin/release/oxide" \
+        > "$DIST_DIR/oxide-aarch64-apple-darwin.gz"
+    chmod 0644 "$DIST_DIR/oxide-aarch64-apple-darwin.gz"
+    echo "    → $DIST_DIR/oxide-aarch64-apple-darwin.gz"
 else
     echo "==> skipping macOS aarch64 build — not on Darwin/arm64 host (this is $HOST_OS/$HOST_ARCH)"
 fi
@@ -53,9 +56,9 @@ if command -v docker >/dev/null 2>&1; then
         --file "$REPO_ROOT/docker/linux-x86_64.Dockerfile" \
         --target export \
         "$REPO_ROOT"
-    mv "$DIST_DIR/oxide" "$DIST_DIR/oxide-x86_64-unknown-linux-gnu"
-    chmod 0755 "$DIST_DIR/oxide-x86_64-unknown-linux-gnu"
-    echo "    → $DIST_DIR/oxide-x86_64-unknown-linux-gnu"
+    mv "$DIST_DIR/oxide.gz" "$DIST_DIR/oxide-x86_64-unknown-linux-gnu.gz"
+    chmod 0644 "$DIST_DIR/oxide-x86_64-unknown-linux-gnu.gz"
+    echo "    → $DIST_DIR/oxide-x86_64-unknown-linux-gnu.gz"
 else
     echo "==> skipping Linux x86_64 build — docker not on \$PATH"
 fi
@@ -64,4 +67,4 @@ echo
 echo "staged binaries:"
 ls -la "$DIST_DIR" | grep -v '^total' | grep -v '^d' || true
 echo
-echo "next: cd docs && mdbook build"
+echo "next: ./scripts/publish.sh   (uploads to R2)"
