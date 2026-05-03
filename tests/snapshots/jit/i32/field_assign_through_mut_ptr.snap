@@ -1,0 +1,24 @@
+== ir ==
+; ModuleID = 'jit'
+source_filename = "jit"
+
+%P = type { i32, i32 }
+
+define i32 @main() {
+allocas:
+  %p.0.slot = alloca %P, align 8
+  %q.1.slot = alloca ptr, align 8
+  br label %body
+
+body:                                             ; preds = %allocas
+  store %P zeroinitializer, ptr %p.0.slot, align 4
+  store ptr %p.0.slot, ptr %q.1.slot, align 8
+  %deref = load ptr, ptr %q.1.slot, align 8
+  %fld.gep = getelementptr inbounds %P, ptr %deref, i32 0, i32 0
+  store i32 7, ptr %fld.gep, align 4
+  %fld.gep1 = getelementptr inbounds %P, ptr %p.0.slot, i32 0, i32 0
+  %fld.load = load i32, ptr %fld.gep1, align 4
+  ret i32 %fld.load
+}
+== result ==
+7

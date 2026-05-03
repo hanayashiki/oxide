@@ -683,11 +683,16 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     .0
             }
             HirExprKind::Field { base, name } => {
-                let base_ptr = self.lvalue(fx, base);
-                let base_ty = self.ty_of(base);
+                // Auto-deref through any number of outer Ptr layers so
+                // `q.x` for `q: *mut P` (or `*mut *mut P`, …) reaches the
+                // underlying Adt. Mirrors `emit_index_place`'s peel-loop;
+                // typeck's `auto_deref_ptr` already accepted the syntax,
+                // codegen just lowers it.
+                let (base_ptr, base_ty) =
+                    self.peel_ptrs(self.lvalue(fx, base), self.ty_of(base));
                 let aid = match self.typeck_results.tys().kind(base_ty) {
                     TyKind::Adt(aid) => *aid,
-                    other => panic!("Field base lvalue: non-Adt type {:?}", other),
+                    other => panic!("Field base lvalue: non-Adt type after peel {:?}", other),
                 };
                 self.field_gep(base_ptr, base_ty, self.field_index(aid, &name))
             }
@@ -707,6 +712,42 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             .iter()
             .position(|f| f.name == name)
             .expect("typeck guaranteed field exists") as u32
+    }
+
+    /// Walk through outer `Ptr` layers on `(cur_ptr, cur_ty)`, loading
+    /// the next pointer at each step until `cur_ty` is no longer a
+    /// `Ptr`. Mirrors `emit_index_place`'s peel-loop. Used by
+    /// `lvalue(Field)` and `emit_field`'s Place path so `q.x` for
+    /// `q: *mut P` reaches the Adt without the user writing `(*q).x`.
+    fn peel_ptrs(
+        &self,
+        mut cur_ptr: PointerValue<'ctx>,
+        mut cur_ty: TyId,
+    ) -> (PointerValue<'ctx>, TyId) {
+        let tcx = self.typeck_results.tys();
+        let ptr_ll = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        while let TyKind::Ptr(inner, _) = tcx.kind(cur_ty) {
+            let next = *inner;
+            cur_ptr = self
+                .builder
+                .build_load(ptr_ll, cur_ptr, "deref")
+                .unwrap()
+                .into_pointer_value();
+            cur_ty = next;
+        }
+        (cur_ptr, cur_ty)
+    }
+
+    /// Type-only counterpart to `peel_ptrs` — peels outer `Ptr` layers
+    /// off `ty` without emitting IR. Used at the top of `emit_field` to
+    /// find the `Adt` for `aid` lookup before deciding which lowering
+    /// path to take.
+    fn peel_ptrs_ty(&self, mut cur_ty: TyId) -> TyId {
+        let tcx = self.typeck_results.tys();
+        while let TyKind::Ptr(inner, _) = tcx.kind(cur_ty) {
+            cur_ty = *inner;
+        }
+        cur_ty
     }
 
     /// `getelementptr` of `base_ptr` to the `field_idx`'th field of an
@@ -732,10 +773,15 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         name: &str,
     ) -> Option<Operand<'ctx>> {
         let base_expr = &self.hir.exprs[base];
-        let base_ty = self.ty_of(base);
+        // Peel outer Ptr layers off the base type so `q.x` for `q: *mut P`
+        // can locate the Adt. The Value path below never sees a Ptr-typed
+        // aggregate (Ptr-typed exprs are place-form via Local/Field/Deref),
+        // so peeling unconditionally is safe — `peel_ptrs_ty` is a no-op
+        // on non-Ptr types.
+        let base_ty = self.peel_ptrs_ty(self.ty_of(base));
         let aid = match self.typeck_results.tys().kind(base_ty) {
             TyKind::Adt(aid) => *aid,
-            other => panic!("Field rvalue: non-Adt base type {:?}", other),
+            other => panic!("Field rvalue: non-Adt base type after peel {:?}", other),
         };
         let field_idx = self.field_index(aid, name);
         let field_ty = {
@@ -746,7 +792,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
         if base_expr.is_place {
             // Place path — single-field load via `getelementptr`, no whole-struct copy.
-            let gep = self.field_gep(self.lvalue(fx, base), base_ty, field_idx);
+            // Peel base_ptr in lockstep with base_ty (loading at each Ptr layer).
+            let (base_ptr, _) = self.peel_ptrs(self.lvalue(fx, base), self.ty_of(base));
+            let gep = self.field_gep(base_ptr, base_ty, field_idx);
             // Array-typed fields stay in place form: hand back the GEP'd
             // pointer instead of loading the aggregate. Mirrors the
             // arrays-as-places invariant for Locals.
