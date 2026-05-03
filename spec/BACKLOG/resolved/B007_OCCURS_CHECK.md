@@ -1,7 +1,7 @@
 # B007 — Missing occurs check in `bind_infer_checked` (compiler crash)
 
 ## Status
-Open. Surfaced by the soundness audit on 2026-05-03.
+**Resolved.** Surfaced by the soundness audit on 2026-05-03.
 
 ## The bug
 
