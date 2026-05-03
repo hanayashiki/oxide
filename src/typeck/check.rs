@@ -106,16 +106,33 @@ struct Checker<'hir> {
     decl_obligations: Vec<Obligation>,
 }
 
+/// Per-Infer-var bookkeeping. One row per `InferId`.
+///
+/// `int_default` / `unit_default` are mutually exclusive at creation
+/// (set by the corresponding `new_var*` constructor) but can both be
+/// `true` after `bind_infer_checked` propagates flags across an
+/// Infer-to-Infer bind. At finalize, `int_default` wins precedence over
+/// `unit_default` over the fall-through `error` default.
+///
+/// `creation_span` records where the var was minted, so a `CannotInfer`
+/// fired at finalize can point at the syntactic position the user
+/// actually wrote (the literal, the `let`, the loop) rather than at
+/// nothing.
+struct Binding {
+    ty: Option<TyId>,
+    int_default: bool,
+    /// Set on the elem var of an empty array literal `[]` so finalize
+    /// defaults the unbound var to `unit` (yielding `[(); 0]`) instead
+    /// of `error`. Honest default for "an empty container of nothing"
+    /// — zero runtime cost (`[(); 0]` is zero bytes; length is 0).
+    /// Intentional v0 deviation from Rust's E0282; see spec/09_ARRAY.md.
+    unit_default: bool,
+    #[allow(dead_code)] // consumed by `finalize`'s CannotInfer fallback (next commit)
+    creation_span: Span,
+}
+
 struct Inferer {
-    bindings: IndexVec<InferId, Option<TyId>>,
-    int_default: IndexVec<InferId, bool>,
-    /// Parallel to `int_default`. Set on the elem var of an empty array
-    /// literal `[]` so finalize defaults the unbound var to `unit`
-    /// (yielding `[(); 0]`) instead of `error`. Honest default for
-    /// "an empty container of nothing" — zero runtime cost (`[(); 0]`
-    /// is zero bytes; length is 0). Intentional v0 deviation from
-    /// Rust's E0282; see spec/09_ARRAY.md.
-    unit_default: IndexVec<InferId, bool>,
+    bindings: IndexVec<InferId, Binding>,
     /// Errors emitted while this fn body was being inferred. TyId fields
     /// inside may still point at unresolved `Infer` vars; `Checker::finalize`
     /// resolves them post-defaulting before flushing into `Checker.errors`.
@@ -144,31 +161,33 @@ impl Inferer {
     fn new(cur_ret: TyId) -> Self {
         Self {
             bindings: IndexVec::new(),
-            int_default: IndexVec::new(),
-            unit_default: IndexVec::new(),
             errors: Vec::new(),
             obligations: Vec::new(),
             cur_ret,
             loop_tys: Vec::new(),
         }
     }
-    fn new_var(&mut self, int_default: bool) -> InferId {
-        let id = self.bindings.push(None);
-        let _ = self.int_default.push(int_default);
-        let _ = self.unit_default.push(false);
-        id
+    fn new_var(&mut self, int_default: bool, span: Span) -> InferId {
+        self.bindings.push(Binding {
+            ty: None,
+            int_default,
+            unit_default: false,
+            creation_span: span,
+        })
     }
     /// Allocate a fresh infer var that defaults to `()` if unbound at
     /// finalize time (vs. `i32` for int-flagged vars and `error` for
     /// plain ones). Used by the empty-`[]` arm of `infer_array_lit`.
-    fn new_var_unit_default(&mut self) -> InferId {
-        let id = self.bindings.push(None);
-        let _ = self.int_default.push(false);
-        let _ = self.unit_default.push(true);
-        id
+    fn new_var_unit_default(&mut self, span: Span) -> InferId {
+        self.bindings.push(Binding {
+            ty: None,
+            int_default: false,
+            unit_default: true,
+            creation_span: span,
+        })
     }
     fn bind(&mut self, id: InferId, ty: TyId) {
-        self.bindings[id] = Some(ty);
+        self.bindings[id].ty = Some(ty);
     }
 }
 
@@ -225,29 +244,30 @@ impl<'hir> Checker<'hir> {
         let i32_id = self.tys.i32;
         let unit_id = self.tys.unit;
         let error_id = self.tys.error;
-        for raw in 0..inf.bindings.len() {
-            let id = InferId::from_raw(raw as u32);
-            if inf.bindings[id].is_none() {
-                inf.bindings[id] = Some(if inf.int_default[id] {
+
+        inf.bindings.iter_mut().for_each(|b| {
+            if b.ty.is_none() {
+                b.ty = Some(if b.int_default {
                     i32_id
-                } else if inf.unit_default[id] {
+                } else if b.unit_default {
                     unit_id
                 } else {
                     error_id
                 });
             }
-        }
+        });
 
         // Resolve any Infer-typed entries in this fn's contributions.
-        for raw in 0..self.expr_tys.len() {
-            let id = HExprId::from_raw(raw as u32);
-            let resolved = self.resolve_fully(&inf, self.expr_tys[id]);
-            self.expr_tys[id] = resolved;
+        // `iter_mut_enumerated` is unavailable here — the closure would
+        // need `self.resolve_fully` (`&mut self`), which conflicts with
+        // the iterator's mut borrow of `self.expr_tys` / `self.local_tys`.
+        // `indices()` returns an owned `Map<Range<_>, _>` so no borrow on
+        // `self` is held across the loop body.
+        for id in self.expr_tys.indices() {
+            self.expr_tys[id] = self.resolve_fully(&inf, self.expr_tys[id]);
         }
-        for raw in 0..self.local_tys.len() {
-            let id = LocalId::from_raw(raw as u32);
-            let resolved = self.resolve_fully(&inf, self.local_tys[id]);
-            self.local_tys[id] = resolved;
+        for id in self.local_tys.indices() {
+            self.local_tys[id] = self.resolve_fully(&inf, self.local_tys[id]);
         }
 
         // Flush this fn's errors. TyId fields inside may still reference
@@ -456,16 +476,16 @@ impl<'hir> Checker<'hir> {
 
     // ---------- inference primitives ----------
 
-    fn fresh_infer(&mut self, inf: &mut Inferer, int_default: bool) -> TyId {
-        let id = inf.new_var(int_default);
+    fn fresh_infer(&mut self, inf: &mut Inferer, int_default: bool, span: Span) -> TyId {
+        let id = inf.new_var(int_default, span);
         self.tys.intern(TyKind::Infer(id))
     }
 
     /// Like `fresh_infer(false)` but flags the var to default to `()`
     /// at finalize if unbound — used for the elem of an empty array
-    /// literal `[]`. See `Inferer.unit_default`.
-    fn fresh_infer_with_unit_default(&mut self, inf: &mut Inferer) -> TyId {
-        let id = inf.new_var_unit_default();
+    /// literal `[]`. See `Binding.unit_default`.
+    fn fresh_infer_with_unit_default(&mut self, inf: &mut Inferer, span: Span) -> TyId {
+        let id = inf.new_var_unit_default(span);
         self.tys.intern(TyKind::Infer(id))
     }
 
@@ -474,7 +494,7 @@ impl<'hir> Checker<'hir> {
         let mut cur = ty;
         loop {
             match self.tys.kind(cur) {
-                TyKind::Infer(id) => match inf.bindings.get(*id).copied().flatten() {
+                TyKind::Infer(id) => match inf.bindings.get(*id).and_then(|b| b.ty) {
                     Some(bound) => cur = bound,
                     None => return cur,
                 },
@@ -608,7 +628,7 @@ impl<'hir> Checker<'hir> {
         let expr: &HirExpr = &self.hir.exprs[eid];
         let span = expr.span.clone();
         let ty = match expr.kind.clone() {
-            HirExprKind::IntLit(_) => self.fresh_infer(inf, true),
+            HirExprKind::IntLit(_) => self.fresh_infer(inf, true, span.clone()),
             HirExprKind::BoolLit(_) => self.tys.bool,
             HirExprKind::CharLit(_) => self.tys.u8,
             HirExprKind::StrLit(s) => {
@@ -633,13 +653,14 @@ impl<'hir> Checker<'hir> {
                 // freely into both `*const T` and `*mut T` slots. α
                 // gets pinned by the use site via the existing
                 // loose-unify rule.
-                let alpha = self.fresh_infer(inf, false);
+                let alpha = self.fresh_infer(inf, false, span.clone());
                 self.tys.intern(TyKind::Ptr(alpha, Mutability::Mut))
             }
             HirExprKind::Local(lid) => self.local_tys[lid],
             HirExprKind::Fn(fid) => {
                 let sig = self.fn_sigs[fid].clone();
-                self.tys.intern(TyKind::Fn(sig.params, sig.ret, sig.c_variadic))
+                self.tys
+                    .intern(TyKind::Fn(sig.params, sig.ret, sig.c_variadic))
             }
             HirExprKind::Unresolved(_) => self.tys.error,
             HirExprKind::Unary { op, expr: inner } => self.infer_unary(inf, op, inner, &span),
@@ -658,7 +679,8 @@ impl<'hir> Checker<'hir> {
                 // E0267 directly on a concrete-non-usize-int mismatch
                 // instead of the generic E0250.
                 let usize_ty = self.tys.usize;
-                unify::equate_with(self, 
+                unify::equate_with(
+                    self,
                     inf,
                     idx_ty,
                     usize_ty,
@@ -724,7 +746,7 @@ impl<'hir> Checker<'hir> {
                 body,
                 has_break,
                 source: _,
-            } => self.infer_loop(inf, init, cond, update, body, has_break),
+            } => self.infer_loop(inf, init, cond, update, body, has_break, &span),
             HirExprKind::Break { expr } => self.infer_break_expr(inf, expr, &span),
             HirExprKind::Continue => self.infer_continue_expr(inf, &span),
         };
@@ -873,10 +895,10 @@ impl<'hir> Checker<'hir> {
     /// - Repeat `[init; N]` — elem type is `init`'s type; length is
     ///   the parser-extracted `HirConst::Lit(n)` (Error variant is
     ///   unreachable in v0).
-    fn infer_array_lit(&mut self, inf: &mut Inferer, lit: HirArrayLit, _span: &Span) -> TyId {
+    fn infer_array_lit(&mut self, inf: &mut Inferer, lit: HirArrayLit, span: &Span) -> TyId {
         match lit {
             HirArrayLit::Elems(es) if es.is_empty() => {
-                let elem = self.fresh_infer_with_unit_default(inf);
+                let elem = self.fresh_infer_with_unit_default(inf, span.clone());
                 self.tys.intern(TyKind::Array(elem, Some(0)))
             }
             HirArrayLit::Elems(es) => {
@@ -885,7 +907,14 @@ impl<'hir> Checker<'hir> {
                 for (i, &eid) in es.iter().enumerate().skip(1) {
                     let ti = self.infer_expr(inf, eid);
                     let elem_span = self.hir.exprs[eid].span.clone();
-                    unify::equate_with(self, inf, ti, t0, elem_span, MismatchCtx::ArrayLitElement { i });
+                    unify::equate_with(
+                        self,
+                        inf,
+                        ti,
+                        t0,
+                        elem_span,
+                        MismatchCtx::ArrayLitElement { i },
+                    );
                 }
                 self.tys.intern(TyKind::Array(t0, Some(n)))
             }
@@ -1130,7 +1159,8 @@ impl<'hir> Checker<'hir> {
                     });
                     return ret_ty;
                 }
-                for ((&aid, &pty), &aty) in args.iter().take(n_fixed).zip(&param_tys).zip(&arg_tys) {
+                for ((&aid, &pty), &aty) in args.iter().take(n_fixed).zip(&param_tys).zip(&arg_tys)
+                {
                     let arg_span = self.hir.exprs[aid].span.clone();
                     unify::subtype(self, inf, aty, pty, arg_span);
                 }
@@ -1240,6 +1270,7 @@ impl<'hir> Checker<'hir> {
         update: Option<HExprId>,
         body: HBlockId,
         has_break: bool,
+        span: &Span,
     ) -> TyId {
         // Header slots are typed for side-effects (and so any errors
         // inside them surface), but their values are discarded — `init`
@@ -1266,7 +1297,7 @@ impl<'hir> Checker<'hir> {
         let target = if cond.is_some() {
             self.tys.unit
         } else if has_break {
-            self.fresh_infer(inf, false)
+            self.fresh_infer(inf, false, span.clone())
         } else {
             self.tys.never
         };
@@ -1359,7 +1390,10 @@ impl<'hir> Checker<'hir> {
                 let ty_span = t.span.clone();
                 (Self::resolve_ty(&mut self.tys, &mut inf.errors, t), ty_span)
             }
-            None => (self.fresh_infer(inf, false), local_data.span.clone()),
+            None => (
+                self.fresh_infer(inf, false, local_data.span.clone()),
+                local_data.span.clone(),
+            ),
         };
         self.local_tys[local] = local_ty;
         // Sized check at let-binding position. Even when the type comes

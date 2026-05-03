@@ -330,7 +330,7 @@ fn bind_infer_checked(
     ctx: UnifyContext,
     span: Span,
 ) {
-    let int_flagged = inf.int_default[id];
+    let int_flagged = inf.bindings[id].int_default;
     if int_flagged {
         let allowed = match target_kind {
             TyKind::Prim(p) => p.is_integer(),
@@ -367,11 +367,11 @@ fn bind_infer_checked(
     // var int_default but binds it to the unflagged local var, and the
     // local falls through to `error` at finalize.
     if let TyKind::Infer(target_id) = *target_kind {
-        if inf.int_default[id] {
-            inf.int_default[target_id] = true;
+        if inf.bindings[id].int_default {
+            inf.bindings[target_id].int_default = true;
         }
-        if inf.unit_default[id] {
-            inf.unit_default[target_id] = true;
+        if inf.bindings[id].unit_default {
+            inf.bindings[target_id].unit_default = true;
         }
     }
     inf.bind(id, target);
