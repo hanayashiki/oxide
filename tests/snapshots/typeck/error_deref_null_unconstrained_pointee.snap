@@ -1,0 +1,16 @@
+== diagnostics ==
+[E0256] Error: could not infer a type
+   ╭─[ error_deref_null_unconstrained_pointee.ox:2:9 ]
+   │
+ 2 │     let _y = *null;
+   │         ─┬  
+   │          ╰── ambiguous type
+   │ 
+   │ Help: add a type annotation to disambiguate
+───╯
+== types ==
+Fn[0] main() -> i32
+  HExprId(0) : *mut {error}
+  HExprId(1) : {error}
+  HExprId(2) : ()
+  HExprId(3) : i32
