@@ -1,0 +1,25 @@
+== diagnostics ==
+[E0268] Error: array literal element 1 has type `*const [u8; 3]`, expected `*mut [u8; 3]`
+    ╭─[ error_ptr_mut_laundering_array_lit.ox:12:22 ]
+    │
+ 12 │     let arr = [rw, ro];
+    │                      ─┬  
+    │                       ╰── element type differs from element 0
+────╯
+== types ==
+Fn[0] main() -> i32
+  HExprId(0) : u8
+  HExprId(1) : u8
+  HExprId(2) : u8
+  HExprId(3) : [u8; 3]
+  HExprId(4) : ()
+  HExprId(5) : [u8; 3]
+  HExprId(6) : *mut [u8; 3]
+  HExprId(7) : ()
+  HExprId(8) : *const [u8; 3]
+  HExprId(9) : ()
+  HExprId(10) : *mut [u8; 3]
+  HExprId(11) : *const [u8; 3]
+  HExprId(12) : [*mut [u8; 3]; 2]
+  HExprId(13) : ()
+  HExprId(14) : i32

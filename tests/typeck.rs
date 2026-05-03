@@ -133,12 +133,14 @@ fn length_fabrication_in_arm_coalesce_errors() {
 }
 
 #[test]
-fn length_erasure_in_arm_coalesce_succeeds() {
-    // The forward direction (Some→None) at arm coalesce is the
-    // residual sloppy-subtyping path documented in spec/09. It still
-    // typechecks because the legitimate length-erasure fires under
-    // pointee=true. Result type is `*const [u8; 3]` (then-arm wins
-    // via join_never).
+fn length_erasure_in_arm_coalesce_errors() {
+    // Arm coalesce is now strict — `equate_arms` calls `equate`, which
+    // requires exact length match. The Some→None forward erasure that
+    // was previously silent here is rejected. The legitimate erasure
+    // still works at fixed-direction `subtype` sites (let-init with
+    // annotation, return, call-arg). Rust-aligned: `if c { &[u8;3] }
+    // else { &[u8] }` is a type mismatch in Rust too. See spec/09
+    // "Coercions" — erasure is a Subtype-mode relaxation, not Equate.
     let (_, errs) = typeck(
         r#"
             fn unsized_ptr() -> *const [u8] { "hi" }
@@ -148,7 +150,10 @@ fn length_erasure_in_arm_coalesce_succeeds() {
             }
         "#,
     );
-    assert!(errs.is_empty(), "{errs:#?}");
+    assert!(
+        !errs.is_empty(),
+        "expected an error: arm-coalesce equates strictly on array length"
+    );
 }
 
 #[test]

@@ -1,0 +1,26 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `*const [u8; 3]`, found `*mut [u8; 3]`
+    ╭─[ error_ptr_mut_laundering_if_arm.ox:12:35 ]
+    │
+ 12 │     let p = if true { rw } else { ro };
+    │                                   ───┬──  
+    │                                      ╰──── type mismatch here
+────╯
+== types ==
+Fn[0] main() -> i32
+  HExprId(0) : u8
+  HExprId(1) : u8
+  HExprId(2) : u8
+  HExprId(3) : [u8; 3]
+  HExprId(4) : ()
+  HExprId(5) : [u8; 3]
+  HExprId(6) : *mut [u8; 3]
+  HExprId(7) : ()
+  HExprId(8) : *const [u8; 3]
+  HExprId(9) : ()
+  HExprId(10) : bool
+  HExprId(11) : *mut [u8; 3]
+  HExprId(12) : *const [u8; 3]
+  HExprId(13) : *mut [u8; 3]
+  HExprId(14) : ()
+  HExprId(15) : i32

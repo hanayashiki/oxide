@@ -1,7 +1,18 @@
 # B006 — Pointer mutability laundering at if-arm and ArrayLit boundaries (soundness hole)
 
 ## Status
-Open. Surfaced by the soundness audit on 2026-05-03 after the StrLit
+**Resolved 2026-05-03.** Closed by the equate/subtype combinator
+refactor: `equate_arms` and ArrayLit element coalesce now go through
+`equate` (strict on outer Ptr mut, strict on length), so mixed-mut
+and mixed-length arms error at the coalesce site. The buried-Ptr
+cousin (`[*const T; 3]` flowing into `[*mut T; 3]`) is closed by the
+recursive `discharge_subtype`. Tests in
+`tests/snapshots/typeck/error_ptr_mut_laundering_*.ox`. Spec/05
+"Two combinators: equate and subtype" describes the new model.
+
+## Original report
+
+Surfaced by the soundness audit on 2026-05-03 after the StrLit
 migration landed (commit `36a8cbf`). Pre-existing bug; not introduced
 by the migration.
 

@@ -1,0 +1,13 @@
+== diagnostics ==
+[E0269] Error: unsized array `[T]` cannot appear by value at a struct field
+   ╭─[ error_unsized_nested_in_sized_array.ox:8:17 ]
+   │
+ 8 │ struct S { f: [[u8]; 3] }
+   │                 ────┬────  
+   │                     ╰────── unsized type at value position
+   │ 
+   │ Help: use a pointer (`*const [T]` / `*mut [T]`) for runtime-sized buffers, or a sized array `[T; N]` if the length is known at compile time
+───╯
+== types ==
+Fn[0] main() -> i32
+  HExprId(0) : i32

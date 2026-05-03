@@ -23,6 +23,7 @@
 
 mod decl;
 mod obligation;
+mod unify;
 
 use index_vec::IndexVec;
 
@@ -34,85 +35,9 @@ use crate::parser::ast::{AssignOp, BinOp, Mutability, UnOp};
 use crate::reporter::Span;
 
 use self::obligation::Obligation;
+use self::unify::MismatchCtx;
 use super::error::{MutateOp, SizedPos, TypeError};
 use super::ty::{AdtDef, AdtId, FnSig, InferId, TyArena, TyId, TyKind};
-
-/// Context for diagnostic construction at a `unify` mismatch site.
-/// Passed through `unify_with` so the same recursive `unify` body can
-/// produce different `TypeError` variants depending on the calling
-/// context (array-literal-element check, index-must-be-usize, etc.)
-/// without duplicating the `unify` body or doing post-hoc error swap.
-///
-/// Recursive `unify` calls inside the body propagate the same `ctx`,
-/// so structured types (Fn-Fn, Ptr-Ptr, Array-Array) terminating in a
-/// primitive mismatch still emit the contextualized error. Slightly
-/// imprecise for nested types (e.g. `[fn() -> i32, fn() -> u8]` reports
-/// `ArrayLitElementMismatch` with the inner i32-vs-u8 pair), but the
-/// alternative — resetting `ctx` at recursion boundaries — would lose
-/// the array-element framing entirely on a generic `TypeMismatch`.
-#[derive(Clone, Copy)]
-pub(super) enum MismatchCtx {
-    Default,
-    ArrayLitElement { i: usize },
-    IndexNotUsize,
-}
-
-fn build_mismatch(ctx: MismatchCtx, expected: TyId, found: TyId, span: Span) -> TypeError {
-    match ctx {
-        MismatchCtx::Default => TypeError::TypeMismatch {
-            expected,
-            found,
-            span,
-        },
-        MismatchCtx::ArrayLitElement { i } => TypeError::ArrayLitElementMismatch {
-            i,
-            expected,
-            found,
-            span,
-        },
-        MismatchCtx::IndexNotUsize => TypeError::IndexNotUsize { found, span },
-    }
-}
-
-/// Threaded through `unify_with`. Bundles the diagnostic context and
-/// the structural-relaxation flag.
-///
-/// `pointee` is sticky: set to `true` when the Ptr-Ptr arm recurses
-/// into pointer inners; all deeper recursions inherit it. Length
-/// erasure (`Array(T, Some(_)) ~ Array(T, None)`) is silent only
-/// when `pointee == true` and only in the forward direction
-/// (found `Some`, expected `None`). Top-level (`pointee == false`)
-/// requires strict structural equality on length.
-///
-/// Span is *not* bundled here — it's `Clone` (not `Copy`) and gets
-/// `.clone()`d at recursion sites; folding it into a `Copy` struct
-/// would force unnecessary clones at every call.
-#[derive(Clone, Copy)]
-pub(super) struct UnifyContext {
-    pub(super) mismatch: MismatchCtx,
-    pub(super) pointee: bool,
-}
-
-impl UnifyContext {
-    fn default_ctx() -> Self {
-        UnifyContext {
-            mismatch: MismatchCtx::Default,
-            pointee: false,
-        }
-    }
-    fn from_mismatch(mismatch: MismatchCtx) -> Self {
-        UnifyContext {
-            mismatch,
-            pointee: false,
-        }
-    }
-    fn under_ptr(self) -> Self {
-        UnifyContext {
-            pointee: true,
-            ..self
-        }
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct TypeckResults {
@@ -286,7 +211,7 @@ impl<'hir> Checker<'hir> {
         let body_ty = self.infer_block(&mut inf, body_id);
         let body_span = self.hir.blocks[body_id].span.clone();
         let cur_ret = inf.cur_ret;
-        self.coerce(&mut inf, body_ty, cur_ret, body_span);
+        unify::subtype(self, &mut inf, body_ty, cur_ret, body_span);
         self.finalize(inf);
     }
 
@@ -364,68 +289,15 @@ impl<'hir> Checker<'hir> {
                     Some(i) => self.resolve_fully(i, expected),
                     None => expected,
                 };
-                self.discharge_coerce(a, e, span);
+                unify::discharge_subtype(self, a, e, span);
             }
             Obligation::Sized { ty, pos, span } => {
                 let t = match inf {
                     Some(i) => self.resolve_fully(i, ty),
                     None => ty,
                 };
-                if let TyKind::Array(_, None) = self.tys.kind(t) {
-                    self.errors
-                        .push(TypeError::UnsizedArrayAsValue { pos, span });
-                }
+                unify::discharge_sized(self, t, pos, span);
             }
-        }
-    }
-
-    /// Pointer-mutability validation for a coercion site. Top-level
-    /// rule: `actual_mut ≤ expected_mut` (`*mut → *const` allowed,
-    /// reverse rejected). Inner positions: strict mutability equality
-    /// (recursive). Non-Ptr-Ptr inputs are no-ops — `unify`'s
-    /// shape-mismatch diagnostic has already fired during the eager
-    /// half of `coerce`. See spec/07_POINTER.md.
-    ///
-    /// Array length erasure / shape relaxation: now enforced eagerly
-    /// in `unify_with_ctx`'s Array-Array arm under the `pointee` flag
-    /// (gated to forward `Some → None` direction). Discharge no longer
-    /// needs to validate array direction — by the time it runs, any
-    /// invalid mixed-`Some/None` pair has already been rejected by
-    /// the eager unify. See spec/09_ARRAY.md "Coercions".
-    fn discharge_coerce(&mut self, actual: TyId, expected: TyId, span: Span) {
-        let (a_pt, a_mut, e_pt, e_mut) = match (self.tys.kind(actual), self.tys.kind(expected)) {
-            (&TyKind::Ptr(ap, am), &TyKind::Ptr(ep, em)) => (ap, am, ep, em),
-            _ => return,
-        };
-        if a_mut > e_mut {
-            self.errors.push(TypeError::PointerMutabilityMismatch {
-                expected,
-                actual,
-                span,
-            });
-            return;
-        }
-        self.discharge_ptr_inner_eq(a_pt, e_pt, span);
-    }
-
-    /// Recursive strict-mutability equality at every inner pointer
-    /// position. Shape mismatches (including array-direction) have
-    /// already been caught by the eager `unify` body of `coerce`;
-    /// this only emits errors for mutability divergence at inner
-    /// pointer layers.
-    fn discharge_ptr_inner_eq(&mut self, a: TyId, b: TyId, span: Span) {
-        if let (&TyKind::Ptr(a_pt, a_mut), &TyKind::Ptr(b_pt, b_mut)) =
-            (self.tys.kind(a), self.tys.kind(b))
-        {
-            if a_mut != b_mut {
-                self.errors.push(TypeError::PointerMutabilityMismatch {
-                    expected: b,
-                    actual: a,
-                    span,
-                });
-                return;
-            }
-            self.discharge_ptr_inner_eq(a_pt, b_pt, span);
         }
     }
 
@@ -659,220 +531,6 @@ impl<'hir> Checker<'hir> {
         }
     }
 
-    /// Symmetric Hindley-Milner unification. The two type arguments are
-    /// algebraically interchangeable — there is no subtyping. We retain
-    /// the parameter names `found` / `expected` only because the emitted
-    /// `TypeMismatch` diagnostic renders them with those labels; at most
-    /// call sites the labels are a presentation choice with no semantic
-    /// weight. For sites where direction *does* matter (Never absorbs,
-    /// pointer-mutability subtype `*mut → *const`), use `coerce` instead.
-    ///
-    /// Concretely: `Never` unifies only with `Never` here. Anything else
-    /// against `Never` is a mismatch. The "expression-of-type-`!`-can-flow-
-    /// anywhere" rule lives in `coerce`, not in `unify`.
-    fn unify(&mut self, inf: &mut Inferer, found: TyId, expected: TyId, span: Span) {
-        self.unify_with_ctx(inf, found, expected, span, UnifyContext::default_ctx());
-    }
-
-    /// Single-body unify with a `MismatchCtx` that controls how the
-    /// terminal-mismatch diagnostic is built. See `MismatchCtx`. Top-level
-    /// entry point — `pointee` defaults to `false`.
-    fn unify_with(
-        &mut self,
-        inf: &mut Inferer,
-        found: TyId,
-        expected: TyId,
-        span: Span,
-        ctx: MismatchCtx,
-    ) {
-        self.unify_with_ctx(inf, found, expected, span, UnifyContext::from_mismatch(ctx));
-    }
-
-    /// Internal unify body that threads a full `UnifyContext`. Direct
-    /// callers should use `unify` or `unify_with`; the only place the
-    /// pointee flag flips on is the Ptr-Ptr arm inside this body.
-    /// See `UnifyContext` and spec/07_POINTER.md / spec/09_ARRAY.md
-    /// "Coercions".
-    fn unify_with_ctx(
-        &mut self,
-        inf: &mut Inferer,
-        found: TyId,
-        expected: TyId,
-        span: Span,
-        ctx: UnifyContext,
-    ) {
-        let found = self.resolve(inf, found);
-        let expected = self.resolve(inf, expected);
-        if found == expected {
-            return;
-        }
-        let kf = self.tys.kind(found).clone();
-        let ke = self.tys.kind(expected).clone();
-        match (kf, ke) {
-            (TyKind::Error, _) | (_, TyKind::Error) => {}
-            (TyKind::Never, TyKind::Never) => {}
-            (TyKind::Infer(id), other) => self.bind_infer_checked(inf, id, expected, &other, span),
-            (other, TyKind::Infer(id)) => self.bind_infer_checked(inf, id, found, &other, span),
-            (TyKind::Prim(p), TyKind::Prim(q)) if p == q => {}
-            (TyKind::Unit, TyKind::Unit) => {}
-            (TyKind::Fn(params_f, ret_f), TyKind::Fn(params_e, ret_e)) => {
-                if params_f.len() != params_e.len() {
-                    inf.errors
-                        .push(build_mismatch(ctx.mismatch, expected, found, span));
-                    return;
-                }
-                for (pf, pe) in params_f.iter().zip(&params_e) {
-                    self.unify_with_ctx(inf, *pf, *pe, span.clone(), ctx);
-                }
-                self.unify_with_ctx(inf, ret_f, ret_e, span, ctx);
-            }
-            // Loose on mutability — unify is shape-only on mut (per
-            // spec/07_POINTER.md §3). The mutability subtype rule
-            // (`*mut → *const` outer, exact match inner) is enforced by
-            // `coerce`'s discharge at use sites. The Ptr-Ptr arm sets
-            // `pointee=true` on the recursion: this is the ONLY place
-            // it flips on; from here it's sticky through deeper
-            // recursions, enabling the gated length-erasure relaxation
-            // in the Array-Array arm below.
-            (TyKind::Ptr(fi, _), TyKind::Ptr(ei, _)) => {
-                self.unify_with_ctx(inf, fi, ei, span, ctx.under_ptr());
-            }
-            // Array-Array: recurse on elem (strict HM); length is gated.
-            // - Same length: OK.
-            // - Different concrete lengths: E0265.
-            // - Mixed Some/None: silent ONLY when `pointee=true` AND
-            //   forward direction (found `Some`, expected `None` — the
-            //   sound length-erasure direction). Top-level mixed and
-            //   reverse-direction mixed both error eagerly here, which
-            //   closes the mixed-direction silent-pass at `unify_arms`
-            //   sites and gives a sharper diagnostic at `coerce` sites
-            //   (vs. today's discharge-time `TypeMismatch`).
-            //   See spec/09_ARRAY.md "Coercions" for the rule.
-            (TyKind::Array(fe, fc), TyKind::Array(ee, ec)) => {
-                self.unify_with_ctx(inf, fe, ee, span.clone(), ctx);
-                match (fc, ec) {
-                    (None, None) => {}
-                    (Some(c1), Some(c2)) if c1 == c2 => {}
-                    (Some(_), Some(_)) => {
-                        inf.errors.push(TypeError::ArrayLengthMismatch {
-                            expected,
-                            found,
-                            span,
-                        });
-                    }
-                    // Length erasure forward: silent only behind a pointer.
-                    (Some(_), None) if ctx.pointee => {}
-                    // Top-level Some↔None or reverse direction (None→Some).
-                    (Some(_), None) | (None, Some(_)) => {
-                        inf.errors.push(TypeError::ArrayLengthMismatch {
-                            expected,
-                            found,
-                            span,
-                        });
-                    }
-                }
-            }
-            _ => {
-                // Catch-all mismatch. Includes Adt-vs-Adt with unequal `AdtId`
-                // (ADTs unify by pure nominal identity — see spec/08_ADT.md
-                // "Unification"; equal ADTs are absorbed by the `found == expected`
-                // short-circuit above).
-                inf.errors
-                    .push(build_mismatch(ctx.mismatch, expected, found, span));
-            }
-        }
-    }
-
-    /// Use-site coercion. Splits into two halves:
-    ///
-    /// 1. **Eager unify body.** Runs `unify(actual, expected)` immediately
-    ///    so type information propagates through the union-find as the
-    ///    walk continues — `unify` is permissive on outer Ptr mut bits
-    ///    (see check.rs:405) so it computes structural equivalence even
-    ///    when mutabilities differ. `Never`/`Error` actuals absorb here
-    ///    without engaging unify (`unify(!, T)` would mismatch).
-    /// 2. **Deferred check obligation.** Enqueues `Obligation::Coerce`
-    ///    so the directional `*mut → *const` rule and inner strict
-    ///    mut-equality fire at finalize, against fully-resolved types.
-    ///    See spec/05_TYPE_CHECKER.md "Obligations" and
-    ///    spec/07_POINTER.md.
-    ///
-    /// `expect_unit` used to live nearby — that role is now subsumed by
-    /// `coerce(ty, Unit)`: there's no Ptr-Ptr branch to fire when the
-    /// expected side is `Unit`, so the obligation discharge is a no-op
-    /// and the eager unify enforces the constraint.
-    fn coerce(&mut self, inf: &mut Inferer, actual: TyId, expected: TyId, span: Span) {
-        let resolved_a = self.resolve(inf, actual);
-        if let TyKind::Never | TyKind::Error = self.tys.kind(resolved_a) {
-            return;
-        }
-        self.unify(inf, actual, expected, span.clone());
-        // Skip the obligation when neither side can participate in a
-        // directional coercion check (today only Ptr-Ptr mut-compat;
-        // future variance rules would extend this predicate). Common
-        // skip case: `coerce(_, Unit)` from former `expect_unit` sites
-        // and primitive-targeted let-init / call-arg paths.
-        if !self.is_coercible(inf, actual) || !self.is_coercible(inf, expected) {
-            return;
-        }
-        inf.obligations.push(Obligation::Coerce {
-            actual,
-            expected,
-            span,
-        });
-    }
-
-    /// Is `ty` a kind that could participate in a non-trivial coercion
-    /// (one that requires a directional check beyond what `unify`
-    /// already enforces)? Today: pointers (mut-compat at outer; strict
-    /// equality at inner). `Infer` is included because it might still
-    /// resolve to a pointer.
-    fn is_coercible(&self, inf: &Inferer, ty: TyId) -> bool {
-        matches!(
-            self.tys.kind(self.resolve(inf, ty)),
-            TyKind::Ptr(_, _) | TyKind::Infer(_)
-        )
-    }
-
-    /// Bind an Infer var to a concrete type, but reject if doing so would
-    /// violate the var's `int_default` constraint (i.e., int-flagged var
-    /// being unified with a non-integer concrete type).
-    fn bind_infer_checked(
-        &mut self,
-        inf: &mut Inferer,
-        id: InferId,
-        target: TyId,
-        target_kind: &TyKind,
-        span: Span,
-    ) {
-        let int_flagged = inf.int_default[id];
-        if int_flagged {
-            let allowed = match target_kind {
-                TyKind::Prim(p) => p.is_integer(),
-                TyKind::Infer(_) | TyKind::Error => true,
-                _ => false,
-            };
-            if !allowed {
-                let infer_ty = self.tys.intern(TyKind::Infer(id));
-                inf.errors.push(TypeError::TypeMismatch {
-                    expected: target,
-                    found: infer_ty,
-                    span,
-                });
-                // Bind to i32 (the int-flagged var's natural default)
-                // rather than `error`. The mismatch error has already
-                // been pushed; binding to the default lets the captured
-                // `found: Infer(id)` resolve to `i32` for the renderer
-                // and lets sibling expressions typed by this infer var
-                // surface as `i32` in the types table — which matches
-                // what the user wrote.
-                inf.bind(id, self.tys.i32);
-                return;
-            }
-        }
-        inf.bind(id, target);
-    }
-
     // ---------- walk ----------
 
     /// Block typing — two pieces:
@@ -915,7 +573,7 @@ impl<'hir> Checker<'hir> {
             if Some(i) != last_idx && !item.has_semi {
                 let span = self.hir.exprs[item.expr].span.clone();
                 let unit = self.tys.unit;
-                self.coerce(inf, ty, unit, span);
+                unify::subtype(self, inf, ty, unit, span);
             }
         }
 
@@ -988,7 +646,7 @@ impl<'hir> Checker<'hir> {
                 // E0267 directly on a concrete-non-usize-int mismatch
                 // instead of the generic E0250.
                 let usize_ty = self.tys.usize;
-                self.unify_with(
+                unify::equate_with(self, 
                     inf,
                     idx_ty,
                     usize_ty,
@@ -1034,10 +692,10 @@ impl<'hir> Checker<'hir> {
                 if let Some(v) = val {
                     let v_ty = self.infer_expr(inf, v);
                     let v_span = self.hir.exprs[v].span.clone();
-                    self.coerce(inf, v_ty, cur_ret, v_span);
+                    unify::subtype(self, inf, v_ty, cur_ret, v_span);
                 } else {
                     let unit = self.tys.unit;
-                    self.coerce(inf, unit, cur_ret, span.clone());
+                    unify::subtype(self, inf, unit, cur_ret, span.clone());
                 }
                 self.tys.never
             }
@@ -1107,7 +765,7 @@ impl<'hir> Checker<'hir> {
 
             match declared.iter().find(|f| f.name == provided.name) {
                 Some(field_def) => {
-                    self.coerce(inf, value_ty, field_def.ty, value_span);
+                    unify::subtype(self, inf, value_ty, field_def.ty, value_span);
                 }
                 None => {
                     inf.errors.push(TypeError::StructLitUnknownField {
@@ -1215,7 +873,7 @@ impl<'hir> Checker<'hir> {
                 for (i, &eid) in es.iter().enumerate().skip(1) {
                     let ti = self.infer_expr(inf, eid);
                     let elem_span = self.hir.exprs[eid].span.clone();
-                    self.unify_with(inf, ti, t0, elem_span, MismatchCtx::ArrayLitElement { i });
+                    unify::equate_with(self, inf, ti, t0, elem_span, MismatchCtx::ArrayLitElement { i });
                 }
                 self.tys.intern(TyKind::Array(t0, Some(n)))
             }
@@ -1239,7 +897,7 @@ impl<'hir> Checker<'hir> {
             UnOp::Not => {
                 let span = self.hir.exprs[inner].span.clone();
                 let bool_ty = self.tys.bool;
-                self.unify(inf, t, bool_ty, span);
+                unify::equate(self, inf, t, bool_ty, span);
                 bool_ty
             }
             UnOp::Deref => {
@@ -1306,18 +964,18 @@ impl<'hir> Checker<'hir> {
             | BinOp::BitAnd
             | BinOp::BitOr
             | BinOp::BitXor => {
-                self.unify(inf, lt, rt, span.clone());
+                unify::equate(self, inf, lt, rt, span.clone());
                 lt
             }
             // Comparisons: same type both sides; result = bool.
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                self.unify(inf, lt, rt, span.clone());
+                unify::equate(self, inf, lt, rt, span.clone());
                 bool_ty
             }
             // Logical: both sides bool; result = bool.
             BinOp::And | BinOp::Or => {
-                self.unify(inf, lt, bool_ty, self.hir.exprs[lhs].span.clone());
-                self.unify(inf, rt, bool_ty, self.hir.exprs[rhs].span.clone());
+                unify::equate(self, inf, lt, bool_ty, self.hir.exprs[lhs].span.clone());
+                unify::equate(self, inf, rt, bool_ty, self.hir.exprs[rhs].span.clone());
                 bool_ty
             }
             // Shifts: lhs's type is the result; rhs is any integer (loosely).
@@ -1337,7 +995,7 @@ impl<'hir> Checker<'hir> {
         let r = self.infer_expr(inf, rhs);
         // RHS coerces *to* the LHS slot — direction matters for pointer
         // mutability (`*mut → *const` OK, reverse is not).
-        self.coerce(inf, r, t, span.clone());
+        unify::subtype(self, inf, r, t, span.clone());
         // Mutability of the target. `None` means "not a place" — HIR has
         // already filed `InvalidAssignTarget`, so we don't double-report.
         // See spec/10_ADDRESS_OF.md "Mutability check for `&mut`".
@@ -1450,7 +1108,7 @@ impl<'hir> Checker<'hir> {
                 }
                 for ((&aid, &pty), &aty) in args.iter().zip(&param_tys).zip(&arg_tys) {
                     let arg_span = self.hir.exprs[aid].span.clone();
-                    self.coerce(inf, aty, pty, arg_span);
+                    unify::subtype(self, inf, aty, pty, arg_span);
                 }
                 ret_ty
             }
@@ -1476,7 +1134,7 @@ impl<'hir> Checker<'hir> {
         let cond_ty = self.infer_expr(inf, cond);
         let cond_span = self.hir.exprs[cond].span.clone();
         let bool_ty = self.tys.bool;
-        self.unify(inf, cond_ty, bool_ty, cond_span);
+        unify::equate(self, inf, cond_ty, bool_ty, cond_span);
         let then_ty = self.infer_block(inf, then_block);
         match else_arm {
             None => {
@@ -1487,19 +1145,19 @@ impl<'hir> Checker<'hir> {
                 // through `bind_infer_checked`.
                 let span = self.hir.blocks[then_block].span.clone();
                 let unit = self.tys.unit;
-                self.coerce(inf, then_ty, unit, span);
+                unify::subtype(self, inf, then_ty, unit, span);
                 self.tys.unit
             }
             Some(HElseArm::Block(bid)) => {
                 let else_ty = self.infer_block(inf, bid);
                 let span = self.hir.blocks[bid].span.clone();
-                self.unify_arms(inf, then_ty, else_ty, span);
+                self.equate_arms(inf, then_ty, else_ty, span);
                 self.join_never(inf, then_ty, else_ty)
             }
             Some(HElseArm::If(eid)) => {
                 let else_ty = self.infer_expr(inf, eid);
                 let span = self.hir.exprs[eid].span.clone();
-                self.unify_arms(inf, then_ty, else_ty, span);
+                self.equate_arms(inf, then_ty, else_ty, span);
                 self.join_never(inf, then_ty, else_ty)
             }
         }
@@ -1531,7 +1189,7 @@ impl<'hir> Checker<'hir> {
             let cond_ty = self.infer_expr(inf, c);
             let cond_span = self.hir.exprs[c].span.clone();
             let bool_ty = self.tys.bool;
-            self.unify(inf, cond_ty, bool_ty, cond_span);
+            unify::equate(self, inf, cond_ty, bool_ty, cond_span);
         }
         if let Some(u) = update {
             let _ = self.infer_expr(inf, u);
@@ -1559,7 +1217,7 @@ impl<'hir> Checker<'hir> {
         // `!` short-circuit; an `i32` tail emits TypeMismatch (E0250).
         let body_span = self.hir.blocks[body].span.clone();
         let unit = self.tys.unit;
-        self.coerce(inf, body_ty, unit, body_span);
+        unify::subtype(self, inf, body_ty, unit, body_span);
 
         target
     }
@@ -1577,7 +1235,7 @@ impl<'hir> Checker<'hir> {
             Some(e) => (self.infer_expr(inf, e), self.hir.exprs[e].span.clone()),
             None => (self.tys.unit, span.clone()),
         };
-        self.coerce(inf, operand_ty, target, operand_span);
+        unify::subtype(self, inf, operand_ty, target, operand_span);
         self.tys.never
     }
 
@@ -1592,14 +1250,14 @@ impl<'hir> Checker<'hir> {
         self.tys.never
     }
 
-    /// Unify two `if`-arm types. Symmetric — neither arm is "the
+    /// Equate two `if`-arm types. Symmetric — neither arm is "the
     /// expected." Special-case for `Never`: if either arm diverges,
-    /// skip unification entirely. The non-divergent arm decides the
+    /// skip the equation entirely. The non-divergent arm decides the
     /// if-expr's type via `join_never`; the divergent arm contributes
     /// no usable type, so demanding equality with it would spuriously
     /// reject `if c { return 1 } else { 0 }`. (The Never-absorbs rule
-    /// belongs in `coerce`, but this is the symmetric-join analogue.)
-    fn unify_arms(&mut self, inf: &mut Inferer, a: TyId, b: TyId, span: Span) {
+    /// belongs in `subtype`; here we just guard the equate call.)
+    fn equate_arms(&mut self, inf: &mut Inferer, a: TyId, b: TyId, span: Span) {
         let ar = self.resolve(inf, a);
         let br = self.resolve(inf, b);
         let a_never = matches!(self.tys.kind(ar), TyKind::Never);
@@ -1607,11 +1265,11 @@ impl<'hir> Checker<'hir> {
         if a_never || b_never {
             return;
         }
-        self.unify(inf, a, b, span);
+        unify::equate(self, inf, a, b, span);
     }
 
-    /// After unifying two arm types, pick the one that *isn't* `!`.
-    /// `unify_arms` skips Never sides, so they remain distinct from the
+    /// After equating two arm types, pick the one that *isn't* `!`.
+    /// `equate_arms` skips Never sides, so they remain distinct from the
     /// non-divergent arm. The if-expr's actual type is the non-divergent
     /// arm's type (Never absorbs). Without this, an
     /// `if c { return 1 } else { 0 }` would be typed `!` if the then
@@ -1654,7 +1312,7 @@ impl<'hir> Checker<'hir> {
         if let Some(init_id) = init {
             let init_ty = self.infer_expr(inf, init_id);
             let init_span = self.hir.exprs[init_id].span.clone();
-            self.coerce(inf, init_ty, local_ty, init_span);
+            unify::subtype(self, inf, init_ty, local_ty, init_span);
         }
         self.tys.unit
     }

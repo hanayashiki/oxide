@@ -1,7 +1,15 @@
 # B008 — `Sized` obligation only checks the outer kind (codegen ICE)
 
 ## Status
-Open. Surfaced by the soundness audit on 2026-05-03.
+**Resolved 2026-05-03.** Closed by `discharge_sized` walking
+`Array(_, Some(_))` element types recursively (Option A from this
+doc). Stops at `Ptr` (the pointer is sized; pointee can be unsized).
+Test:
+`tests/snapshots/typeck/error_unsized_nested_in_sized_array.ox`.
+
+## Original report
+
+Surfaced by the soundness audit on 2026-05-03.
 
 ## The bug
 

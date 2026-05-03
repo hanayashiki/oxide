@@ -142,58 +142,70 @@ responsible for unifying with whatever they expected.
 | `Fn(fid)` | intern `Fn(fn_sigs[fid].params, fn_sigs[fid].ret)` |
 | `Unresolved(_)` | `Error` (already errored at HIR) |
 | `Unary { Neg, e }` | type of `e` |
-| `Unary { Not, e }` | unify `e` with `bool`; result `bool` |
+| `Unary { Not, e }` | `equate(e, bool)`; result `bool` |
 | `Unary { BitNot, e }` | type of `e` |
-| `Binary { arith/bitwise, l, r }` | unify `l` & `r`; result = unified type |
-| `Binary { cmp, l, r }` | unify `l` & `r`; result = `bool` |
-| `Binary { logical, l, r }` | unify both with `bool`; result = `bool` |
+| `Binary { arith/bitwise, l, r }` | `equate(l, r)`; result = equated type |
+| `Binary { cmp, l, r }` | `equate(l, r)`; result = `bool` |
+| `Binary { logical, l, r }` | `equate` both with `bool`; result = `bool` |
 | `Binary { shift, l, r }` | result = `l`'s type |
-| `Assign { _, target, rhs }` | `coerce(rhs, target)` (directional — pointer-mut subtype applies); result = `Unit` |
-| `Call { callee, args }` | callee must be `Fn(...)`; arity + per-arg `coerce` check; result = sig ret |
+| `Assign { _, target, rhs }` | `subtype(rhs, target)` (directional — pointer-mut subtype applies); result = `Unit` |
+| `Call { callee, args }` | callee must be `Fn(...)`; arity + per-arg `subtype` check; result = sig ret |
 | `Field { base, name }` | recurse on `base`; if its type is `Adt(aid)`, look up `name` → field type. `Adt` with no such field → E0261 `NoFieldOnAdt`. Non-ADT base → E0262 `TypeNotFieldable`. See spec/08_ADT.md. |
 | `Index { base, index }` | `Error`; emit `UnsupportedFeature` (E0255). Real typing rule (auto-deref through `Ptr<Array>`) is deferred per spec/09_ARRAY.md "Phase A Step 4/5". |
-| `StructLit { adt, fields }` | resolve `aid` from the HIR-level `HAdtId`; walk each field's value expr; per-field validation against the declared field set: unknown → E0258, missing → E0259, duplicate → E0260; per-value `coerce` against declared field type; result = `Adt(aid)`. See spec/08_ADT.md. |
+| `StructLit { adt, fields }` | resolve `aid` from the HIR-level `HAdtId`; walk each field's value expr; per-field validation against the declared field set: unknown → E0258, missing → E0259, duplicate → E0260; per-value `subtype` against declared field type; result = `Adt(aid)`. See spec/08_ADT.md. |
 | `AddrOf { mutability, expr }` | infer `expr` (type `T`); validate `expr` is a place (HIR already filed `AddrOfNonPlace` if not); for `&mut`, `place_mutability(expr)` must be `Mut` else E0263; result = `Ptr(T, mutability)`. See spec/10_ADDRESS_OF.md. |
 | `ArrayLit(_)` | walk sub-exprs for inner diagnostics; emit `UnsupportedFeature` (E0255). Real typing rule deferred per spec/09_ARRAY.md "Phase A Step 4/5". |
 | `Cast { expr, ty }` | result = resolved `ty` (no compat check in v0; `InvalidCast` E0264 lands per spec/12_AS.md) |
-| `If { cond, then, else? }` | cond unified with `bool`; then/else go through `unify_arms` + `join_never` (or `coerce(then, Unit)` on then-arm if no else — a degenerate coercion) |
+| `If { cond, then, else? }` | `equate(cond, bool)`; then/else go through `equate_arms` + `join_never` (or `subtype(then, Unit)` on then-arm if no else — a degenerate subtype) |
 | `Block(bid)` | recurse `infer_block` |
-| `Return(val)` | `coerce(val, cur_ret)` (or `coerce(Unit, cur_ret)` if no val); result = `Never` |
-| `Let { local, init }` | local's annotated ty (or fresh `Infer`); `coerce(init, local_ty)`; result = `Unit` |
+| `Return(val)` | `subtype(val, cur_ret)` (or `subtype(Unit, cur_ret)` if no val); result = `Never` |
+| `Let { local, init }` | local's annotated ty (or fresh `Infer`); `subtype(init, local_ty)`; result = `Unit` |
 | `Poison` | `Error` |
 
-## Unification rules
+## Two combinators: `equate` and `subtype`
 
-`unify` is **symmetric** Hindley-Milner unification — there is no
-subtyping in this layer. The two type arguments are algebraically
-interchangeable; we keep the parameter names `found` / `expected`
-only because the emitted diagnostic renders them with those labels,
-which is a presentation artifact (most call sites have no semantic
-notion of which side is "expected").
+Type-relating splits into two named combinators that share one body.
+Direct callers must pick one — the loose-mut Ptr-Ptr arm is reachable
+only through `subtype`'s entry path, so misuse-shaped soundness bugs
+(`unify` at a coalesce site forgetting to enqueue an obligation —
+historically B006) are foreclosed by the API.
 
-After resolving both sides through any `Infer` chains:
+### `equate(a, b, span)` — symmetric, strict at every layer
 
-- `found == expected` → ok.
+Hindley-Milner equation. The two arguments are algebraically
+interchangeable; parameter names `found` / `expected` are a
+presentation choice for the emitted diagnostic. After resolving both
+sides through any `Infer` chains:
+
+- `a == b` → ok.
 - Either is `Error` → ok (poison absorbs).
 - Both `Never` → ok. Anything else against `Never` is a mismatch
-  here. The "`!` flows into any context" rule lives in `coerce`,
-  not in `unify`.
+  here. The "`!` flows into any context" rule lives in `subtype`.
 - One side is `Infer(α)` → bind `α := other` via `bind_infer_checked`,
-  which rejects int-flagged vars being unified with non-integer
+  which rejects int-flagged vars being equated with non-integer
   concrete types.
 - Both `Prim(p)`, `Prim(q)` → ok iff `p == q`.
 - Both `Unit` → ok.
 - Both `Fn` → arity match, recurse pairwise on args + on rets.
-- Both `Ptr` → recurse on inner.
+- Both `Ptr` → mut equality required; recurse on inner.
+- Both `Array` → length equality required (no erasure under
+  `equate`); recurse on element.
 - Otherwise → `TypeMismatch { expected, found, span }` (E0250).
 
-## Coercion rules
+`equate` does not enqueue obligations. It's used at sites where the
+relation is symmetric and strict: index-position type vs `usize`,
+binop operands vs each other, logical/`!` operands vs `bool`, `if` /
+`while` cond vs `bool`, **ArrayLit elements vs the first element**,
+**`if` / `match` arm coalesce** (via `equate_arms`, which wraps
+`equate` with a Never-skip).
 
-`coerce(actual, expected, span)` is the **directional** check used
-where the context dictates a slot type that an expression's value
-must fit (fn body vs declared return, `Return(val)`, call args, let
-init, assignment rhs, mid-block expression-statement, else-less `if`
-then-arm). It splits into two halves — one eager, one deferred:
+### `subtype(actual, expected, span)` — directional
+
+The directional check used where the context dictates a slot type an
+expression's value must fit (fn body vs declared return,
+`Return(val)`, call args, let init, assignment rhs, mid-block
+expression-statement, else-less `if` then-arm, struct field, `break`
+operand, loop body→unit). Two halves:
 
 **Eager half (runs at the call site):**
 
@@ -203,39 +215,48 @@ then-arm). It splits into two halves — one eager, one deferred:
    `Never`, `actual` is some concrete `T`) is *not* accepted — that
    is exactly the case "this fn declared `-> never` but returns a
    value", which must error.
-2. Otherwise, `unify(actual, expected)` immediately. This propagates
-   type information through the union-find as the walk continues,
-   binding any Infer vars on either side.
-3. Enqueue `Obligation::Coerce { actual, expected, span }`.
+2. Otherwise, run the shared structural body in `Mode::Subtype` so
+   type information propagates through the union-find. Loose on
+   outer Ptr mut (the directional check fires at discharge); forward
+   length erasure under Ptr (`Some(N) → None`) is silent, sticky
+   through nested Ptrs.
+3. Enqueue `Obligation::Coerce { actual, expected, span }`
+   **unconditionally** (no `is_coercible` pruning). Discharge is a
+   recursive structural walk — for kinds with no subtype rule today
+   (Prim, Unit, Adt) it bottoms out as a no-op.
 
 **Deferred half (runs at module-level discharge after all inference
-and integer-defaulting):** the obligation's discharge handler
-re-resolves both sides with `resolve_fully` and runs the pointer
-outer-layer subtype check (`*mut T` → `*const T` allowed at the
-outermost layer; inner positions must match exactly). Non-Ptr-Ptr
-inputs are no-ops here — the `unify` from the eager half has already
-fired any shape-mismatch diagnostic.
+and integer-defaulting):** see "Obligations" below. The discharge is
+the soundness backstop — eager handles diagnostics; discharge runs
+on fully-resolved types so a Ptr buried inside an Array (or future
+Fn variance / generic Infer chain) gets the same directional
+treatment as a top-level Ptr.
 
-**Why split?** `unify` is structurally permissive on outer Ptr
-mutability (it discards the mut bits and recurses on inner types),
-so the directional `*mut → *const` rule cannot live inside `unify`;
-it's a separate post-hoc validation. Deferring that validation to a
-frozen type universe means every check sees fully-resolved outer
-constructors — the check is honest by construction. See
-`obligation.rs`.
+**Why universal enqueue?** Mutability and length aren't `Infer`
+kinds in oxide today, so most directional violations *could* be
+caught eagerly. But future variance / generics / where-clauses
+introduce cases where two `Infer` types are linked through a
+parameterized signature before either is concretely known — the
+constraint is recorded at the call site, the directional rule fires
+later when the chain pins. Pruning the queue based on present-day
+shapes is a faulty optimization that would require reasoning about
+"can this ever resolve to a Ptr" at every site. Better to record
+universally and let the recursive discharge decide.
 
 **On `expect_unit`:** there is no separate `expect_unit` rule — the
 unit-position constraint at mid-block expression statements and
-else-less `if` then-arms is exactly `coerce(expr_ty, Unit)`. The
+else-less `if` then-arms is exactly `subtype(expr_ty, Unit)`. The
 Ptr-Ptr branch never fires (Unit isn't Ptr), so the obligation
-discharge is a no-op and the eager `unify(_, Unit)` enforces the
-constraint. Int-flagged Infer being unified with Unit is rejected by
-`bind_infer_checked` with the same diagnostic shape as before.
+discharge is a no-op and the eager body enforces the constraint.
 
-Branch unification in `if` (then vs else) is symmetric, not a
-coercion — but it shares the Never-absorbs spirit. Implemented as
-`unify_arms`: if either arm is `Never`, skip unify entirely; the
-non-divergent arm decides the if-expr's type via `join_never`.
+Branch coalesce in `if` (then vs else) is **strict equate**, not a
+coercion — `equate_arms` wraps `equate` with a Never-skip so a
+divergent arm doesn't poison the if-expr's type. Mixed-mut and
+mixed-length coalesce errors at the arm site (Rust-aligned). Sites
+that need length erasure or mut subtyping should pass each arm
+separately through `subtype` against a fixed slot — that work
+requires expected-type plumbing through `infer_expr`, which is
+deferred.
 
 ## Obligations
 
@@ -247,20 +268,31 @@ defer these to a check-only post-pass via a queue of obligations.
 Two obligation kinds today:
 
 - **`Coerce { actual, expected, span }`** — pointer mut-compat at
-  every level (outer subtype, inner strict equality). Enqueued from
-  every `coerce` call site after the eager `unify` body runs.
+  every level (outer `Mut ≤ Const`, inner strict equality), walked
+  recursively through Array elements and Fn params/ret. Enqueued
+  unconditionally from every `subtype` call after the eager body
+  runs (no `is_coercible` pruning — discharge is the soundness
+  backstop against future variance / generic Infer chains).
 - **`Sized { ty, pos, span }`** — `TyKind::Array(_, None)` (the
   unsized form, see spec/09_ARRAY.md) is rejected at every value
-  position (fn parameter, fn return, struct field, let-binding).
-  `pos` discriminates the position for diagnostics. Enqueued during
-  HirTy resolution at decl phase (param/return/field) and at
-  `infer_let` (let-binding).
+  position (fn parameter, fn return, struct field, let-binding,
+  deref). `pos` discriminates the position for diagnostics. The
+  discharge walks `Array(_, Some(_))` element types so a nested
+  unsized inside a sized outer (e.g. `[[u8]; 3]`) is rejected;
+  stops at `Ptr` (the pointer is sized; pointee can be unsized).
+  Enqueued during HirTy resolution at decl phase
+  (param/return/field) and at `infer_let` (let-binding) /
+  `Unary { Deref, _ }` (deref).
 
-**Discharge is pure observation.** Each obligation calls
-`resolve_fully` on its captured TyIds, inspects the resolved kind,
-and emits a diagnostic if the rule fails. **It never unifies, binds,
-or introduces new type variables.** All inference happens in the
-eager half during the AST walk; obligations only validate.
+**Discharge is pure observation and recursive.** Each handler walks
+the resolved type structurally — `discharge_subtype` /
+`discharge_eq` for `Coerce`, `discharge_sized` for `Sized` — emitting
+diagnostics on rule failures and **never** unifying, binding, or
+introducing type variables. All inference happens in the eager half
+during the AST walk; obligations only validate. The recursive walk
+catches buried-Ptr cases (`[*const T; 3]` flowing into `[*mut T; 3]`)
+and nested-unsized cases (`struct S { f: [[u8]; 3] }`) that a shallow
+top-only check would miss.
 
 **Two queues, two timings:**
 
