@@ -90,6 +90,10 @@ pub struct FieldDecl {
 pub struct FnDecl {
     pub name: Ident,
     pub params: Vec<Param>,
+    /// Trailing C-style `...` after the last fixed param. Only legal in
+    /// `extern "C"` declarations; the parser rejects `is_variadic &&
+    /// body.is_some()` as E0271. See spec/15_VARIADIC.md.
+    pub is_variadic: bool,
     pub ret_ty: Option<TypeId>,
     /// `Some(_)` for defined fns; `None` for fns inside an `extern` block.
     pub body: Option<BlockId>,

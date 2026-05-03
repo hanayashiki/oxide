@@ -1,0 +1,14 @@
+; ModuleID = 'test'
+source_filename = "test"
+
+define i64 @f(i32 %x) {
+allocas:
+  %x.0.slot = alloca i32, align 4
+  br label %body
+
+body:                                             ; preds = %allocas
+  store i32 %x, ptr %x.0.slot, align 4
+  %load = load i32, ptr %x.0.slot, align 4
+  %sext = sext i32 %load to i64
+  ret i64 %sext
+}

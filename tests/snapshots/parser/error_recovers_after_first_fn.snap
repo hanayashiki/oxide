@@ -1,0 +1,16 @@
+Module
+  Fn bad()
+    Block
+  Fn good()
+    Block
+      tail: Int(1)
+== diagnostics ==
+[E0101] Error: unexpected token: found Semi
+   ╭─[ error_recovers_after_first_fn.ox:1:20 ]
+   │
+ 1 │ fn bad() { let x = ; } fn good() { 1 }
+   │                    ┬  
+   │                    ╰── unexpected here
+   │ 
+   │ Note: expected: construct
+───╯

@@ -1,0 +1,11 @@
+Module
+  ExternBlock "C"
+    Fn bad() -> i32;
+== diagnostics ==
+[E0107] Error: `...` requires at least one fixed parameter before it
+   ╭─[ error_variadic_without_fixed_param.ox:1:21 ]
+   │
+ 1 │ extern "C" { fn bad(...) -> i32; }
+   │                     ─┬─  
+   │                      ╰─── here
+───╯

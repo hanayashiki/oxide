@@ -1,0 +1,15 @@
+; ModuleID = 'test'
+source_filename = "test"
+
+@.str.0 = private unnamed_addr constant [7 x i8] c"/tmp/f\00"
+
+declare i32 @open(ptr, i32, ...)
+
+define i32 @main() {
+allocas:
+  br label %body
+
+body:                                             ; preds = %allocas
+  %call = call i32 (ptr, i32, ...) @open(ptr @.str.0, i32 66, i32 420)
+  ret i32 0
+}

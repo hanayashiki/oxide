@@ -1,0 +1,4 @@
+Module
+  ExternBlock "C"
+    Fn printf(fmt: *const u8, ...) -> i32;
+    Fn open(path: *const u8, flags: i32, ...) -> i32;

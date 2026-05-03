@@ -1,0 +1,14 @@
+== diagnostics ==
+[E0253] Error: wrong number of arguments: expected at least 1, found 0
+   ╭─[ error_printf_too_few_args_e0253_at_least.ox:5:5 ]
+   │
+ 5 │     printf();
+   │     ────┬───  
+   │         ╰───── called here
+───╯
+== types ==
+Fn[0] printf(fmt[Local(0)]: *const [u8]) -> i32
+  HExprId(0) : fn(*const [u8], ...) -> i32
+  HExprId(1) : i32
+  HExprId(2) : i32
+Fn[1] main() -> i32

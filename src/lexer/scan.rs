@@ -348,6 +348,7 @@ impl<'a> Lexer<'a> {
             let kind3 = match (c, c2, c3) {
                 ('<', '<', '=') => Some(ShlEq),
                 ('>', '>', '=') => Some(ShrEq),
+                ('.', '.', '.') => Some(DotDotDot),
                 _ => None,
             };
             if let Some(kind) = kind3 {

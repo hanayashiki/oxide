@@ -1,0 +1,9 @@
+== diagnostics ==
+== types ==
+Fn[0] printf(fmt[Local(0)]: *const [u8]) -> i32
+  HExprId(0) : fn(*const [u8], ...) -> i32
+  HExprId(1) : *const [u8; 4]
+  HExprId(2) : *const [u8; 5]
+  HExprId(3) : i32
+  HExprId(4) : i32
+Fn[1] main() -> i32

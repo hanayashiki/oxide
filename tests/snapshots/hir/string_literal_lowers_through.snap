@@ -1,0 +1,5 @@
+HirProgram
+  Module string_literal_lowers_through.ox (root)
+    Fn[0] f()
+      Block
+        Let(0, "s", Str("hello"))

@@ -1,0 +1,13 @@
+HirProgram
+  Module unresolved_name_emits_e0201.ox (root)
+    Fn[0] f()
+      Block
+        tail: Unresolved("undefined", place)
+== diagnostics ==
+[E0201] Error: cannot find `undefined` in scope
+   ╭─[ unresolved_name_emits_e0201.ox:1:10 ]
+   │
+ 1 │ fn f() { undefined }
+   │          ────┬────  
+   │              ╰────── not found
+───╯

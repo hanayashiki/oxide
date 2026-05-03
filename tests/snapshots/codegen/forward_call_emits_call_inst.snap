@@ -1,0 +1,19 @@
+; ModuleID = 'test'
+source_filename = "test"
+
+define i32 @a() {
+allocas:
+  br label %body
+
+body:                                             ; preds = %allocas
+  %call = call i32 @b()
+  ret i32 %call
+}
+
+define i32 @b() {
+allocas:
+  br label %body
+
+body:                                             ; preds = %allocas
+  ret i32 1
+}

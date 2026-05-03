@@ -1,0 +1,11 @@
+Module
+  Fn f()
+    Block
+== diagnostics ==
+[E0104] Error: reserved keyword `match` is not yet supported
+   ╭─[ error_reserved_keyword_match.ox:1:10 ]
+   │
+ 1 │ fn f() { match x { } }
+   │          ──┬──  
+   │            ╰──── reserved for future use
+───╯

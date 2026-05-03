@@ -1,0 +1,16 @@
+== diagnostics ==
+[E0265] Error: array length mismatch: expected `[u8; 4]`, found `[u8; 3]`
+   ╭─[ error_mismatched_length_strs_in_if_arms.ox:1:47 ]
+   │
+ 1 │ fn f() -> i32 { let s = if true { "hi" } else { "bye" }; 0 }
+   │                                               ────┬────  
+   │                                                   ╰────── length mismatch
+───╯
+== types ==
+Fn[0] f() -> i32
+  HExprId(0) : bool
+  HExprId(1) : *const [u8; 3]
+  HExprId(2) : *const [u8; 4]
+  HExprId(3) : *const [u8; 3]
+  HExprId(4) : ()
+  HExprId(5) : i32

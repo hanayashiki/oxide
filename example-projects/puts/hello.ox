@@ -1,6 +1,4 @@
-extern "C" {
-    fn puts(s: *const [u8]) -> i32;
-}
+import "stdio.ox";
 
 fn main() -> i32 {
     puts("hello world");

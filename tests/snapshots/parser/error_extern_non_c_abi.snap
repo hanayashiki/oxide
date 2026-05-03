@@ -1,0 +1,9 @@
+Module
+== diagnostics ==
+[E0107] Error: only "C" ABI is supported, got "Rust"
+   ╭─[ error_extern_non_c_abi.ox:1:8 ]
+   │
+ 1 │ extern "Rust" { fn f(); }
+   │        ───┬──  
+   │           ╰──── here
+───╯

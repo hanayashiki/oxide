@@ -27,8 +27,10 @@ pub enum TyKind {
     Unit,
     /// `!` — bottom type. Subtype of every type during unification.
     Never,
-    /// Function signature.
-    Fn(Vec<TyId>, TyId),
+    /// Function signature. Third tuple element is the C-ABI variadic
+    /// flag (`true` only for `extern "C" fn(..., ...)`); see
+    /// spec/15_VARIADIC.md.
+    Fn(Vec<TyId>, TyId, bool),
     /// `*const T` / `*mut T`. Mutability is interned alongside the pointee
     /// so the arena distinguishes the two variants. Unify treats them
     /// equivalently (shape only); the coercion check at use sites enforces
@@ -114,6 +116,12 @@ pub struct FnSig {
     /// in case fn signatures ever grow a real multi-pass shape (generics,
     /// trait method default impls, where-clause resolution).
     pub partial: bool,
+    /// C-ABI variadic flag. Mirrored on `TyKind::Fn`'s third tuple
+    /// element. Named `c_variadic` (not `is_variadic`) per
+    /// spec/15_VARIADIC.md to disambiguate from possible future
+    /// Rust-style variadic generics; the simpler `is_variadic` name
+    /// only lives at the HIR layer.
+    pub c_variadic: bool,
 }
 
 /// Typed ADT definition. Built up across phases 0 and 0.5 in
@@ -257,13 +265,19 @@ impl TyArena {
             TyKind::Prim(p) => p.name().to_string(),
             TyKind::Unit => "()".to_string(),
             TyKind::Never => "!".to_string(),
-            TyKind::Fn(params, ret) => {
+            TyKind::Fn(params, ret, c_variadic) => {
                 let mut s = String::from("fn(");
                 for (i, p) in params.iter().enumerate() {
                     if i > 0 {
                         s.push_str(", ");
                     }
                     s.push_str(&self.render(*p));
+                }
+                if *c_variadic {
+                    if !params.is_empty() {
+                        s.push_str(", ");
+                    }
+                    s.push_str("...");
                 }
                 s.push(')');
                 if *ret != self.unit {

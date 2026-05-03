@@ -161,6 +161,7 @@ fn resolve_fn_sigs(cx: &mut Checker<'_>) {
             params,
             ret,
             partial: false,
+            c_variadic: hir_fn.is_variadic,
         };
     }
 }

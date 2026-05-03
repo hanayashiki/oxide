@@ -37,7 +37,7 @@ use crate::reporter::Span;
 use self::obligation::Obligation;
 use self::unify::MismatchCtx;
 use super::error::{MutateOp, SizedPos, TypeError};
-use super::ty::{AdtDef, AdtId, FnSig, InferId, TyArena, TyId, TyKind};
+use super::ty::{AdtDef, AdtId, FnSig, InferId, PrimTy, TyArena, TyId, TyKind};
 
 #[derive(Clone, Debug)]
 pub struct TypeckResults {
@@ -184,6 +184,7 @@ impl<'hir> Checker<'hir> {
                 params: Vec::new(),
                 ret: placeholder,
                 partial: true,
+                c_variadic: false,
             })
             .collect();
         Self {
@@ -298,6 +299,13 @@ impl<'hir> Checker<'hir> {
                 };
                 unify::discharge_sized(self, t, pos, span);
             }
+            Obligation::VariadicPromotable { ty, span } => {
+                let t = match inf {
+                    Some(i) => self.resolve_fully(i, ty),
+                    None => ty,
+                };
+                self.check_variadic_promotable(t, span);
+            }
         }
     }
 
@@ -343,6 +351,9 @@ impl<'hir> Checker<'hir> {
                 *found = self.resolve_fully(inf, *found);
             }
             TypeError::DerefNonPointer { found, .. } => {
+                *found = self.resolve_fully(inf, *found);
+            }
+            TypeError::VariadicArgUnsupported { found, .. } => {
                 *found = self.resolve_fully(inf, *found);
             }
             TypeError::UnknownType { .. }
@@ -513,10 +524,10 @@ impl<'hir> Checker<'hir> {
         let resolved = self.resolve(inf, ty);
         match self.tys.kind(resolved).clone() {
             TyKind::Infer(_) => self.tys.error, // shouldn't happen post-finalize
-            TyKind::Fn(params, ret) => {
+            TyKind::Fn(params, ret, c_variadic) => {
                 let params: Vec<_> = params.iter().map(|&p| self.resolve_fully(inf, p)).collect();
                 let ret = self.resolve_fully(inf, ret);
-                self.tys.intern(TyKind::Fn(params, ret))
+                self.tys.intern(TyKind::Fn(params, ret, c_variadic))
             }
             TyKind::Ptr(inner, m) => {
                 let inner = self.resolve_fully(inf, inner);
@@ -628,7 +639,7 @@ impl<'hir> Checker<'hir> {
             HirExprKind::Local(lid) => self.local_tys[lid],
             HirExprKind::Fn(fid) => {
                 let sig = self.fn_sigs[fid].clone();
-                self.tys.intern(TyKind::Fn(sig.params, sig.ret))
+                self.tys.intern(TyKind::Fn(sig.params, sig.ret, sig.c_variadic))
             }
             HirExprKind::Unresolved(_) => self.tys.error,
             HirExprKind::Unary { op, expr: inner } => self.infer_unary(inf, op, inner, &span),
@@ -835,7 +846,7 @@ impl<'hir> Checker<'hir> {
             }
             TyKind::Never => self.tys.never,
             TyKind::Error => self.tys.error,
-            TyKind::Prim(_) | TyKind::Unit | TyKind::Fn(_, _) | TyKind::Array(_, _) => {
+            TyKind::Prim(_) | TyKind::Unit | TyKind::Fn(_, _, _) | TyKind::Array(_, _) => {
                 inf.errors.push(TypeError::TypeNotFieldable {
                     ty: resolved,
                     span: span.clone(),
@@ -1098,18 +1109,39 @@ impl<'hir> Checker<'hir> {
         let callee_resolved = self.resolve(inf, callee_ty);
         let arg_tys: Vec<TyId> = args.iter().map(|&a| self.infer_expr(inf, a)).collect();
         match self.tys.kind(callee_resolved).clone() {
-            TyKind::Fn(param_tys, ret_ty) => {
-                if param_tys.len() != args.len() {
+            TyKind::Fn(param_tys, ret_ty, c_variadic) => {
+                let n_fixed = param_tys.len();
+                if c_variadic {
+                    if args.len() < n_fixed {
+                        inf.errors.push(TypeError::WrongArgCount {
+                            expected: n_fixed,
+                            found: args.len(),
+                            at_least: true,
+                            span: span.clone(),
+                        });
+                        return ret_ty;
+                    }
+                } else if args.len() != n_fixed {
                     inf.errors.push(TypeError::WrongArgCount {
-                        expected: param_tys.len(),
+                        expected: n_fixed,
                         found: args.len(),
+                        at_least: false,
                         span: span.clone(),
                     });
                     return ret_ty;
                 }
-                for ((&aid, &pty), &aty) in args.iter().zip(&param_tys).zip(&arg_tys) {
+                for ((&aid, &pty), &aty) in args.iter().take(n_fixed).zip(&param_tys).zip(&arg_tys) {
                     let arg_span = self.hir.exprs[aid].span.clone();
                     unify::subtype(self, inf, aty, pty, arg_span);
+                }
+                if c_variadic {
+                    for (&aid, &aty) in args.iter().zip(&arg_tys).skip(n_fixed) {
+                        let arg_span = self.hir.exprs[aid].span.clone();
+                        inf.obligations.push(Obligation::VariadicPromotable {
+                            ty: aty,
+                            span: arg_span,
+                        });
+                    }
                 }
                 ret_ty
             }
@@ -1120,6 +1152,36 @@ impl<'hir> Checker<'hir> {
                     span: span.clone(),
                 });
                 self.tys.error
+            }
+        }
+    }
+
+    /// Per spec/15_VARIADIC.md "check_variadic_promotable": validate
+    /// that an argument in a C-variadic call slot has a type that can
+    /// flow through C's default-argument-promotion rules. Discharged
+    /// post-finalize via `Obligation::VariadicPromotable` so int-flagged
+    /// Infer vars (integer literals) have a chance to default to `i32`
+    /// first. `Error` is silently absorbed.
+    fn check_variadic_promotable(&mut self, ty: TyId, span: Span) {
+        match self.tys.kind(ty) {
+            TyKind::Prim(p) => match p {
+                PrimTy::I8
+                | PrimTy::I16
+                | PrimTy::I32
+                | PrimTy::I64
+                | PrimTy::U8
+                | PrimTy::U16
+                | PrimTy::U32
+                | PrimTy::U64
+                | PrimTy::Isize
+                | PrimTy::Usize
+                | PrimTy::Bool => {}
+            },
+            TyKind::Ptr(_, _) => {}
+            TyKind::Error => {}
+            _ => {
+                self.errors
+                    .push(TypeError::VariadicArgUnsupported { found: ty, span });
             }
         }
     }

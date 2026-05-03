@@ -1,0 +1,7 @@
+HirProgram
+  Module extern_fn_call_resolves_to_fn.ox (root)
+    ExternFn[0] print_int(x[Local(0)]: i32) -> i32
+    Fn[1] main() -> i32
+      Block
+        ExprStmt Call(Fn(0, "print_int"), Int(42))
+        tail: Int(0)

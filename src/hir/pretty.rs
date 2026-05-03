@@ -117,6 +117,12 @@ impl<'a> Printer<'a> {
                 write!(header, ": {}", ty_str(ty)).unwrap();
             }
         }
+        if f.is_variadic {
+            if !f.params.is_empty() {
+                header.push_str(", ");
+            }
+            header.push_str("...");
+        }
         header.push(')');
         if let Some(rt) = &f.ret_ty {
             write!(header, " -> {}", ty_str(rt)).unwrap();

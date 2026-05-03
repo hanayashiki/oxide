@@ -1,0 +1,14 @@
+; ModuleID = 'test'
+source_filename = "test"
+
+define i1 @f(i1 %c) {
+allocas:
+  %c.0.slot = alloca i1, align 1
+  br label %body
+
+body:                                             ; preds = %allocas
+  store i1 %c, ptr %c.0.slot, align 1
+  %load = load i1, ptr %c.0.slot, align 1
+  %not = xor i1 %load, true
+  ret i1 %not
+}

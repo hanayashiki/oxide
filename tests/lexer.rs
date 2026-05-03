@@ -286,6 +286,31 @@ fn three_char_ops() {
 }
 
 #[test]
+fn dotdotdot_is_one_token() {
+    use TokenKind::*;
+    assert_eq!(kinds("..."), vec![DotDotDot, Eof]);
+}
+
+#[test]
+fn longest_match_dotdotdot_then_dot() {
+    use TokenKind::*;
+    // `....` lexes as `...` followed by `.` (3-char arm runs before 2-char).
+    assert_eq!(kinds("...."), vec![DotDotDot, Dot, Eof]);
+}
+
+#[test]
+fn dotdot_still_lexes_unchanged() {
+    use TokenKind::*;
+    assert_eq!(kinds(".."), vec![DotDot, Eof]);
+}
+
+#[test]
+fn whitespace_separated_dots_lex_individually() {
+    use TokenKind::*;
+    assert_eq!(kinds(". . ."), vec![Dot, Dot, Dot, Eof]);
+}
+
+#[test]
 fn longest_match_shleq_is_one_token() {
     use TokenKind::*;
     // <<= must lex as one ShlEq, not Shl + Eq or Lt + Lt + Eq.

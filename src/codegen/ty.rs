@@ -67,7 +67,7 @@ pub fn lower_ty<'ctx>(
             "lower_ty called on Never — !-typed expressions terminate \
              the BB before any consumer asks for a slot"
         ),
-        TyKind::Fn(_, _) => panic!("lower_ty called on Fn — use lower_fn_type"),
+        TyKind::Fn(_, _, _) => panic!("lower_ty called on Fn — use lower_fn_type"),
         TyKind::Array(elem, Some(n)) => {
             let elem_ll = lower_ty(ctx, tcx, adt_ll, *elem);
             elem_ll.array_type(*n as u32).into()
@@ -123,9 +123,9 @@ pub fn lower_fn_type<'ctx>(
         })
         .collect();
     if is_void_ret(tcx, sig.ret) {
-        ctx.void_type().fn_type(&params, false)
+        ctx.void_type().fn_type(&params, sig.c_variadic)
     } else {
-        lower_ty(ctx, tcx, adt_ll, sig.ret).fn_type(&params, false)
+        lower_ty(ctx, tcx, adt_ll, sig.ret).fn_type(&params, sig.c_variadic)
     }
 }
 

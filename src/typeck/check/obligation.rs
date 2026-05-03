@@ -68,4 +68,10 @@ pub(super) enum Obligation {
         pos: SizedPos,
         span: Span,
     },
+    /// `ty` is an argument in a C-variadic call slot; it must be a type
+    /// that flows through C's default-argument-promotion rules.
+    /// Deferred so int-flagged Infer vars (typical of integer literals)
+    /// have a chance to default to `i32` before the check runs. See
+    /// spec/15_VARIADIC.md.
+    VariadicPromotable { ty: TyId, span: Span },
 }

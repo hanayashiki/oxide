@@ -1,0 +1,19 @@
+== diagnostics ==
+[E0265] Error: array length mismatch: expected `[u8]`, found `[u8; 3]`
+   ╭─[ error_length_erasure_in_arm_coalesce.ox:3:35 ]
+   │
+ 3 │     let s = if true { "hi" } else { unsized_ptr() };
+   │                                   ────────┬────────  
+   │                                           ╰────────── length mismatch
+───╯
+== types ==
+Fn[0] unsized_ptr() -> *const [u8]
+  HExprId(0) : *const [u8; 3]
+  HExprId(1) : bool
+  HExprId(2) : *const [u8; 3]
+  HExprId(3) : fn() -> *const [u8]
+  HExprId(4) : *const [u8]
+  HExprId(5) : *const [u8; 3]
+  HExprId(6) : ()
+  HExprId(7) : i32
+Fn[1] main() -> i32

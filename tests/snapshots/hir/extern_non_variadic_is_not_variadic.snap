@@ -1,0 +1,3 @@
+HirProgram
+  Module extern_non_variadic_is_not_variadic.ox (root)
+    ExternFn[0] fixed_arity(a[Local(0)]: i32, b[Local(1)]: i32) -> i32

@@ -22,7 +22,7 @@ use crate::hir::{
     LocalId, VariantIdx,
 };
 use crate::parser::ast::{AssignOp, BinOp, UnOp};
-use crate::typeck::{AdtId, TyId, TyKind, TypeckResults};
+use crate::typeck::{AdtId, PrimTy, TyId, TyKind, TypeckResults};
 
 use super::ty::{
     AdtLlTypes, as_prim, is_signed_prim, is_void_ret, lower_fn_type, lower_prim, lower_ty,
@@ -1307,15 +1307,27 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         // source operand, passes the slot ptr (the fn's LLVM signature
         // has `ptr` for this param — see lower_fn_type). Other args
         // flow as SSA values.
+        //
+        // Two-phase loop per spec/15_VARIADIC.md: args at index `i <
+        // n_fixed` use the existing fixed-arg path; args at `i >=
+        // n_fixed` route through `promote_for_variadic`, which applies
+        // the C default argument promotions to trailing variadic args
+        // (C11 §6.5.2.2 ¶7) — the front-end's responsibility, not
+        // LLVM's. See `promote_for_variadic` doc-comment for why.
+        let n_fixed = self.typeck_results.fn_sig(fid).params.len();
         let mut arg_vals: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(args.len());
-        for &a in args {
+        for (i, &a) in args.iter().enumerate() {
             let arg_ty = self.ty_of(a);
             let op = self.emit_expr(fx, a)?;
-            if self.is_sized_array(arg_ty) {
-                let fresh = self.spill_to_place_fresh(fx, op, arg_ty, "call.arg.slot");
-                arg_vals.push(fresh.into());
+            if i < n_fixed {
+                if self.is_sized_array(arg_ty) {
+                    let fresh = self.spill_to_place_fresh(fx, op, arg_ty, "call.arg.slot");
+                    arg_vals.push(fresh.into());
+                } else {
+                    arg_vals.push(self.load_value(op, arg_ty, "load").into());
+                }
             } else {
-                arg_vals.push(self.load_value(op, arg_ty, "load").into());
+                arg_vals.push(self.promote_for_variadic(op, arg_ty).into());
             }
         }
 
@@ -1343,6 +1355,51 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 .left()
                 .expect("non-void call produced no value"),
         ))
+    }
+
+    /// C default argument promotion for variadic args. C11 §6.5.2.2 ¶7
+    /// requires the *caller* to perform the "default argument promotions"
+    /// (defined in ¶6: integer promotions, `float`→`double`) on every
+    /// trailing arg past the `...`. The receiver relies on this — C11
+    /// §7.16.1.1 ¶2 makes `va_arg(args, T)` UB if `T` doesn't match the
+    /// actual-arg type *as promoted*. So a `u8` must arrive as `i32`
+    /// before the call, not after.
+    ///
+    /// LLVM's `isVarArg=true` only covers per-platform ABI lowering
+    /// (register classification, save area, `%al`, `va_start`); it does
+    /// **not** insert this promotion. clang emits the same sext/zext.
+    ///
+    /// Table: signed-narrow (`i8`/`i16`) sign-extend to `i32`;
+    /// unsigned-narrow + `bool` zero-extend to `i32`; `i32`/`u32`/`i64`/
+    /// `u64`/`isize`/`usize`/`Ptr(_, _)` pass through. Anything else is
+    /// unreachable — typeck E0272 already rejected it at the call site.
+    fn promote_for_variadic(&self, op: Operand<'ctx>, ty: TyId) -> BasicValueEnum<'ctx> {
+        let v = self.load_value(op, ty, "load");
+        match self.typeck_results.tys().kind(ty) {
+            TyKind::Prim(p) => match p {
+                PrimTy::I8 | PrimTy::I16 => self
+                    .builder
+                    .build_int_s_extend(v.into_int_value(), self.ctx.i32_type(), "sext")
+                    .unwrap()
+                    .into(),
+                PrimTy::U8 | PrimTy::U16 | PrimTy::Bool => self
+                    .builder
+                    .build_int_z_extend(v.into_int_value(), self.ctx.i32_type(), "zext")
+                    .unwrap()
+                    .into(),
+                PrimTy::I32
+                | PrimTy::U32
+                | PrimTy::I64
+                | PrimTy::U64
+                | PrimTy::Isize
+                | PrimTy::Usize => v,
+            },
+            TyKind::Ptr(..) => v,
+            _ => unreachable!(
+                "promote_for_variadic: typeck E0272 should have rejected non-promotable variadic arg type {:?}",
+                self.typeck_results.tys().kind(ty)
+            ),
+        }
     }
 
     // ---------- casts ----------

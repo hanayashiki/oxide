@@ -1,0 +1,11 @@
+Module
+== diagnostics ==
+[E0101] Error: unexpected token: found Ident("u8")
+   ╭─[ error_pointer_without_mutability.ox:1:10 ]
+   │
+ 1 │ fn f(s: *u8) {}
+   │          ─┬  
+   │           ╰── unexpected here
+   │ 
+   │ Note: expected: token, token
+───╯

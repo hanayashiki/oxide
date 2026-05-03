@@ -1,0 +1,22 @@
+Module
+  Fn f()
+    Block
+== diagnostics ==
+[E0006] Error: invalid escape sequence
+   ╭─[ error_lex_bad_escape_in_char.ox:1:18 ]
+   │
+ 1 │ fn f() { let x = '\q'; }
+   │                  ──┬─  
+   │                    ╰─── this escape is not recognised
+   │ 
+   │ Help: valid escapes: \n \r \t \\ \' \" \0 \xHH
+───╯
+[E0101] Error: unexpected token: found Semi
+   ╭─[ error_lex_bad_escape_in_char.ox:1:22 ]
+   │
+ 1 │ fn f() { let x = '\q'; }
+   │                      ┬  
+   │                      ╰── unexpected here
+   │ 
+   │ Note: expected: construct
+───╯

@@ -83,10 +83,38 @@ pub struct VfsHost {
     workdir: PathBuf,
 }
 
+/// Bundled stdlib, baked into the binary via `include_str!`. Each
+/// entry is `(import-name, source)`; the import name is also the
+/// canonical VFS path the file mounts at. Resolution checks this
+/// table before relative-path resolution per `spec/14_MODULES.md:206-211`.
+const STDLIB_FILES: &[(&str, &str)] = &[
+    ("stdio.ox", include_str!("../../stdlib/stdio.ox")),
+    ("stdlib.ox", include_str!("../../stdlib/stdlib.ox")),
+    ("string.ox", include_str!("../../stdlib/string.ox")),
+];
+
 impl VfsHost {
-    /// Build a VFS host with the given mount table. Workdir defaults
-    /// to `target/oxide-build`; override via `with_workdir`.
+    /// Build a VFS host with the bundled stdlib pre-mounted plus
+    /// `files` layered on top (user mounts win on collision so tests
+    /// can shadow stdlib entries). Workdir defaults to
+    /// `target/oxide-build`; override via `with_workdir`.
     pub fn new(files: HashMap<PathBuf, String>) -> Self {
+        let mut merged: HashMap<PathBuf, String> = STDLIB_FILES
+            .iter()
+            .map(|(name, src)| (PathBuf::from(name), (*src).to_string()))
+            .collect();
+        merged.extend(files);
+        Self {
+            files: merged,
+            workdir: PathBuf::from("target/oxide-build"),
+        }
+    }
+
+    /// Build a VFS host without the bundled stdlib pre-mounted.
+    /// Useful for resolver-isolation tests that want to exercise the
+    /// disk-fallthrough or not-found paths without stdlib in the way.
+    #[cfg(test)]
+    pub fn new_bare(files: HashMap<PathBuf, String>) -> Self {
         Self {
             files,
             workdir: PathBuf::from("target/oxide-build"),
@@ -101,8 +129,22 @@ impl VfsHost {
     }
 }
 
+/// Returns true when `raw` matches a bundled stdlib name. Resolution
+/// short-circuits to `PathBuf::from(raw)` (bare-name key) without
+/// joining against the importing file's directory.
+fn is_stdlib_name(raw: &str) -> bool {
+    STDLIB_FILES.iter().any(|(name, _)| *name == raw)
+}
+
 impl BuilderHost for VfsHost {
     fn resolve(&self, importing: &Path, raw: &str) -> Result<PathBuf, ResolveError> {
+        // Stdlib hardcode table wins over relative resolution per
+        // spec/14_MODULES.md:206-211. Collision policy: a user file
+        // named `stdio.ox` next to main.ox is shadowed by the bundled
+        // stdlib; rename the local file to disambiguate.
+        if is_stdlib_name(raw) {
+            return Ok(PathBuf::from(raw));
+        }
         let base = importing.parent().unwrap_or(Path::new(""));
         let candidate = lexical_normalize(&base.join(raw));
         if self.files.contains_key(&candidate) || candidate.exists() {

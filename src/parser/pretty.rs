@@ -143,6 +143,12 @@ impl<'a> Printer<'a> {
             self.write(": ");
             self.write_type(p.ty);
         }
+        if f.is_variadic {
+            if !f.params.is_empty() {
+                self.write(", ");
+            }
+            self.write("...");
+        }
         self.write(")");
         if let Some(rt) = f.ret_ty {
             self.write(" -> ");

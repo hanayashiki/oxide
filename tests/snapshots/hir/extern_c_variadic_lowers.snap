@@ -1,0 +1,3 @@
+HirProgram
+  Module extern_c_variadic_lowers.ox (root)
+    ExternFn[0] printf(fmt[Local(0)]: *const u8, ...) -> i32

@@ -116,6 +116,9 @@ pub struct HirFn {
     /// `true` if this fn was declared inside an `extern "C"` block —
     /// linker resolves the symbol against an external object file.
     pub is_extern: bool,
+    /// `true` if the fn signature ends in `, ...` — a C-ABI variadic.
+    /// The parser enforces `is_variadic ⇒ is_extern`.
+    pub is_variadic: bool,
     /// Source span — origin file is `span.file`.
     pub span: Span,
 }

@@ -62,6 +62,7 @@ pub enum TokenKind {
     Arrow,
     Dot,
     DotDot,
+    DotDotDot,
 
     // Operators
     Plus,

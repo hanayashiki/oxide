@@ -1,7 +1,7 @@
 //! `oxide` — the Oxide compiler driver.
 //!
 //! ```text
-//! oxide main.ox                       # compile + execv (default emit=exe)
+//! oxide main.ox                        # compile + execv (default emit=exe)
 //! oxide main.ox --no-run               # compile only; print exe path to stderr
 //! oxide main.ox --emit ir              # textual LLVM IR to stdout
 //! oxide main.ox --emit obj -o a.o      # object file
@@ -47,8 +47,10 @@ struct Args {
     #[arg(long = "emit", value_enum, default_value_t = EmitArg::Exe)]
     emit: EmitArg,
 
-    /// Output path. Required-ish for binary emits without a sane
-    /// default; for `exe` defaults to `./<stem>` (cwd, cc convention).
+    /// Output path. Defaults to `target/oxide-build/<stem>` so the
+    /// produced artifact lands under Cargo's gitignored target dir.
+    /// `exe` keeps the bare module name; the intermediate `.o` lives
+    /// alongside as `<stem>-<pid>.o` (no collision).
     #[arg(short = 'o', long = "output")]
     output: Option<PathBuf>,
 
@@ -270,7 +272,12 @@ fn run_pipeline(
     };
 
     let print_ir_to_stdout = matches!(args.emit, EmitArg::Ir) && args.output.is_none();
-    let exe_default_path = || -> PathBuf { PathBuf::from(format!("./{}", module_name)) };
+
+    // Default artifact path goes under `host.workdir()` (= `target/oxide-build/`)
+    // so that produced binaries land in `target/` and inherit Cargo's gitignore.
+    // Exe gets the bare module name (no extension on Unix); the intermediate `.o`
+    // for Exe lives alongside as `<name>-<pid>.o`, so no collision.
+    let exe_default_path = || -> PathBuf { host.workdir().join(&module_name) };
 
     let output = match (&args.output, args.emit, print_ir_to_stdout) {
         (Some(p), _, _) => OutputPath::Explicit(p.clone()),

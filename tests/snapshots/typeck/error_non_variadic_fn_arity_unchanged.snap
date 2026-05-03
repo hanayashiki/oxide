@@ -1,0 +1,18 @@
+== diagnostics ==
+[E0253] Error: wrong number of arguments: expected 2, found 1
+   ╭─[ error_non_variadic_fn_arity_unchanged.ox:2:20 ]
+   │
+ 2 │ fn main() -> i32 { add(1); 0 }
+   │                    ───┬──  
+   │                       ╰──── called here
+───╯
+== types ==
+Fn[0] add(a[Local(0)]: i32, b[Local(1)]: i32) -> i32
+  HExprId(0) : i32
+  HExprId(1) : i32
+  HExprId(2) : i32
+  HExprId(3) : fn(i32, i32) -> i32
+  HExprId(4) : i32
+  HExprId(5) : i32
+  HExprId(6) : i32
+Fn[1] main() -> i32

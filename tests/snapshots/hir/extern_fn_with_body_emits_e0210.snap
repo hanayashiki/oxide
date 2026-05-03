@@ -1,0 +1,15 @@
+HirProgram
+  Module extern_fn_with_body_emits_e0210.ox (root)
+    ExternFn[0] f()
+      Block
+        tail: Int(0)
+== diagnostics ==
+[E0210] Error: extern "C" fn `f` must not have a body
+   ╭─[ extern_fn_with_body_emits_e0210.ox:1:14 ]
+   │
+ 1 │ extern "C" { fn f() { 0 } }
+   │              ──────┬─────  
+   │                    ╰─────── remove the body
+   │ 
+   │ Help: items inside `extern "C" {{ ... }}` are foreign declarations; they end with `;` and the implementation is provided by the linker
+───╯

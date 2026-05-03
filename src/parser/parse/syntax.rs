@@ -734,16 +734,118 @@ where
         })
 }
 
-fn params_parser<'a, I, PT>(ty: PT) -> impl Parser<'a, I, Vec<Param>, Extra<'a>> + Clone
+/// Output of `params_parser`. The `variadic` slot carries the span of the
+/// `...` token when present so `fn_decl_parser` can emit E0271 with a
+/// pointer at the `...` itself rather than the whole signature.
+/// See spec/15_VARIADIC.md "Parser".
+pub(super) struct ParsedParams {
+    pub params: Vec<Param>,
+    pub variadic: Option<SimpleSpan>,
+}
+
+/// Parameter list. Recognises a trailing `, ...` as a C-style variadic
+/// marker and surfaces it as `variadic = Some(span)` for the caller.
+/// Malformed shapes — `(...)`, `(a, ..., b)`, `(a, ...,)`, `(... )` — are
+/// rejected directly here via `Rich::custom`.
+fn params_parser<'a, I, PT>(ty: PT) -> impl Parser<'a, I, ParsedParams, Extra<'a>> + Clone
 where
     I: OValueInput<'a>,
     PT: Parser<'a, I, TypeId, Extra<'a>> + Clone + 'a,
 {
-    param_parser(ty)
-        .separated_by(just(TokenKind::Comma))
-        .allow_trailing()
-        .collect::<Vec<_>>()
+    // Layout strategy: we accept any comma-separated mix of real params
+    // and `...` markers, then a *single* linear pass enforces:
+    //   - `...` must be the last entry,
+    //   - `...` requires a fixed param before it,
+    //   - no trailing comma after `...`.
+    // Catching the trailing-comma-after-`...` case requires looking at
+    // the *raw* comma run, so we don't use `.separated_by(...).
+    // allow_trailing()`; we drive the comma loop by hand and remember
+    // whether the closing `)` was preceded by an extra comma.
+    #[derive(Clone)]
+    enum Entry {
+        Param(Param),
+        Dots(SimpleSpan),
+    }
+
+    let entry = choice((
+        param_parser(ty).map(Entry::Param),
+        just(TokenKind::DotDotDot).map_with(|_, e| Entry::Dots(e.span())),
+    ));
+
+    // `entry (',' entry)* ','?` — explicit form so we can tell whether
+    // the trailing comma was present at the closing paren.
+    let nonempty_list = entry
+        .clone()
+        .then(just(TokenKind::Comma).ignore_then(entry).repeated().collect::<Vec<_>>())
+        .then(just(TokenKind::Comma).or_not().map(|c| c.is_some()))
+        .map(|((first, rest), trailing_comma)| {
+            let mut entries: Vec<Entry> = Vec::with_capacity(1 + rest.len());
+            entries.push(first);
+            entries.extend(rest);
+            (entries, trailing_comma)
+        });
+
+    let inside = choice((nonempty_list, empty().map(|_| (Vec::new(), false))));
+
+    inside
         .delimited_by(just(TokenKind::LParen), just(TokenKind::RParen))
+        // `validate` lets us *emit* a diagnostic without failing the
+        // parse. We always return a `ParsedParams` so the rest of the
+        // fn signature continues to parse and downstream recovery isn't
+        // disturbed; the variadic flag is cleared on malformed shapes
+        // so callers don't see a half-valid signature.
+        .validate(|(entries, trailing_comma), _e, emitter| {
+            // Single linear pass. Each malformed shape emits exactly one
+            // diagnostic so users see one error per offending `...`, not
+            // a cascade. A second `...` would emit its own
+            // "may appear only once" message — but the spec disallows
+            // any non-extern variadic usage anyway, so that path is
+            // covered by E0271 too.
+            let mut params: Vec<Param> = Vec::with_capacity(entries.len());
+            let mut variadic: Option<SimpleSpan> = None;
+            let mut malformed = false;
+            let mut emit = |span: SimpleSpan, msg: &str| {
+                emitter.emit(Rich::custom(span, msg.to_string()));
+            };
+            let n = entries.len();
+            for (i, ent) in entries.into_iter().enumerate() {
+                match ent {
+                    Entry::Param(p) => {
+                        // The "not last" diagnostic is emitted at the
+                        // `...` site; nothing to report here.
+                        params.push(p);
+                    }
+                    Entry::Dots(dots_span) => {
+                        if variadic.is_some() {
+                            emit(dots_span, "`...` may appear only once in a parameter list");
+                            malformed = true;
+                        } else if i == 0 {
+                            // `fn f(...)` — no fixed param before `...`.
+                            emit(
+                                dots_span,
+                                "`...` requires at least one fixed parameter before it",
+                            );
+                            malformed = true;
+                        } else if i != n - 1 {
+                            // `fn f(a, ..., b)` — `...` not the last entry.
+                            emit(dots_span, "`...` must be the last entry in a parameter list");
+                            malformed = true;
+                        } else if trailing_comma {
+                            // `fn f(a, ...,)` — trailing `,` after `...`.
+                            // Only relevant when `...` is the last entry,
+                            // otherwise the "not last" rule already fired.
+                            emit(dots_span, "no trailing `,` after `...`");
+                            malformed = true;
+                        }
+                        variadic = Some(dots_span);
+                    }
+                }
+            }
+            ParsedParams {
+                params,
+                variadic: if malformed { None } else { variadic },
+            }
+        })
 }
 
 fn ret_ty_parser<'a, I, PT>(ty: PT) -> impl Parser<'a, I, Option<TypeId>, Extra<'a>> + Clone
@@ -772,11 +874,38 @@ where
         .then(params_parser(ty.clone()))
         .then(ret_ty_parser(ty))
         .then(body)
-        .map(|(((name, params), ret_ty), body)| FnDecl {
-            name,
-            params,
-            ret_ty,
-            body,
+        // Validate the variadic-vs-body invariant. E0271 (variadic on a
+        // non-extern fn) is reported here because this is the only place
+        // where both `is_variadic` and body presence are simultaneously
+        // known. `validate` emits the diagnostic without failing the
+        // parse — the caller still gets back a usable `FnDecl` (with
+        // `is_variadic` cleared) so downstream layers compile cleanly.
+        .validate(|(((name, parsed), ret_ty), body), _e, emitter| {
+            let ParsedParams { params, variadic } = parsed;
+            let mut is_variadic = variadic.is_some();
+            if let Some(dots_span) = variadic {
+                if body.is_some() {
+                    // E0271 — `...` only allowed in `extern "C"`
+                    // declarations. Reported via the existing parse
+                    // error pathway (Rich::custom → ParseError::Custom).
+                    // See spec/15_VARIADIC.md.
+                    emitter.emit(Rich::custom(
+                        dots_span,
+                        "E0271: `...` only allowed in `extern \"C\"` declarations; \
+                         help: variadic Oxide functions are not supported; \
+                         use `extern \"C\"` to call a C variadic"
+                            .to_string(),
+                    ));
+                    is_variadic = false;
+                }
+            }
+            FnDecl {
+                name,
+                params,
+                is_variadic,
+                ret_ty,
+                body,
+            }
         })
 }
 

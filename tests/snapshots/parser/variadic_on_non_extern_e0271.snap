@@ -1,0 +1,11 @@
+Module
+  Fn my_log(level: i32)
+    Block
+== diagnostics ==
+[E0107] Error: E0271: `...` only allowed in `extern "C"` declarations; help: variadic Oxide functions are not supported; use `extern "C"` to call a C variadic
+   ╭─[ variadic_on_non_extern_e0271.ox:1:23 ]
+   │
+ 1 │ fn my_log(level: i32, ...) {}
+   │                       ─┬─  
+   │                        ╰─── here
+───╯

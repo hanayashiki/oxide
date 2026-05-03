@@ -196,6 +196,7 @@ impl Scanner {
                         name: name.clone(),
                         span: span.clone(),
                         is_extern: scan_ctx.in_extern_c,
+                        is_variadic: fn_decl.is_variadic,
                         ..HirFn::default()
                     });
 

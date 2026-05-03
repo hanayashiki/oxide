@@ -293,6 +293,35 @@ pub unsafe fn jit_run<R: Copy + 'static>(src: &str, entry: &str) -> R {
     r
 }
 
+/// Render LLVM IR for a single-file fixture as a snapshot string. Lex →
+/// parse → HIR → typeck → codegen, panicking on any errors so the test
+/// reports the underlying diagnostic. Codegen invokes `print_to_string`
+/// on the resulting `Module` and the text is returned verbatim — already
+/// trailing-newline terminated.
+pub fn render_codegen(file_name: &str, src: &str) -> String {
+    let (_map, file) = make_map(file_name, src);
+    let tokens = lex(src, file);
+    let (ast, parse_errs) = parse(&tokens, file);
+    assert!(
+        parse_errs.is_empty(),
+        "parse errors in {file_name}: {parse_errs:#?}"
+    );
+    let (hir, hir_errs) = lower(&ast);
+    assert!(
+        hir_errs.is_empty(),
+        "hir errors in {file_name}: {hir_errs:#?}"
+    );
+    let (results, type_errs) = check(&hir);
+    assert!(
+        type_errs.is_empty(),
+        "type errors in {file_name}: {type_errs:#?}"
+    );
+
+    let ctx = Context::create();
+    let module = codegen(&ctx, &hir, &results, "test");
+    module.print_to_string().to_string()
+}
+
 pub fn render_typeck(file_name: &str, src: &str) -> String {
     let (map, file) = make_map(file_name, src);
     let tokens = lex(src, file);

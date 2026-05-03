@@ -1,0 +1,12 @@
+HirProgram
+  Module non_fn_inside_extern_emits_e0211.ox (root)
+== diagnostics ==
+[E0211] Error: `struct` items are not supported inside `extern "C"` blocks
+   ╭─[ non_fn_inside_extern_emits_e0211.ox:1:14 ]
+   │
+ 1 │ extern "C" { struct S { x: i32 } }
+   │              ─────────┬─────────  
+   │                       ╰─────────── not allowed here
+   │ 
+   │ Help: v0 only accepts foreign `fn` declarations inside extern blocks
+───╯

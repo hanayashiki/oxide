@@ -1,0 +1,23 @@
+; ModuleID = 'test'
+source_filename = "test"
+
+define i1 @f(i1 %a, i1 %b) {
+allocas:
+  %a.0.slot = alloca i1, align 1
+  %b.1.slot = alloca i1, align 1
+  br label %body
+
+body:                                             ; preds = %allocas
+  store i1 %a, ptr %a.0.slot, align 1
+  store i1 %b, ptr %b.1.slot, align 1
+  %load = load i1, ptr %a.0.slot, align 1
+  br i1 %load, label %logic.rhs, label %logic.end
+
+logic.rhs:                                        ; preds = %body
+  %load1 = load i1, ptr %b.1.slot, align 1
+  br label %logic.end
+
+logic.end:                                        ; preds = %logic.rhs, %body
+  %logic = phi i1 [ false, %body ], [ %load1, %logic.rhs ]
+  ret i1 %logic
+}

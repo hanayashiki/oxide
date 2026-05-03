@@ -1,0 +1,19 @@
+; ModuleID = 'test'
+source_filename = "test"
+
+@.str.0 = private unnamed_addr constant [8 x i8] c"n = %d\0A\00"
+
+declare i32 @printf(ptr, ...)
+
+define i32 @main() {
+allocas:
+  %n.1.slot = alloca i8, align 1
+  br label %body
+
+body:                                             ; preds = %allocas
+  store i8 -5, ptr %n.1.slot, align 1
+  %load = load i8, ptr %n.1.slot, align 1
+  %sext = sext i8 %load to i32
+  %call = call i32 (ptr, ...) @printf(ptr @.str.0, i32 %sext)
+  ret i32 0
+}

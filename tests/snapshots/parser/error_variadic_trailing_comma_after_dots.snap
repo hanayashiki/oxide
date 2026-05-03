@@ -1,0 +1,11 @@
+Module
+  ExternBlock "C"
+    Fn bad(a: i32) -> i32;
+== diagnostics ==
+[E0107] Error: no trailing `,` after `...`
+   ╭─[ error_variadic_trailing_comma_after_dots.ox:1:29 ]
+   │
+ 1 │ extern "C" { fn bad(a: i32, ...,) -> i32; }
+   │                             ─┬─  
+   │                              ╰─── here
+───╯

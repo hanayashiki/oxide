@@ -18,9 +18,15 @@ pub enum TypeError {
     /// E0252.
     NotCallable { found: TyId, span: Span },
     /// Call arity mismatch. E0253.
+    ///
+    /// `at_least: true` switches the rendered wording from "expected N
+    /// arguments, found M" to "expected at least N arguments, found M".
+    /// Set by `infer_call` when the callee is a C-variadic fn (the
+    /// fixed-arg count is the lower bound). See spec/15_VARIADIC.md.
     WrongArgCount {
         expected: usize,
         found: usize,
+        at_least: bool,
         span: Span,
     },
     /// Indexing or field access — no array/struct support in v0. E0255.
@@ -132,6 +138,19 @@ pub enum TypeError {
     /// (`found`) is fully resolved at the time of emission. See
     /// spec/07_POINTER.md "Deref operator". E0270.
     DerefNonPointer { found: TyId, span: Span },
+    // E0271 (parse-time): `...` in a non-extern fn declaration. Reserved
+    // here for cross-spec discoverability — emitted by the parser via
+    // `ParseError::Custom`, not as a `TypeError`. See spec/15_VARIADIC.md.
+    // Note: the existing `CyclicType` variant above also carries an
+    // E0271 doc-comment; that's a code-collision the variadic spec
+    // doesn't resolve and is left for follow-up.
+    /// Argument passed in a C-variadic call slot has a type that's not
+    /// promotable through C's default-argument-promotion rules.
+    /// Accepted: integer primitives, `bool`, any pointer. Rejected:
+    /// arrays, structs (by value), `()`, `!`, fn types, unresolved
+    /// `Infer(_)`. `Error` is silently absorbed. See
+    /// spec/15_VARIADIC.md "check_variadic_promotable". E0272.
+    VariadicArgUnsupported { found: TyId, span: Span },
 }
 
 /// Discriminator on `ArrayByValueAtExternC` so the diagnostic can
@@ -187,7 +206,8 @@ impl TypeError {
             | Self::NotIndexable { span, .. }
             | Self::IndexNotUsize { span, .. }
             | Self::ArrayLitElementMismatch { span, .. }
-            | Self::DerefNonPointer { span, .. } => span,
+            | Self::DerefNonPointer { span, .. }
+            | Self::VariadicArgUnsupported { span, .. } => span,
             Self::StructLitMissingField { lit_span, .. } => lit_span,
             Self::StructLitDuplicateField { dup, .. } => dup,
         }

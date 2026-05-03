@@ -1,0 +1,10 @@
+; ModuleID = 'test'
+source_filename = "test"
+
+define void @f() {
+allocas:
+  br label %body
+
+body:                                             ; preds = %allocas
+  ret void
+}

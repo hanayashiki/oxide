@@ -1,0 +1,11 @@
+Module
+== diagnostics ==
+[E0101] Error: unexpected token: found DotDotDot
+   ╭─[ error_variadic_no_comma_before_dots.ox:1:28 ]
+   │
+ 1 │ extern "C" { fn bad(a: i32 ...) -> i32; }
+   │                            ─┬─  
+   │                             ╰─── unexpected here
+   │ 
+   │ Note: expected: token, token
+───╯

@@ -1,0 +1,13 @@
+HirProgram
+  Module bodyless_fn_at_module_scope_emits_e0209.ox (root)
+    Fn[0] f()
+== diagnostics ==
+[E0209] Error: bodyless `fn f` must be inside an `extern "C" { ... }` block
+   ╭─[ bodyless_fn_at_module_scope_emits_e0209.ox:1:1 ]
+   │
+ 1 │ fn f();
+   │ ───┬───  
+   │    ╰───── missing function body
+   │ 
+   │ Help: module-level fns require `{ ... }`; `;` is reserved for foreign declarations inside `extern "C"`
+───╯

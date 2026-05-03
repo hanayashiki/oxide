@@ -38,12 +38,18 @@ pub fn from_typeck_error(err: &TypeError, file: FileId, tys: &TyArena) -> Diagno
         TypeError::WrongArgCount {
             expected,
             found,
+            at_least,
             span,
-        } => Diagnostic::error(
-            "E0253",
-            format!("wrong number of arguments: expected {expected}, found {found}"),
-        )
-        .with_label(Label::primary(file, span.clone(), "called here")),
+        } => {
+            let qualifier = if *at_least { "at least " } else { "" };
+            Diagnostic::error(
+                "E0253",
+                format!(
+                    "wrong number of arguments: expected {qualifier}{expected}, found {found}"
+                ),
+            )
+            .with_label(Label::primary(file, span.clone(), "called here"))
+        }
 
         TypeError::UnsupportedFeature { feature, span } => {
             Diagnostic::error("E0255", format!("unsupported in v0: {feature}"))
@@ -265,5 +271,18 @@ pub fn from_typeck_error(err: &TypeError, file: FileId, tys: &TyArena) -> Diagno
         )
         .with_label(Label::primary(file, span.clone(), "not a pointer"))
         .with_help("`*` requires a pointer operand (`*const T` or `*mut T`)"),
+
+        TypeError::VariadicArgUnsupported { found, span } => Diagnostic::error(
+            "E0272",
+            format!(
+                "cannot pass `{}` through a variadic parameter",
+                tys.render(*found)
+            ),
+        )
+        .with_label(Label::primary(file, span.clone(), "unsupported variadic arg"))
+        .with_help(
+            "variadic args must be an integer, pointer, or `bool` — wrap structs/arrays \
+             in a `*const T` if you mean to pass by reference.",
+        ),
     }
 }

@@ -1,0 +1,2 @@
+fn dup() {}
+fn dup() {}

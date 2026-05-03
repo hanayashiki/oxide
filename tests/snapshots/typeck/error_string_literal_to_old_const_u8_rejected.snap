@@ -1,0 +1,16 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `u8`, found `[u8; 3]`
+   ╭─[ error_string_literal_to_old_const_u8_rejected.ox:2:25 ]
+   │
+ 2 │ fn main() -> i32 { puts("hi"); 0 }
+   │                         ──┬─  
+   │                           ╰─── type mismatch here
+───╯
+== types ==
+Fn[0] puts(s[Local(0)]: *const u8) -> i32
+  HExprId(0) : i32
+  HExprId(1) : fn(*const u8) -> i32
+  HExprId(2) : *const [u8; 3]
+  HExprId(3) : i32
+  HExprId(4) : i32
+Fn[1] main() -> i32

@@ -1,0 +1,24 @@
+; ModuleID = 'test'
+source_filename = "test"
+
+define void @f(i1 %c) {
+allocas:
+  %c.0.slot = alloca i1, align 1
+  %x.1.slot = alloca i32, align 4
+  br label %body
+
+body:                                             ; preds = %allocas
+  store i1 %c, ptr %c.0.slot, align 1
+  %load = load i1, ptr %c.0.slot, align 1
+  br i1 %load, label %if.then, label %if.else
+
+if.then:                                          ; preds = %body
+  store i32 1, ptr %x.1.slot, align 4
+  br label %if.end
+
+if.else:                                          ; preds = %body
+  br label %if.end
+
+if.end:                                           ; preds = %if.else, %if.then
+  ret void
+}

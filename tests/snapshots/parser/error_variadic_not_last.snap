@@ -1,0 +1,11 @@
+Module
+  ExternBlock "C"
+    Fn bad(a: i32, b: i32) -> i32;
+== diagnostics ==
+[E0107] Error: `...` must be the last entry in a parameter list
+   ╭─[ error_variadic_not_last.ox:1:29 ]
+   │
+ 1 │ extern "C" { fn bad(a: i32, ..., b: i32) -> i32; }
+   │                             ─┬─  
+   │                              ╰─── here
+───╯

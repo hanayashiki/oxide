@@ -1,0 +1,20 @@
+HirProgram
+  Module duplicate_fn_emits_e0202.ox (root)
+    Fn[0] dup()
+      Block
+    Fn[1] dup()
+      Block
+== diagnostics ==
+[E0202] Error: the function `dup` is defined multiple times
+   ╭─[ duplicate_fn_emits_e0202.ox:2:1 ]
+   │
+ 2 │ fn dup() {}
+   │ ─────┬─────  
+   │      ╰─────── duplicate definition
+   │
+   ├─[ duplicate_fn_emits_e0202.ox:2:1 ]
+   │
+ 1 │ fn dup() {}
+   │ ─────┬─────  
+   │      ╰─────── first defined here
+───╯

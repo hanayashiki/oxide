@@ -1,0 +1,3 @@
+HirProgram
+  Module pointer_type_lowers_with_mutability.ox (root)
+    ExternFn[0] puts(s[Local(0)]: *const u8) -> i32

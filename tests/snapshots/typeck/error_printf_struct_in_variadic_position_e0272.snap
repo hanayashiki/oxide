@@ -1,0 +1,22 @@
+== diagnostics ==
+[E0272] Error: cannot pass `Adt(0)` through a variadic parameter
+   ╭─[ error_printf_struct_in_variadic_position_e0272.ox:7:23 ]
+   │
+ 7 │     printf("%d %d\n", p);
+   │                       ┬  
+   │                       ╰── unsupported variadic arg
+   │ 
+   │ Help: variadic args must be an integer, pointer, or `bool` — wrap structs/arrays in a `*const T` if you mean to pass by reference.
+───╯
+== types ==
+Fn[0] printf(fmt[Local(0)]: *const [u8]) -> i32
+  HExprId(0) : i32
+  HExprId(1) : i32
+  HExprId(2) : Adt(0)
+  HExprId(3) : ()
+  HExprId(4) : fn(*const [u8], ...) -> i32
+  HExprId(5) : *const [u8; 7]
+  HExprId(6) : Adt(0)
+  HExprId(7) : i32
+  HExprId(8) : i32
+Fn[1] main() -> i32

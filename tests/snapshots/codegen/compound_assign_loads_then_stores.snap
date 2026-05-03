@@ -1,0 +1,16 @@
+; ModuleID = 'test'
+source_filename = "test"
+
+define i32 @f() {
+allocas:
+  %x.0.slot = alloca i32, align 4
+  br label %body
+
+body:                                             ; preds = %allocas
+  store i32 1, ptr %x.0.slot, align 4
+  %asgn.cur = load i32, ptr %x.0.slot, align 4
+  %asgn.add = add i32 %asgn.cur, 2
+  store i32 %asgn.add, ptr %x.0.slot, align 4
+  %load = load i32, ptr %x.0.slot, align 4
+  ret i32 %load
+}

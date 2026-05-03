@@ -230,8 +230,8 @@ fn relate_with_ctx(
         (other, TyKind::Infer(id)) => bind_infer_checked(cx, inf, id, found, &other, span),
         (TyKind::Prim(p), TyKind::Prim(q)) if p == q => {}
         (TyKind::Unit, TyKind::Unit) => {}
-        (TyKind::Fn(params_f, ret_f), TyKind::Fn(params_e, ret_e)) => {
-            if params_f.len() != params_e.len() {
+        (TyKind::Fn(params_f, ret_f, var_f), TyKind::Fn(params_e, ret_e, var_e)) => {
+            if params_f.len() != params_e.len() || var_f != var_e {
                 inf.errors
                     .push(build_mismatch(ctx.mismatch, expected, found, span));
                 return;
@@ -365,7 +365,7 @@ fn occurs_in(cx: &Checker, inf: &Inferer, id: InferId, ty: TyId) -> bool {
         TyKind::Infer(other) => other == id,
         TyKind::Ptr(pointee, _) => occurs_in(cx, inf, id, pointee),
         TyKind::Array(elem, _) => occurs_in(cx, inf, id, elem),
-        TyKind::Fn(params, ret) => {
+        TyKind::Fn(params, ret, _) => {
             params.iter().any(|p| occurs_in(cx, inf, id, *p))
                 || occurs_in(cx, inf, id, ret)
         }
@@ -414,7 +414,7 @@ pub(super) fn discharge_subtype(
         (TyKind::Array(a_elem, _), TyKind::Array(e_elem, _)) => {
             discharge_subtype(cx, a_elem, e_elem, span);
         }
-        (TyKind::Fn(a_params, a_ret), TyKind::Fn(e_params, e_ret)) => {
+        (TyKind::Fn(a_params, a_ret, _), TyKind::Fn(e_params, e_ret, _)) => {
             if a_params.len() == e_params.len() {
                 for (ap, ep) in a_params.iter().zip(&e_params) {
                     discharge_eq(cx, *ap, *ep, span.clone());
@@ -448,7 +448,7 @@ fn discharge_eq(cx: &mut Checker, a: TyId, b: TyId, span: Span) {
         (TyKind::Array(a_elem, _), TyKind::Array(b_elem, _)) => {
             discharge_eq(cx, a_elem, b_elem, span);
         }
-        (TyKind::Fn(a_params, a_ret), TyKind::Fn(b_params, b_ret)) => {
+        (TyKind::Fn(a_params, a_ret, _), TyKind::Fn(b_params, b_ret, _)) => {
             if a_params.len() == b_params.len() {
                 for (ap, bp) in a_params.iter().zip(&b_params) {
                     discharge_eq(cx, *ap, *bp, span.clone());
