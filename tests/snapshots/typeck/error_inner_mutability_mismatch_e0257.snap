@@ -11,7 +11,7 @@
 == types ==
 Fn[0] f(s[Local(0)]: *const *const u8) -> i32
   HExprId(0) : i32
+Fn[1] main(p[Local(1)]: *const *mut u8) -> i32
   HExprId(1) : fn(*const *const u8) -> i32
   HExprId(2) : *const *mut u8
   HExprId(3) : i32
-Fn[1] main(p[Local(1)]: *const *mut u8) -> i32

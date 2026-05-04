@@ -8,7 +8,7 @@
 ───╯
 == types ==
 Fn[0] g() -> ()
+Fn[1] f() -> ()
   HExprId(0) : fn()
   HExprId(1) : i32
   HExprId(2) : ()
-Fn[1] f() -> ()

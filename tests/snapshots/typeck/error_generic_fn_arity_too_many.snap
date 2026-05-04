@@ -1,0 +1,17 @@
+== diagnostics ==
+[E0275] Error: wrong number of type arguments: expected 2, found 3
+   ╭─[ error_generic_fn_arity_too_many.ox:2:13 ]
+   │
+ 2 │ fn main() { pair::<i32, u8, bool>(1, 2); }
+   │             ─────────────┬─────────────  
+   │                          ╰─────────────── expected 2 type arguments, found 3
+   │ 
+   │ Help: the callee's `<T, U, ...>` list determines the type-argument arity; non-generic fns expect zero.
+───╯
+== types ==
+Fn[0] pair<Param(0), Param(1)>(a[Local(0)]: Param(0), b[Local(1)]: Param(1)) -> ()
+Fn[1] main() -> ()
+  HExprId(0) : {error}
+  HExprId(1) : {error}
+  HExprId(2) : {error}
+  HExprId(3) : {error}

@@ -26,7 +26,7 @@ use crate::hir::HAdtId;
 use crate::reporter::Span;
 
 use super::super::error::{ParamOrReturn, SizedPos, TypeError};
-use super::super::ty::{AdtDef, AdtId, FieldDef, FnSig, TyId, TyKind, VariantDef};
+use super::super::ty::{AdtDef, AdtId, FieldDef, FnSig, ParamId, TyId, TyKind, VariantDef};
 use super::Checker;
 use super::obligation::Obligation;
 
@@ -235,9 +235,19 @@ fn resolve_fn_sigs(cx: &mut Checker<'_>) {
             // obligation needed.
             None => cx.tys.unit,
         };
+        // Convert HIR's `Vec<HTyParamId>` (per-fn declaration order) to
+        // typeck's `Vec<ParamId>`. 1:1 raw correspondence — same shape
+        // as `AdtId::from_raw(haid.raw())` at `resolve_ty`'s Adt arm.
+        // See spec/16_GENERIC.md §HIR.
+        let generic_params: Vec<ParamId> = hir_fn
+            .generic_params
+            .iter()
+            .map(|&hid| ParamId::from_raw(hid.raw()))
+            .collect();
         cx.fn_sigs[fid] = FnSig {
             params,
             ret,
+            generic_params,
             partial: false,
             c_variadic: hir_fn.is_variadic,
         };

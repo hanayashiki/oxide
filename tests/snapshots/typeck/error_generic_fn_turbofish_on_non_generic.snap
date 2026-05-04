@@ -1,0 +1,20 @@
+== diagnostics ==
+[E0275] Error: wrong number of type arguments: expected 0, found 1
+   ╭─[ error_generic_fn_turbofish_on_non_generic.ox:2:13 ]
+   │
+ 2 │ fn main() { add::<i32>(1, 2); }
+   │             ────────┬───────  
+   │                     ╰───────── expected 0 type arguments, found 1
+   │ 
+   │ Help: the callee's `<T, U, ...>` list determines the type-argument arity; non-generic fns expect zero.
+───╯
+== types ==
+Fn[0] add(a[Local(0)]: i32, b[Local(1)]: i32) -> i32
+  HExprId(0) : i32
+  HExprId(1) : i32
+  HExprId(2) : i32
+Fn[1] main() -> ()
+  HExprId(3) : {error}
+  HExprId(4) : {error}
+  HExprId(5) : {error}
+  HExprId(6) : {error}

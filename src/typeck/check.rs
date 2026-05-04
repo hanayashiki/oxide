@@ -25,6 +25,8 @@ mod decl;
 mod obligation;
 mod unify;
 
+use std::collections::HashMap;
+
 use index_vec::IndexVec;
 
 use crate::hir::{
@@ -37,7 +39,7 @@ use crate::reporter::Span;
 use self::obligation::Obligation;
 use self::unify::MismatchCtx;
 use super::error::{MutateOp, SizedPos, TypeError};
-use super::ty::{AdtDef, AdtId, FnSig, InferId, PrimTy, TyArena, TyId, TyKind};
+use super::ty::{AdtDef, AdtId, FnSig, InferId, ParamId, PrimTy, TyArena, TyId, TyKind};
 
 #[derive(Clone, Debug)]
 pub struct TypeckResults {
@@ -46,6 +48,12 @@ pub struct TypeckResults {
     pub fn_sigs: IndexVec<FnId, FnSig>,
     pub local_tys: IndexVec<LocalId, TyId>,
     pub expr_tys: IndexVec<HExprId, TyId>,
+    /// Resolved type-arguments for each *generic* call-expression in the
+    /// program, keyed by the call's `HExprId`. Order parallels the
+    /// callee's `FnSig.generic_params`. Non-generic calls have **no
+    /// entry** (sparse map); mono Phase D reads only generic-call
+    /// entries here. See spec/16_GENERIC.md §Typeck rules.
+    pub call_type_args: HashMap<HExprId, Vec<TyId>>,
 }
 
 /// Query-style API surface. Internally these are O(1) lookups into the
@@ -104,6 +112,13 @@ struct Checker<'hir> {
     /// in `Inferer.obligations` and discharge per-fn at `finalize`;
     /// they never enter this queue.
     decl_obligations: Vec<Obligation>,
+    /// Module-wide buffer of resolved per-call type-arguments. Populated
+    /// at each fn's `Checker::finalize` from the per-fn
+    /// `Inferer.call_type_args` (transient, may carry Infer at push
+    /// time). Stolen at `finish()` into `TypeckResults.call_type_args`.
+    /// Sparse: only generic calls have entries.
+    /// See spec/16_GENERIC.md §Typeck rules.
+    call_type_args: HashMap<HExprId, Vec<TyId>>,
 }
 
 /// Per-Infer-var bookkeeping. One row per `InferId`.
@@ -142,6 +157,13 @@ struct Inferer {
     /// TyIds inside captured obligations may reference Infer vars at push
     /// time; `discharge` resolves them through the Inferer before reading.
     obligations: Vec<Obligation>,
+    /// Per-fn buffer: resolved type-arguments for each generic call
+    /// inside this body. The `Vec<TyId>` carries fresh Infer vars at
+    /// push time (allocated by `infer_call`'s generic branch); finalize
+    /// resolves them via `resolve_fully` before flushing into the
+    /// module-wide `Checker.call_type_args`. Non-generic calls don't
+    /// push entries here. See spec/16_GENERIC.md §Typeck rules.
+    call_type_args: Vec<(HExprId, Vec<TyId>)>,
     /// Expected return type of the fn whose body is being inferred. Read
     /// by the `Return` arm of `infer_expr`; doesn't change for the
     /// lifetime of this Inferer.
@@ -162,6 +184,7 @@ impl Inferer {
             bindings: IndexVec::new(),
             errors: Vec::new(),
             obligations: Vec::new(),
+            call_type_args: Vec::new(),
             cur_ret,
             loop_tys: Vec::new(),
         }
@@ -201,6 +224,7 @@ impl<'hir> Checker<'hir> {
             .map(|_| FnSig {
                 params: Vec::new(),
                 ret: placeholder,
+                generic_params: Vec::new(),
                 partial: true,
                 c_variadic: false,
             })
@@ -214,6 +238,7 @@ impl<'hir> Checker<'hir> {
             expr_tys,
             errors: Vec::new(),
             decl_obligations: Vec::new(),
+            call_type_args: HashMap::new(),
         }
     }
 
@@ -296,6 +321,22 @@ impl<'hir> Checker<'hir> {
         for mut err in pending {
             self.resolve_error_tys(&inf, &mut err);
             self.errors.push(err);
+        }
+
+        // Phase C: drain the per-fn `call_type_args` buffer into the
+        // module-wide `Checker.call_type_args`. Resolution must run
+        // here — the Inferer is still alive (`resolve_fully` chases
+        // Infer chains through it), int-default has already mutated
+        // the bindings, and we're about to enter obligation discharge
+        // which may emit further errors. See spec/16_GENERIC.md
+        // §Typeck rules.
+        let pending_call_args = std::mem::take(&mut inf.call_type_args);
+        for (call_eid, fresh_tys) in pending_call_args {
+            let resolved: Vec<TyId> = fresh_tys
+                .iter()
+                .map(|&t| self.resolve_fully(&inf, t))
+                .collect();
+            self.call_type_args.insert(call_eid, resolved);
         }
 
         // Per-fn discharge: the Inferer is still alive, so obligations
@@ -406,7 +447,8 @@ impl<'hir> Checker<'hir> {
             | TypeError::NoFieldOnAdt { .. }
             | TypeError::MutateImmutable { .. }
             | TypeError::UnsizedArrayAsValue { .. }
-            | TypeError::RecursiveAdt { .. } => {}
+            | TypeError::RecursiveAdt { .. }
+            | TypeError::GenericArityMismatch { .. } => {}
         }
     }
 
@@ -426,6 +468,7 @@ impl<'hir> Checker<'hir> {
                 fn_sigs: self.fn_sigs,
                 local_tys: self.local_tys,
                 expr_tys: self.expr_tys,
+                call_type_args: self.call_type_args,
             },
             self.errors,
         )
@@ -476,14 +519,16 @@ impl<'hir> Checker<'hir> {
                 tys.intern(TyKind::Array(elem_id, len_opt))
             }
             HirTyKind::Error => tys.error,
-            // Phase B HIR may produce `Param(tpid)` for refs to a fn's
-            // generic params. Phase C will introduce `TyKind::Param`
-            // and resolve them properly. For Phase B (typeck blind to
-            // generics) we degrade to `Error` so generic-fn bodies don't
-            // panic typeck — the driver short-circuits before mono on
-            // any prior errors, and clean generic fns will be addressed
-            // in Phase C. See spec/16_GENERIC.md §Typeck rules.
-            HirTyKind::Param(_) => tys.error,
+            // Phase C: convert HIR's `HTyParamId` to typeck's `ParamId`
+            // via `from_raw` (1:1 by Phase B's arena ordering — same
+            // pattern as the `Adt` arm). Intern `TyKind::Param(pid)`.
+            // Param leaves remain unresolved at typeck and are
+            // substituted by mono during instantiation.
+            // See spec/16_GENERIC.md §Typeck rules.
+            HirTyKind::Param(htypid) => {
+                let pid = ParamId::from_raw(htypid.raw());
+                tys.intern(TyKind::Param(pid))
+            }
         }
     }
 
@@ -598,7 +643,67 @@ impl<'hir> Checker<'hir> {
             _ => resolved,
         }
     }
+}
 
+/// Walk a type tree and substitute `TyKind::Param(pid)` leaves via the
+/// `subst` map, preserving the structural arms (`Fn` / `Ptr` / `Array`
+/// recurse and re-intern). Mirrors the recursion shape of
+/// `resolve_fully` (line 607–628) — the difference is the leaf case:
+/// `resolve_fully` chases Infer chains through bindings, this walks
+/// the type tree replacing Param leaves through a HashMap.
+///
+/// Caller's contract: `subst` must be keyed by every Param that can
+/// appear in `ty`. By spec/16 §HIR, `HirTyKind::Param(htypid)` is only
+/// produced when the source name is in the enclosing fn's
+/// `generic_params` scope, so any Param in `sig.params` / `sig.ret`
+/// belongs to that fn's `generic_params`. `infer_call`'s caller builds
+/// `subst = zip(sig.generic_params, fresh).collect()` — complete by
+/// construction. A missing key is a broken internal invariant; we
+/// panic loudly rather than silently passing through.
+pub(super) fn substitute_ty(tys: &mut TyArena, ty: TyId, subst: &HashMap<ParamId, TyId>) -> TyId {
+    match tys.kind(ty).clone() {
+        TyKind::Param(pid) => *subst.get(&pid).unwrap_or_else(|| {
+            panic!(
+                "substitute_ty: Param({}) not in subst — caller must supply complete map \
+                 per the owning fn's generic_params; this is a compiler invariant break",
+                pid.raw()
+            )
+        }),
+
+        // Recursive structural cases — same shape as resolve_fully.
+        TyKind::Fn(params, ret, c_variadic) => {
+            let params: Vec<_> = params
+                .iter()
+                .map(|&p| substitute_ty(tys, p, subst))
+                .collect();
+            let ret = substitute_ty(tys, ret, subst);
+            tys.intern(TyKind::Fn(params, ret, c_variadic))
+        }
+        TyKind::Ptr(inner, m) => {
+            let inner = substitute_ty(tys, inner, subst);
+            tys.intern(TyKind::Ptr(inner, m))
+        }
+        TyKind::Array(elem, len) => {
+            let elem = substitute_ty(tys, elem, subst);
+            tys.intern(TyKind::Array(elem, len))
+        }
+
+        // Pass-through cases. Spelled out (not under a `_` catch-all)
+        // so a future variant addition forces a compile error here
+        // rather than silently breaking substitution.
+        TyKind::Prim(_) | TyKind::Unit | TyKind::Never | TyKind::Error => ty,
+        // ADTs are non-generic in v0 (no `Vec<T>` etc.). When generic
+        // ADTs land they become `Adt(aid, type_args)` and this arm
+        // gains a recursion over `type_args`.
+        TyKind::Adt(_) => ty,
+        // Signatures never carry Infer (decl phase resolves them to
+        // concrete or Param). Pass through defensively; if reached,
+        // it's a Phase C bug worth surfacing later.
+        TyKind::Infer(_) => ty,
+    }
+}
+
+impl<'hir> Checker<'hir> {
     // ---------- walk ----------
 
     /// Block typing — two pieces:
@@ -704,12 +809,16 @@ impl<'hir> Checker<'hir> {
             HirExprKind::Assign { op, target, rhs } => {
                 self.infer_assign(inf, op, target, rhs, &span)
             }
-            // Phase B added `type_args` to HIR's Call; typeck doesn't
-            // consume it until Phase C wires generic instantiation.
-            // See spec/16_GENERIC.md §Typeck rules.
-            HirExprKind::Call { callee, args, type_args: _ } => {
-                self.infer_call(inf, callee, args, &span)
-            }
+            // Phase C: HIR's Call.type_args (turbofish args) and the
+            // call's own HExprId thread into infer_call. The call_eid
+            // keys `inf.call_type_args` for finalize; type_args feed
+            // the universal arity check + turbofish equate. See
+            // spec/16_GENERIC.md §Typeck rules.
+            HirExprKind::Call {
+                callee,
+                args,
+                type_args,
+            } => self.infer_call(inf, eid, callee, args, type_args, &span),
             HirExprKind::Index { base, index } => {
                 let base_ty = self.infer_expr(inf, base);
                 let idx_ty = self.infer_expr(inf, index);
@@ -908,6 +1017,17 @@ impl<'hir> Checker<'hir> {
             TyKind::Never => self.tys.never,
             TyKind::Error => self.tys.error,
             TyKind::Prim(_) | TyKind::Unit | TyKind::Fn(_, _, _) | TyKind::Array(_, _) => {
+                inf.errors.push(TypeError::TypeNotFieldable {
+                    ty: peeled,
+                    span: span.clone(),
+                });
+                self.tys.error
+            }
+            // Generic-fn body: the base resolves to a bare type-param.
+            // No field rules on `T` in v0 (no trait bounds, no
+            // associated types) — same as the Prim/Unit/Fn/Array case.
+            // See spec/16_GENERIC.md §Typeck rules.
+            TyKind::Param(_) => {
                 inf.errors.push(TypeError::TypeNotFieldable {
                     ty: peeled,
                     span: span.clone(),
@@ -1169,13 +1289,124 @@ impl<'hir> Checker<'hir> {
     fn infer_call(
         &mut self,
         inf: &mut Inferer,
+        call_eid: HExprId,
         callee: HExprId,
         args: Vec<HExprId>,
+        type_args: Vec<HirTy>,
         span: &Span,
     ) -> TyId {
+        // Detect callee's FnId and generic-param count. Only direct
+        // fn references (`HirExprKind::Fn(fid)`) carry a known FnSig in
+        // v0; everything else is non-generic-callable. See
+        // spec/16_GENERIC.md §Typeck rules.
+        let callee_fid = match &self.hir.exprs[callee].kind {
+            HirExprKind::Fn(fid) => Some(*fid),
+            _ => None,
+        };
+        let n_type_params = callee_fid
+            .map(|fid| self.fn_sigs[fid].generic_params.len())
+            .unwrap_or(0);
+
+        // Universal arity check. Two accepted cases:
+        //   - `type_args.len() == 0`: turbofish elided; pure inference
+        //     (the generic path mints fresh Infer per param). Allowed
+        //     even when n_type_params == 0 (ordinary non-generic call).
+        //   - `type_args.len() == n_type_params`: turbofish supplied
+        //     and matches arity; equate fresh Infers with user types.
+        // Anything else is GenericArityMismatch:
+        //   - `n == 0 && type_args.len() > 0`: turbofish on a
+        //     non-generic fn (e.g. `add::<i32>(1, 2)`).
+        //   - `n > 0 && type_args.len() != 0 && type_args.len() != n`:
+        //     wrong-count turbofish on a generic fn.
+        // Lifted above the generic-vs-non-generic branch so it's one
+        // error, no cascade — see spec/16_GENERIC.md §Typeck rules.
+        if !type_args.is_empty() && type_args.len() != n_type_params {
+            inf.errors.push(TypeError::GenericArityMismatch {
+                expected: n_type_params,
+                found: type_args.len(),
+                span: span.clone(),
+            });
+            return self.tys.error;
+        }
+
         let callee_ty = self.infer_expr(inf, callee);
         let callee_resolved = self.resolve(inf, callee_ty);
         let arg_tys: Vec<TyId> = args.iter().map(|&a| self.infer_expr(inf, a)).collect();
+
+        // Generic branch — only reachable when callee is `Fn(fid)` with
+        // non-empty `generic_params` AND the arity check passed (so
+        // `type_args.len() == n_type_params`). Allocate fresh Infer per
+        // generic param, optionally equate with turbofish, push Sized
+        // obligations, build subst, substitute the FnSig, then run
+        // value-arg unification against the substituted params.
+        if n_type_params > 0 {
+            let fid = callee_fid.expect("n_type_params>0 only via Fn(fid)");
+            let n = n_type_params;
+            // (a) fresh Infer per type param
+            let fresh: Vec<TyId> = (0..n)
+                .map(|_| self.fresh_infer(inf, false, span.clone()))
+                .collect();
+            // (b) optional turbofish equate (skipped iff type_args empty)
+            for (i, hty) in type_args.iter().enumerate() {
+                let user_ty = Self::resolve_ty(&mut self.tys, &mut inf.errors, hty);
+                let hty_span = hty.span.clone();
+                unify::equate(self, inf, fresh[i], user_ty, hty_span);
+            }
+            // (c) Sized obligation per fresh type-arg. Body-phase queue;
+            // discharge resolves through bindings before checking, so
+            // both immediate-binding (turbofish) and inferred-binding
+            // (let-binding context) paths discharge correctly.
+            for &fresh_ty in &fresh {
+                inf.obligations.push(Obligation::Sized {
+                    ty: fresh_ty,
+                    pos: SizedPos::TypeArg,
+                    span: span.clone(),
+                });
+            }
+            // (d) Build subst map and (e) substitute callee signature.
+            // Snapshot sig fields first to release the immutable borrow
+            // on `self.fn_sigs` before substitute_ty mutably borrows
+            // `self.tys`.
+
+            let sig = &self.fn_sigs[fid];
+
+            let subst: HashMap<ParamId, TyId> = sig
+                .generic_params
+                .iter()
+                .copied()
+                .zip(fresh.iter().copied())
+                .collect();
+            let sub_params: Vec<TyId> = sig
+                .params
+                .iter()
+                .map(|&p| substitute_ty(&mut self.tys, p, &subst))
+                .collect();
+            let sub_ret = substitute_ty(&mut self.tys, sig.ret, &subst);
+
+            // (f) Value-arg arity check + unification on substituted
+            // params. Generic externs are forbidden by HIR (E0212),
+            // so c_variadic doesn't apply here.
+            let n_fixed = sub_params.len();
+            if args.len() != n_fixed {
+                inf.errors.push(TypeError::WrongArgCount {
+                    expected: n_fixed,
+                    found: args.len(),
+                    at_least: false,
+                    span: span.clone(),
+                });
+                return sub_ret;
+            }
+            for ((&aid, &pty), &aty) in args.iter().zip(&sub_params).zip(&arg_tys) {
+                let arg_span = self.hir.exprs[aid].span.clone();
+                unify::subtype(self, inf, aty, pty, arg_span);
+            }
+            // (g) Record fresh type-args on the per-fn buffer; finalize
+            // resolves and flushes into TypeckResults.call_type_args.
+            inf.call_type_args.push((call_eid, fresh));
+            return sub_ret;
+        }
+
+        // Non-generic path — existing logic, unchanged below.
         match self.tys.kind(callee_resolved).clone() {
             TyKind::Fn(param_tys, ret_ty, c_variadic) => {
                 let n_fixed = param_tys.len();

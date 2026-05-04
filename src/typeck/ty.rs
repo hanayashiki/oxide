@@ -19,6 +19,12 @@ index_vec::define_index_type! { pub struct InferId = u32; }
 // the indirection leaves room for future generic-instantiation
 // many-to-one without renaming every `Adt(_)` site.
 index_vec::define_index_type! { pub struct AdtId   = u32; }
+// Typeck-side type-parameter identity. Distinct from HIR's `HTyParamId`
+// for the same reason as AdtId — Param is a type-system entity (not
+// syntactic), so it follows the AdtId/HAdtId precedent: separate
+// newtypes on either side of the HIR/typeck boundary, related 1:1 via
+// `ParamId::from_raw(htyparam.raw())`. See spec/16_GENERIC.md §HIR.
+index_vec::define_index_type! { pub struct ParamId = u32; }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum TyKind {
@@ -52,6 +58,11 @@ pub enum TyKind {
     Array(TyId, Option<u64>),
     /// Unification variable; resolved via the per-fn `Inferer`.
     Infer(InferId),
+    /// Reference to a generic type parameter declared by the enclosing
+    /// fn. A leaf at typeck — only mono substitutes Param leaves into
+    /// concrete types. Permitted to appear in `expr_tys`/`local_tys`
+    /// for generic-fn bodies; see spec/16_GENERIC.md §Typeck rules.
+    Param(ParamId),
     /// Poison; absorbs without further errors.
     Error,
 }
@@ -104,6 +115,10 @@ impl PrimTy {
 pub struct FnSig {
     pub params: Vec<TyId>,
     pub ret: TyId,
+    /// Type parameters in declaration order. Empty for non-generic fns.
+    /// Each `ParamId` is 1:1 with HIR's `HTyParamId` via
+    /// `ParamId::from_raw(htypid.raw())`. See spec/16_GENERIC.md.
+    pub generic_params: Vec<ParamId>,
     /// `true` while the placeholder sig is in `Checker::new`, before
     /// `decl::resolve_decls` phase 1 fills in real param/ret TyIds.
     /// Flipped to `false` once resolved. Reading a partial FnSig from
@@ -294,6 +309,12 @@ impl TyArena {
             TyKind::Array(elem, None) => format!("[{}]", self.render(*elem)),
             TyKind::Array(elem, Some(n)) => format!("[{}; {}]", self.render(*elem), n),
             TyKind::Infer(id) => format!("?T{}", id.raw()),
+            // Param renders as `Param(<raw>)` to match the existing
+            // `Adt(<raw>)` style. Source-name rendering (e.g. `T`)
+            // requires HIR context (`hir.ty_params[...].name`) and is
+            // deferred to a UX-polish pass — see spec/16_GENERIC.md
+            // §Typeck rules. Snapshot tests assert on the raw form.
+            TyKind::Param(pid) => format!("Param({})", pid.raw()),
             TyKind::Error => "{error}".to_string(),
         }
     }

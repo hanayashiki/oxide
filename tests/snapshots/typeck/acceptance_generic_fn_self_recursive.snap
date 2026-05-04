@@ -1,0 +1,6 @@
+== diagnostics ==
+== types ==
+Fn[0] rec<Param(0)>(x[Local(0)]: Param(0)) -> Param(0)
+  HExprId(0) : fn(Param(0)) -> Param(0)
+  HExprId(1) : Param(0)
+  HExprId(2) : Param(0)  call_type_args=[Param(0)]

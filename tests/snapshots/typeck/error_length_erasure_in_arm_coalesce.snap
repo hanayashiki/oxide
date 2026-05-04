@@ -9,6 +9,7 @@
 == types ==
 Fn[0] unsized_ptr() -> *const [u8]
   HExprId(0) : *const [u8; 3]
+Fn[1] main() -> i32
   HExprId(1) : bool
   HExprId(2) : *const [u8; 3]
   HExprId(3) : fn() -> *const [u8]
@@ -16,4 +17,3 @@ Fn[0] unsized_ptr() -> *const [u8]
   HExprId(5) : *const [u8; 3]
   HExprId(6) : ()
   HExprId(7) : i32
-Fn[1] main() -> i32

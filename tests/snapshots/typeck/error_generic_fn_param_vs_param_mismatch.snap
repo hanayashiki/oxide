@@ -1,0 +1,11 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `Param(0)`, found `Param(1)`
+   ╭─[ error_generic_fn_param_vs_param_mismatch.ox:1:29 ]
+   │
+ 1 │ fn f<T, U>(x: T, y: U) -> T { y }
+   │                             ──┬──  
+   │                               ╰──── type mismatch here
+───╯
+== types ==
+Fn[0] f<Param(0), Param(1)>(x[Local(0)]: Param(0), y[Local(1)]: Param(1)) -> Param(0)
+  HExprId(0) : Param(1)

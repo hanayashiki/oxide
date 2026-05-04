@@ -9,10 +9,10 @@ statically-typed language that compiles down to LLVM and links against
 native code. If you've written C, the runtime model will feel familiar:
 manual memory management, raw pointers, no implicit allocations, no
 dispatch overhead, the C ABI for FFI. If you've written Rust, the
-surface syntax will too: `let`, `fn`, `mut`, `*const T` / `*mut T`,
+surface syntax will too: `let`, `fn`, `fn generic<T>`, `mut`, `*const T` / `*mut T`,
 `extern "C"`, `as` casts, `if`/`else` as expressions.
 
-What Oxide deliberately does **not** have: closures, generics, traits,
+What Oxide deliberately does **not** have: closures, traits,
 `enum` payloads (the keyword is reserved but not implemented), `match`,
 `unsafe`, floats, async, or modules-with-visibility. There is no GC, no
 borrow checker, no overload resolution. The type system catches shape
@@ -188,6 +188,59 @@ variadics, but you cannot define your own. Narrow integer args at
 variadic positions are widened to `i32` automatically (signed-narrow
 sign-extends, unsigned-narrow and `bool` zero-extend), matching C's
 default argument promotions.
+
+## Generic types
+
+Oxide supports generic types at `fn`s and `struct`s.
+
+Generic structs:
+
+```rust
+struct LinkedList<T> {
+    value: T,
+    next: *mut LinkedList<T>,
+}
+
+let mut linked_list = LinkedList::<i32> {
+    value: 0,
+    next: null,
+};
+```
+
+Generic functions:
+
+```rust
+fn id<T>(x: T) {
+    x
+}
+
+id::<i32>(x);   // ✅ explicitly typed
+id(1);          // ✅ inferred, same as above
+
+id::<[i32]>(x); // ❌ `T` must have a known size
+```
+
+In the body, only copying is allowed if the value is generically typed:
+
+```rust
+// ✅ can be assigned
+fn swap<T>(*mut a: T, *mut b: T) {
+    let c = a;
+    a = b;
+    b = c;
+}
+
+// ✅ can be passed as parameter
+fn eat<T>(x: T) {
+    eat(x);
+}
+
+// ❌ because we do not know `T` supports comparison
+fn compare(a: T, b: T) {
+    a < b
+}
+```
+
 
 ## Building and emitting
 

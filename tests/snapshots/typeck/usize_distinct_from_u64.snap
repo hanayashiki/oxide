@@ -8,8 +8,8 @@
 ───╯
 == types ==
 Fn[0] make_size() -> usize
+Fn[1] f() -> i32
   HExprId(0) : fn() -> usize
   HExprId(1) : usize
   HExprId(2) : ()
   HExprId(3) : i32
-Fn[1] f() -> i32

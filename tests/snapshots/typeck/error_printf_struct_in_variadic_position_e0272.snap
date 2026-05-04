@@ -10,6 +10,7 @@
 ───╯
 == types ==
 Fn[0] printf(fmt[Local(0)]: *const [u8]) -> i32
+Fn[1] main() -> i32
   HExprId(0) : i32
   HExprId(1) : i32
   HExprId(2) : Adt(0)
@@ -19,4 +20,3 @@ Fn[0] printf(fmt[Local(0)]: *const [u8]) -> i32
   HExprId(6) : Adt(0)
   HExprId(7) : i32
   HExprId(8) : i32
-Fn[1] main() -> i32

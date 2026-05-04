@@ -59,10 +59,10 @@ impl ModuleScopeCtx {
 pub(super) struct ProgramItems {
     pub adts: IndexVec<HAdtId, HirAdt>,
     pub fns: IndexVec<FnId, HirFn>,
-    /// All type parameters in the program, keyed by `TyParamId`.
+    /// All type parameters in the program, keyed by `HTyParamId`.
     /// Populated at prescan time so `lower_ty` can resolve `Named(T)`
     /// → `Param(tpid)` during body lowering. See spec/16_GENERIC.md §HIR.
-    pub ty_params: IndexVec<TyParamId, TyParamInfo>,
+    pub ty_params: IndexVec<HTyParamId, TyParamInfo>,
 }
 
 #[derive(Default)]
@@ -204,7 +204,7 @@ impl Scanner {
                         ..HirFn::default()
                     });
 
-                    // Mint TyParamIds for the fn's generic params and
+                    // Mint HTyParamIds for the fn's generic params and
                     // store them on the stub. Done at prescan because
                     // `lower_ty` (called from body lowering) needs the
                     // IDs allocated *before* any body walk runs, so

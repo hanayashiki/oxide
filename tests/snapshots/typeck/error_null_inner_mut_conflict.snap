@@ -10,6 +10,8 @@
 ───╯
 == types ==
 Fn[0] use_a(p[Local(0)]: *const *const u8) -> ()
+Fn[1] use_b(p[Local(1)]: *const *mut u8) -> ()
+Fn[2] bad() -> ()
   HExprId(0) : *mut *const u8
   HExprId(1) : ()
   HExprId(2) : fn(*const *const u8)
@@ -18,5 +20,3 @@ Fn[0] use_a(p[Local(0)]: *const *const u8) -> ()
   HExprId(5) : fn(*const *mut u8)
   HExprId(6) : *mut *const u8
   HExprId(7) : ()
-Fn[1] use_b(p[Local(1)]: *const *mut u8) -> ()
-Fn[2] bad() -> ()

@@ -256,6 +256,13 @@ pub fn from_typeck_error(err: &TypeError, file: FileId, tys: &TyArena) -> Diagno
                     "dereferencing `*const [T]` / `*mut [T]` would materialize an \
                      unsized value; use `p[i]` to index through the pointer instead",
                 ),
+                SizedPos::TypeArg => (
+                    "unsized array `[T]` cannot appear as a generic type argument",
+                    "unsized type argument",
+                    "generic functions assume T to be sized; pass a \
+                     pointer (`*const [T]` / `*mut [T]`) or a sized array \
+                     (`[T; N]`) instead.",
+                ),
             };
             Diagnostic::error("E0269", msg)
                 .with_label(Label::primary(file, span.clone(), label))
@@ -297,6 +304,24 @@ pub fn from_typeck_error(err: &TypeError, file: FileId, tys: &TyArena) -> Diagno
         .with_help(
             "wrap the field in a pointer (`*const T` / `*mut T`) so the cycle \
              goes through an indirection",
+        ),
+
+        TypeError::GenericArityMismatch {
+            expected,
+            found,
+            span,
+        } => Diagnostic::error(
+            "E0275",
+            format!("wrong number of type arguments: expected {expected}, found {found}"),
+        )
+        .with_label(Label::primary(
+            file,
+            span.clone(),
+            format!("expected {expected} type arguments, found {found}"),
+        ))
+        .with_help(
+            "the callee's `<T, U, ...>` list determines the type-argument arity; \
+             non-generic fns expect zero.",
         ),
     }
 }

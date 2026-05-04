@@ -351,6 +351,16 @@ pub fn render_typeck(file_name: &str, src: &str) -> String {
     out.push_str("== types ==\n");
     for (fid, sig) in results.fn_sigs.iter_enumerated() {
         let f = &hir.fns[fid];
+        let generic_params: Vec<String> = sig
+            .generic_params
+            .iter()
+            .map(|p| format!("Param({})", p.raw()))
+            .collect();
+        let generic_str = if generic_params.is_empty() {
+            String::new()
+        } else {
+            format!("<{}>", generic_params.join(", "))
+        };
         let params: Vec<_> = f
             .params
             .iter()
@@ -369,19 +379,165 @@ pub fn render_typeck(file_name: &str, src: &str) -> String {
             .collect();
         writeln!(
             out,
-            "Fn[{}] {}({}) -> {}",
+            "Fn[{}] {}{}({}) -> {}",
             fid.raw(),
             f.name,
+            generic_str,
             params.join(", "),
             results.tys.render(sig.ret),
         )
         .unwrap();
-        for (eid, &ty) in results.expr_tys.iter_enumerated() {
-            if fid.raw() == 0 {
-                writeln!(out, "  HExprId({}) : {}", eid.raw(), results.tys.render(ty)).unwrap();
-            }
+        // Per-fn expr_tys: walk this fn's body to collect the HExprIds
+        // it owns, then emit them in numerical order alongside any
+        // call_type_args entry. Per spec/16_GENERIC.md §Typeck rules,
+        // generic-fn bodies legitimately carry `Param(_)` in
+        // expr_tys; those render via TyArena.render's Param arm.
+        let mut owned: std::collections::BTreeSet<oxide::hir::HExprId> =
+            std::collections::BTreeSet::new();
+        if let Some(body) = f.body {
+            collect_block_exprs(&hir, body, &mut owned);
+        }
+        for eid in owned {
+            let ty = results.expr_tys[eid];
+            // Append call_type_args inline if this expr is a generic
+            // call site that recorded its resolved args at finalize.
+            let cta_str = match results.call_type_args.get(&eid) {
+                Some(args) => {
+                    let parts: Vec<_> = args.iter().map(|&t| results.tys.render(t)).collect();
+                    format!("  call_type_args=[{}]", parts.join(", "))
+                }
+                None => String::new(),
+            };
+            writeln!(
+                out,
+                "  HExprId({}) : {}{}",
+                eid.raw(),
+                results.tys.render(ty),
+                cta_str
+            )
+            .unwrap();
         }
     }
 
     out
+}
+
+/// Collect every `HExprId` reachable from a body block. Used by the
+/// typeck renderer to print each fn's expr_tys under its own header
+/// (post spec/16, the old "only Fn[0]" gate is gone).
+fn collect_block_exprs(
+    hir: &oxide::hir::HirProgram,
+    bid: oxide::hir::HBlockId,
+    out: &mut std::collections::BTreeSet<oxide::hir::HExprId>,
+) {
+    let block = &hir.blocks[bid];
+    for item in &block.items {
+        collect_expr(hir, item.expr, out);
+    }
+}
+
+fn collect_expr(
+    hir: &oxide::hir::HirProgram,
+    eid: oxide::hir::HExprId,
+    out: &mut std::collections::BTreeSet<oxide::hir::HExprId>,
+) {
+    use oxide::hir::HirExprKind;
+    if !out.insert(eid) {
+        return;
+    }
+    match &hir.exprs[eid].kind {
+        HirExprKind::IntLit(_)
+        | HirExprKind::BoolLit(_)
+        | HirExprKind::CharLit(_)
+        | HirExprKind::StrLit(_)
+        | HirExprKind::Null
+        | HirExprKind::Local(_)
+        | HirExprKind::Fn(_)
+        | HirExprKind::Unresolved(_)
+        | HirExprKind::Continue
+        | HirExprKind::Poison => {}
+        HirExprKind::Unary { expr, .. } => collect_expr(hir, *expr, out),
+        HirExprKind::Binary { lhs, rhs, .. } => {
+            collect_expr(hir, *lhs, out);
+            collect_expr(hir, *rhs, out);
+        }
+        HirExprKind::Assign { target, rhs, .. } => {
+            collect_expr(hir, *target, out);
+            collect_expr(hir, *rhs, out);
+        }
+        HirExprKind::Call { callee, args, .. } => {
+            collect_expr(hir, *callee, out);
+            for a in args {
+                collect_expr(hir, *a, out);
+            }
+        }
+        HirExprKind::Index { base, index } => {
+            collect_expr(hir, *base, out);
+            collect_expr(hir, *index, out);
+        }
+        HirExprKind::Field { base, .. } => collect_expr(hir, *base, out),
+        HirExprKind::StructLit { fields, .. } => {
+            for f in fields {
+                collect_expr(hir, f.value, out);
+            }
+        }
+        HirExprKind::AddrOf { expr, .. } => collect_expr(hir, *expr, out),
+        HirExprKind::ArrayLit(lit) => match lit {
+            oxide::hir::HirArrayLit::Elems(es) => {
+                for e in es {
+                    collect_expr(hir, *e, out);
+                }
+            }
+            oxide::hir::HirArrayLit::Repeat { init, .. } => collect_expr(hir, *init, out),
+        },
+        HirExprKind::Cast { expr, .. } => collect_expr(hir, *expr, out),
+        HirExprKind::If {
+            cond,
+            then_block,
+            else_arm,
+        } => {
+            collect_expr(hir, *cond, out);
+            collect_block_exprs(hir, *then_block, out);
+            if let Some(arm) = else_arm {
+                match arm {
+                    oxide::hir::HElseArm::Block(b) => collect_block_exprs(hir, *b, out),
+                    oxide::hir::HElseArm::If(e) => collect_expr(hir, *e, out),
+                }
+            }
+        }
+        HirExprKind::Block(b) => collect_block_exprs(hir, *b, out),
+        HirExprKind::Return(v) => {
+            if let Some(v) = v {
+                collect_expr(hir, *v, out);
+            }
+        }
+        HirExprKind::Loop {
+            init,
+            cond,
+            update,
+            body,
+            ..
+        } => {
+            if let Some(e) = init {
+                collect_expr(hir, *e, out);
+            }
+            if let Some(e) = cond {
+                collect_expr(hir, *e, out);
+            }
+            if let Some(e) = update {
+                collect_expr(hir, *e, out);
+            }
+            collect_block_exprs(hir, *body, out);
+        }
+        HirExprKind::Break { expr } => {
+            if let Some(e) = expr {
+                collect_expr(hir, *e, out);
+            }
+        }
+        HirExprKind::Let { init, .. } => {
+            if let Some(e) = init {
+                collect_expr(hir, *e, out);
+            }
+        }
+    }
 }

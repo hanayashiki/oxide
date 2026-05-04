@@ -4,7 +4,7 @@
 //! the parser already rejected non-`IntLit` length slots and missing
 //! type names degrade to `HirTyKind::Named` for typeck to resolve.
 
-use crate::hir::ir::{HirConst, HirTy, HirTyKind, TyParamId};
+use crate::hir::ir::{HirConst, HirTy, HirTyKind, HTyParamId};
 use crate::parser::ast;
 
 use super::scanner::ModuleScopeCtx;
@@ -20,13 +20,13 @@ use super::scanner::ModuleScopeCtx;
 /// resolution is silently skipped and behavior matches the pre-spec/16
 /// codepath. See spec/16_GENERIC.md §HIR.
 #[derive(Clone, Copy)]
-pub(super) struct TyParamScope<'a>(pub &'a [(String, TyParamId)]);
+pub(super) struct TyParamScope<'a>(pub &'a [(String, HTyParamId)]);
 
 impl<'a> TyParamScope<'a> {
     pub fn empty() -> Self {
         Self(&[])
     }
-    pub fn lookup(&self, name: &str) -> Option<TyParamId> {
+    pub fn lookup(&self, name: &str) -> Option<HTyParamId> {
         self.0.iter().find(|(n, _)| n == name).map(|(_, id)| *id)
     }
 }

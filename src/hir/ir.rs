@@ -14,7 +14,7 @@ index_vec::define_index_type! { pub struct HBlockId    = u32; }
 index_vec::define_index_type! { pub struct HAdtId      = u32; }
 index_vec::define_index_type! { pub struct VariantIdx  = u32; }
 index_vec::define_index_type! { pub struct FieldIdx    = u32; }
-index_vec::define_index_type! { pub struct TyParamId   = u32; }
+index_vec::define_index_type! { pub struct HTyParamId   = u32; }
 
 /// Top-level HIR. Owns globally-unique arenas — every `FnId` /
 /// `HAdtId` / `LocalId` / `HExprId` / `HBlockId` is unique program-
@@ -29,10 +29,10 @@ pub struct HirProgram {
     pub exprs: IndexVec<HExprId, HirExpr>,
     pub blocks: IndexVec<HBlockId, HirBlock>,
     /// All type parameters declared by all fns in the program, keyed by
-    /// `TyParamId`. Each entry's `owner` and `idx_in_owner` together
+    /// `HTyParamId`. Each entry's `owner` and `idx_in_owner` together
     /// place it within its declaring fn's `generic_params` list.
     /// See spec/16_GENERIC.md §HIR.
-    pub ty_params: IndexVec<TyParamId, TyParamInfo>,
+    pub ty_params: IndexVec<HTyParamId, TyParamInfo>,
 
     /// One `HirModule` per loaded file, indexed by `FileId`.
     pub modules: IndexVec<FileId, HirModule>,
@@ -108,7 +108,7 @@ pub struct HirField {
 }
 
 /// Metadata for one type parameter declared by some fn. Self-contained:
-/// `TyKind::Param(tpid)` downstream needs only the `TyParamId` to
+/// `TyKind::Param(tpid)` downstream needs only the `HTyParamId` to
 /// identify ownership, since `owner` is recoverable here. See
 /// spec/16_GENERIC.md §HIR.
 #[derive(Clone, Debug)]
@@ -126,9 +126,9 @@ pub struct HirFn {
     pub name: String,
     /// Type parameters in declaration order. Empty for non-generic
     /// fns *and* for fns declared with empty brackets `<>` (matches
-    /// Rust). Each `TyParamId` is a global index into
+    /// Rust). Each `HTyParamId` is a global index into
     /// `HirProgram.ty_params`. See spec/16_GENERIC.md §HIR.
-    pub generic_params: Vec<TyParamId>,
+    pub generic_params: Vec<HTyParamId>,
     pub params: Vec<LocalId>,
     /// `None` when source omits `-> T` — typeck defaults to unit.
     pub ret_ty: Option<HirTy>,
@@ -385,7 +385,7 @@ pub enum HirTyKind {
     /// enclosing fn. Resolved at HIR-lower time when the source name
     /// matches one of the fn's `generic_params`. Typeck (Phase C) maps
     /// this to `TyKind::Param(tpid)`. See spec/16_GENERIC.md §HIR.
-    Param(TyParamId),
+    Param(HTyParamId),
     /// `*const T` / `*mut T`. Pointee is `Box`ed for recursion.
     Ptr {
         mutability: Mutability,

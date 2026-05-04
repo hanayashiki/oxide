@@ -160,6 +160,19 @@ pub enum TypeError {
     /// the post-phase-0.5 tri-color DFS in `decl::check_recursive_adts`.
     /// See spec/08_ADT.md "Recursive type rejection". E0273.
     RecursiveAdt { adt: String, span: Span },
+
+    /// `name::<T, U, ...>(args)` where the number of supplied type
+    /// arguments doesn't match the callee's `generic_params` arity.
+    /// Fired from the universal arity check in `infer_call`, covering
+    /// both wrong-count turbofish on a generic fn and any turbofish
+    /// supplied to a non-generic fn (`add::<i32>(1, 2)` where `add`
+    /// has zero type params, expected `0`, found `1`). See
+    /// spec/16_GENERIC.md §Typeck rules. E0275.
+    GenericArityMismatch {
+        expected: usize,
+        found: usize,
+        span: Span,
+    },
 }
 
 /// Discriminator on `ArrayByValueAtExternC` so the diagnostic can
@@ -192,6 +205,14 @@ pub enum SizedPos {
     Field,
     LetBinding,
     Deref,
+    /// Generic-call type-argument position: `f::<[i32]>(...)` or any
+    /// inferred type-arg that resolves to an unsized type. Pushed by
+    /// `infer_call`'s generic branch as `Obligation::Sized { ty: fresh,
+    /// pos: TypeArg, span: call_span }`. Discharge resolves the fresh
+    /// Infer through bindings before checking, so both turbofish-
+    /// immediate and inferred-late paths discharge the same way.
+    /// See spec/16_GENERIC.md §Typeck rules.
+    TypeArg,
 }
 
 impl TypeError {
@@ -217,7 +238,8 @@ impl TypeError {
             | Self::ArrayLitElementMismatch { span, .. }
             | Self::DerefNonPointer { span, .. }
             | Self::VariadicArgUnsupported { span, .. }
-            | Self::RecursiveAdt { span, .. } => span,
+            | Self::RecursiveAdt { span, .. }
+            | Self::GenericArityMismatch { span, .. } => span,
             Self::StructLitMissingField { lit_span, .. } => lit_span,
             Self::StructLitDuplicateField { dup, .. } => dup,
         }

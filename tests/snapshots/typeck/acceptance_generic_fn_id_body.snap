@@ -1,0 +1,4 @@
+== diagnostics ==
+== types ==
+Fn[0] id<Param(0)>(x[Local(0)]: Param(0)) -> Param(0)
+  HExprId(0) : Param(0)

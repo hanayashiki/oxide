@@ -10,6 +10,7 @@
 ───╯
 == types ==
 Fn[0] reset(p[Local(0)]: *mut Adt(0)) -> ()
+Fn[1] bad() -> ()
   HExprId(0) : i32
   HExprId(1) : Adt(0)
   HExprId(2) : ()
@@ -17,4 +18,3 @@ Fn[0] reset(p[Local(0)]: *mut Adt(0)) -> ()
   HExprId(4) : Adt(0)
   HExprId(5) : *mut Adt(0)
   HExprId(6) : ()
-Fn[1] bad() -> ()

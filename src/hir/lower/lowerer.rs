@@ -214,7 +214,7 @@ struct BodyCtx<'a> {
     /// for non-generic fns. Built once at the start of `lower_fn` and
     /// passed to every `ty::lower_ty(...)` call so `Named(T)` references
     /// resolve to `Param(tpid)`. See spec/16_GENERIC.md §HIR.
-    ty_params: Vec<(String, TyParamId)>,
+    ty_params: Vec<(String, HTyParamId)>,
 }
 
 impl<'a> BodyCtx<'a> {

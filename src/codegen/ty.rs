@@ -78,6 +78,15 @@ pub fn lower_ty<'ctx>(
         TyKind::Infer(_) | TyKind::Error => {
             panic!("post-typeck type is unresolved: {}", tcx.render(ty))
         }
+        // Phase D (mono) substitutes Param leaves into concrete types
+        // before codegen runs. If a Param survives into codegen, it's a
+        // mono bug (or the driver ran codegen on an errored mono).
+        TyKind::Param(_) => {
+            panic!(
+                "lower_ty called on Param — mono should have substituted: {}",
+                tcx.render(ty)
+            )
+        }
     }
 }
 

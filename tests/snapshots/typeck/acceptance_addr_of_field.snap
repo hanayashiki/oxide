@@ -1,6 +1,7 @@
 == diagnostics ==
 == types ==
 Fn[0] use_int(p[Local(0)]: *mut i32) -> ()
+Fn[1] f() -> ()
   HExprId(0) : i32
   HExprId(1) : i32
   HExprId(2) : Adt(0)
@@ -10,4 +11,3 @@ Fn[0] use_int(p[Local(0)]: *mut i32) -> ()
   HExprId(6) : i32
   HExprId(7) : *mut i32
   HExprId(8) : ()
-Fn[1] f() -> ()
