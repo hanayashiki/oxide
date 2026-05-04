@@ -236,7 +236,7 @@ fn run_pipeline(
         return ExitCode::SUCCESS;
     }
 
-    let (results, type_errs) = check(&hir);
+    let (mut results, type_errs) = check(&hir);
     if !type_errs.is_empty() {
         let mut out = std::io::stderr().lock();
         for err in &type_errs {
@@ -255,7 +255,7 @@ fn run_pipeline(
     // instantiation graph from non-generic entry points, substitutes
     // signatures, populates `instance_map` for codegen's emit_call to
     // resolve generic-call sites against. See spec/16_GENERIC.md.
-    let (mono, mono_errs) = monomorphize(&hir, &results);
+    let (mono, mono_errs) = monomorphize(&hir, &mut results);
     if !mono_errs.is_empty() {
         let mut out = std::io::stderr().lock();
         for err in &mono_errs {
@@ -311,7 +311,7 @@ fn run_pipeline(
         extra_link_args: Vec::new(),
     };
 
-    let artifact = match build(&sess, &hir, &results, &mono, &opts) {
+    let artifact = match build(&sess, &hir, &mut results, &mono, &opts) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("oxide: build failed: {e}");

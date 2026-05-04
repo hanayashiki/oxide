@@ -262,14 +262,14 @@ pub unsafe fn jit_run_with_ir<R: Copy + 'static>(src: &str, entry: &str) -> (Str
     assert!(parse_errs.is_empty(), "parse errors: {parse_errs:#?}");
     let (hir, hir_errs) = lower(&ast);
     assert!(hir_errs.is_empty(), "hir errors: {hir_errs:#?}");
-    let (results, type_errs) = check(&hir);
+    let (mut results, type_errs) = check(&hir);
     assert!(type_errs.is_empty(), "type errors: {type_errs:#?}");
 
-    let (mono, mono_errs) = monomorphize(&hir, &results);
+    let (mono, mono_errs) = monomorphize(&hir, &mut results);
     assert!(mono_errs.is_empty(), "mono errors: {mono_errs:#?}");
 
     let ctx = Context::create();
-    let module = codegen(&ctx, &hir, &results, &mono, "jit");
+    let module = codegen(&ctx, &hir, &mut results, &mono, "jit");
 
     // Capture IR text before handing the module to the execution engine
     // (which takes ownership). The string ends with a trailing newline.
@@ -312,20 +312,20 @@ pub fn render_codegen(file_name: &str, src: &str) -> String {
         hir_errs.is_empty(),
         "hir errors in {file_name}: {hir_errs:#?}"
     );
-    let (results, type_errs) = check(&hir);
+    let (mut results, type_errs) = check(&hir);
     assert!(
         type_errs.is_empty(),
         "type errors in {file_name}: {type_errs:#?}"
     );
 
-    let (mono, mono_errs) = monomorphize(&hir, &results);
+    let (mono, mono_errs) = monomorphize(&hir, &mut results);
     assert!(
         mono_errs.is_empty(),
         "mono errors in {file_name}: {mono_errs:#?}"
     );
 
     let ctx = Context::create();
-    let module = codegen(&ctx, &hir, &results, &mono, "test");
+    let module = codegen(&ctx, &hir, &mut results, &mono, "test");
     module.print_to_string().to_string()
 }
 
@@ -354,14 +354,14 @@ pub fn render_mono(file_name: &str, src: &str) -> String {
         hir_errs.is_empty(),
         "hir errors in {file_name}: {hir_errs:#?}"
     );
-    let (results, type_errs) = check(&hir);
+    let (mut results, type_errs) = check(&hir);
     assert!(
         type_errs.is_empty(),
         "type errors in {file_name}: {type_errs:#?}"
     );
 
     // Tests use a small depth_limit to keep the output manageable
-    let (mono, mono_errs) = monomorphize_with_limit(&hir, &results, 8);
+    let (mono, mono_errs) = monomorphize_with_limit(&hir, &mut results, 8);
 
     let mut out = String::new();
 

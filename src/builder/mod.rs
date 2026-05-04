@@ -36,7 +36,7 @@ use crate::typeck::TypeckResults;
 pub fn build(
     sess: &Session,
     hir: &HirProgram,
-    typeck: &TypeckResults,
+    typeck: &mut TypeckResults,
     mono: &MonoResults,
     opts: &BuildOptions,
 ) -> Result<BuildArtifact, BuildError> {

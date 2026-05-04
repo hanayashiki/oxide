@@ -58,9 +58,9 @@ fn drive_pipeline(
     assert!(parse_errs.is_empty(), "parse errors: {parse_errs:#?}");
     let (hir, hir_errs) = lower(&ast);
     assert!(hir_errs.is_empty(), "hir errors: {hir_errs:#?}");
-    let (typeck, type_errs) = check(&hir);
+    let (mut typeck, type_errs) = check(&hir);
     assert!(type_errs.is_empty(), "type errors: {type_errs:#?}");
-    let (mono, mono_errs) = monomorphize(&hir, &typeck);
+    let (mono, mono_errs) = monomorphize(&hir, &mut typeck);
     assert!(mono_errs.is_empty(), "mono errors: {mono_errs:#?}");
     (map, hir, typeck, mono)
 }
@@ -71,10 +71,10 @@ fn run_build(
     config: CompilerConfig,
     opts: BuildOptions,
 ) -> Result<BuildArtifact, BuildError> {
-    let (_map, hir, typeck, mono) = drive_pipeline(src);
+    let (_map, hir, mut typeck, mono) = drive_pipeline(src);
     let host = host_with_workdir(workdir);
     let sess = Session::new(&host, config);
-    build(&sess, &hir, &typeck, &mono, &opts)
+    build(&sess, &hir, &mut typeck, &mono, &opts)
 }
 
 #[test]
@@ -178,9 +178,9 @@ fn ir_matches_codegen_only() {
 
     // The builder's IR should be identical to direct codegen except for
     // the stamped target lines. Strip them and compare bodies.
-    let (_map, hir, typeck, mono) = drive_pipeline(FIXTURE_RETURN_42);
+    let (_map, hir, mut typeck, mono) = drive_pipeline(FIXTURE_RETURN_42);
     let ctx = Context::create();
-    let raw_module = codegen(&ctx, &hir, &typeck, &mono, "ir_matches_codegen_only");
+    let raw_module = codegen(&ctx, &hir, &mut typeck, &mono, "ir_matches_codegen_only");
     let raw_ir = raw_module.print_to_string().to_string();
 
     let strip_target = |s: &str| -> String {
@@ -267,9 +267,9 @@ unsafe fn jit_return<R: Copy + 'static>(src: &str, entry: &str) -> R {
     use inkwell::OptimizationLevel;
     use inkwell::execution_engine::JitFunction;
 
-    let (_map, hir, typeck, mono) = drive_pipeline(src);
+    let (_map, hir, mut typeck, mono) = drive_pipeline(src);
     let ctx = Context::create();
-    let module = codegen(&ctx, &hir, &typeck, &mono, "jit");
+    let module = codegen(&ctx, &hir, &mut typeck, &mono, "jit");
     let ee = module
         .create_jit_execution_engine(OptimizationLevel::None)
         .expect("create JIT execution engine");

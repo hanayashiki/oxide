@@ -76,26 +76,27 @@ fn walk_expr(
             // Only direct Fn callees in v0. The Fn(callee_fid) discriminator
             // decides whether we cascade.
             if let HirExprKind::Fn(callee_fid) = cx.hir.exprs[callee].kind {
-                let callee_sig = cx.typeck.fn_sig(callee_fid);
-                if !callee_sig.generic_params.is_empty() {
+                let has_generics = !cx.typeck.fn_sig(callee_fid).generic_params.is_empty();
+                if has_generics {
                     debug_assert!(
                         !cx.hir.fns[callee_fid].is_extern,
                         "extern + generic rejected at typeck (per spec/16); \
                          mono should never see a generic extern callee",
                     );
                     // Resolve the call's type-args through the caller's subst.
-                    // typeck.substitute_ty is &self (interior-mut TyArena),
-                    // so &call_type_args coexists naturally.
-                    let resolved_args: Vec<TyId> = cx
+                    // Clone the typeck-recorded args out first so the
+                    // `&mut typeck` for substitute_ty doesn't fight with
+                    // the `&Vec<TyId>` borrow into `call_type_args`.
+                    let typeck_args: Vec<TyId> = cx
                         .typeck
                         .call_type_args
                         .get(&eid)
-                        .map(|args| {
-                            args.iter()
-                                .map(|&t| cx.typeck.substitute_ty(t, subst))
-                                .collect()
-                        })
+                        .cloned()
                         .unwrap_or_default();
+                    let resolved_args: Vec<TyId> = typeck_args
+                        .iter()
+                        .map(|&t| cx.typeck.substitute_ty(t, subst))
+                        .collect();
                     let call_span = cx.hir.exprs[eid].span.clone();
                     // Cascade. instance_map is populated as a side-effect
                     // of instantiate. Overflow (None) pushes an error;

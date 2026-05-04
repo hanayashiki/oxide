@@ -29,9 +29,10 @@
 //!   parents (`outer<i32>` vs `outer<i64>` body, same eid, different
 //!   resolved args).
 //!
-//! - **Single-arena contract**: mono takes `&TypeckResults` (immutable);
-//!   `typeck.substitute_ty(...)` interns through interior-mutable
-//!   `TyArena`. Every TyId in `MonoResults` references `typeck.tys`.
+//! - **Single-arena contract**: mono takes `&mut TypeckResults` so
+//!   `typeck.substitute_ty(...)` can intern re-built structural kinds
+//!   into `typeck.tys`. Every TyId in `MonoResults` references that
+//!   one arena.
 
 mod mangle;
 mod walk;
@@ -109,7 +110,7 @@ pub enum MonoError {
 /// (`DEFAULT_DEPTH_LIMIT`).
 pub fn monomorphize(
     hir: &HirProgram,
-    typeck: &TypeckResults,
+    typeck: &mut TypeckResults,
 ) -> (MonoResults, Vec<MonoError>) {
     monomorphize_with_limit(hir, typeck, DEFAULT_DEPTH_LIMIT)
 }
@@ -120,7 +121,7 @@ pub fn monomorphize(
 /// dominated by `*mut`-chains, which is unreadable.
 pub fn monomorphize_with_limit(
     hir: &HirProgram,
-    typeck: &TypeckResults,
+    typeck: &mut TypeckResults,
     depth_limit: u32,
 ) -> (MonoResults, Vec<MonoError>) {
     let mut cx = MonoCtx::new(hir, typeck);
@@ -136,7 +137,7 @@ pub fn monomorphize_with_limit(
 /// consumes self by-value to produce `MonoResults`.
 pub(crate) struct MonoCtx<'a> {
     pub(crate) hir: &'a HirProgram,
-    pub(crate) typeck: &'a TypeckResults,
+    pub(crate) typeck: &'a mut TypeckResults,
     pub(crate) instances: IndexVec<InstId, Instance>,
     pub(crate) instance_map: HashMap<(FnId, Vec<TyId>), InstId>,
     pub(crate) work_queue: VecDeque<InstId>,
@@ -145,7 +146,7 @@ pub(crate) struct MonoCtx<'a> {
 }
 
 impl<'a> MonoCtx<'a> {
-    fn new(hir: &'a HirProgram, typeck: &'a TypeckResults) -> Self {
+    fn new(hir: &'a HirProgram, typeck: &'a mut TypeckResults) -> Self {
         Self {
             hir,
             typeck,
@@ -253,20 +254,23 @@ pub(crate) fn instantiate(
         return None;
     }
 
-    // Borrow-zip subst from sig.generic_params + type_args; no clone.
-    let sig = &cx.typeck.fn_sig(fid);
-    let subst: HashMap<ParamId, TyId> = sig
-        .generic_params
-        .iter()
-        .copied()
-        .zip(type_args.iter().copied())
-        .collect();
-    let params: Vec<TyId> = sig
-        .params
+    // Snapshot sig pieces by value so the subsequent `&mut typeck`
+    // substitution doesn't fight with the `&FnSig` read borrow.
+    let (params_in, ret_in, subst): (Vec<TyId>, TyId, HashMap<ParamId, TyId>) = {
+        let sig = cx.typeck.fn_sig(fid);
+        let subst = sig
+            .generic_params
+            .iter()
+            .copied()
+            .zip(type_args.iter().copied())
+            .collect();
+        (sig.params.clone(), sig.ret, subst)
+    };
+    let params: Vec<TyId> = params_in
         .iter()
         .map(|&p| cx.typeck.substitute_ty(p, &subst))
         .collect();
-    let ret = cx.typeck.substitute_ty(sig.ret, &subst);
+    let ret = cx.typeck.substitute_ty(ret_in, &subst);
     let mangled = mangle_inst(cx.hir, fid, &type_args, &cx.typeck.tys);
 
     // Push the instance moving `type_args` into Instance, then re-borrow

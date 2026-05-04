@@ -4,24 +4,14 @@
 //! `TyArena::intern`. Codegen and typeck can compare types via
 //! `id == id` instead of walking structures.
 //!
-//! `TyArena` uses interior mutability: `intern(&self, ...)` so callers
-//! (typeck inferer, mono cascade, codegen lazy substitution) don't have
-//! to thread `&mut TyArena` through their call chains. Storage is
-//! `RefCell<IndexVec<TyId, &'static TyKind>>` — the elements are
-//! leaked at insertion time, giving `kind(&self, id) -> &TyKind` a
-//! stable address with a lifetime tied to `&self` (no `Ref` guard
-//! scoping problems for recursive-walk callers like `substitute_ty`).
-//!
-//! The leak per fresh kind is bounded by the program's unique-type
-//! count (interner deduplicates; cache hits don't leak); for a v0
-//! compile, ~few hundred KB of leaked TyKind objects, reclaimed by
-//! the OS at process exit. The forward path (when long-running
-//! embeddings like LSP/REPL become real) is to parameterize TyArena
-//! with an explicit `'arena` lifetime backed by `bumpalo::Bump` —
-//! the API surface (`intern(&self, ...)` / `kind(&self, ...) -> &TyKind`)
-//! is forward-compatible.
+//! `TyArena` owns its storage directly — `IndexVec<TyId, TyKind>` for
+//! the spine and `HashMap<TyKind, TyId>` for hash-consing. `intern`
+//! takes `&mut self`, and there is exactly one `TyArena` per
+//! compilation (owned by `TypeckResults`). Mono and codegen consume
+//! `TypeckResults` as `&mut`, threading mutable arena access through
+//! the pipeline so that lazy `substitute_ty` calls can intern
+//! re-built structural kinds in place.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 
 use index_vec::IndexVec;
@@ -183,26 +173,23 @@ pub struct FieldDef {
     pub span: Span,
 }
 
-/// Hash-cons interner with interior-mutable storage.
+/// Hash-cons interner. Plain ownership — `intern` takes `&mut self`.
 ///
-/// Not `Clone` — `RefCell` doesn't deep-clone, and a clone-snapshot of
-/// the type universe at a point in time isn't meaningful (the leaked
-/// TyKinds keep their `'static` references regardless). Wrap in
-/// `Rc`/`Arc` if shared-ownership ever becomes a need; v0 has exactly
-/// one TyArena per compilation, owned by `TypeckResults`.
+/// Not `Clone`: a clone-snapshot of the type universe at a point in
+/// time isn't meaningful, and the unique-id contract (equal kinds
+/// share a `TyId`) is global to one arena. v0 has exactly one
+/// `TyArena` per compilation, owned by `TypeckResults`. Wrap in
+/// `Rc<RefCell<_>>` if shared-ownership ever becomes a real need.
 #[derive(Debug)]
 pub struct TyArena {
-    /// Append-only storage of leaked TyKinds. Indexed by `TyId`. The
-    /// element type is `&'static TyKind` because each push goes through
-    /// `Box::leak` — this gives stable addresses without coupling the
-    /// returned `&TyKind` to any `Ref<'_, ...>` guard scope.
-    arena: RefCell<IndexVec<TyId, &'static TyKind>>,
-    /// Hash-cons map: dedups interned TyKinds. Mutation is short-lived
-    /// (one `borrow_mut` per fresh insert) so re-entrant `intern` calls
-    /// from inside the same arena would runtime-panic — but the only
-    /// callers either dedupe immediately or recurse through TyArena
-    /// methods that release the borrow before re-entering.
-    interner: RefCell<HashMap<TyKind, TyId>>,
+    /// Append-only spine storage indexed by `TyId`. Each `intern` push
+    /// owns its `TyKind` by value — `&self.arena[id]` is stable for
+    /// the arena's lifetime because `IndexVec` never moves elements
+    /// out of place under push-only access.
+    arena: IndexVec<TyId, TyKind>,
+    /// Hash-cons map: dedups interned TyKinds. Fast path of `intern`
+    /// is a `get` here; cache miss falls through to `arena.push`.
+    interner: HashMap<TyKind, TyId>,
     pub i8: TyId,
     pub i16: TyId,
     pub i32: TyId,
@@ -228,13 +215,13 @@ impl Default for TyArena {
 impl TyArena {
     pub fn new() -> Self {
         // Build an empty arena, then prime the primitive shortcuts via
-        // the interior-mut `intern`. The `&self` API works the moment
-        // the struct is constructed — we just need temporary `TyId`s
-        // for the field initializers, which we obtain by populating
-        // primitives first.
-        let arena = Self {
-            arena: RefCell::new(IndexVec::new()),
-            interner: RefCell::new(HashMap::new()),
+        // `intern`. We need temporary `TyId`s for the field initializers,
+        // which we obtain by populating primitives first; sentinels
+        // below are placeholder values overwritten by the second `Self`
+        // return.
+        let mut arena = Self {
+            arena: IndexVec::new(),
+            interner: HashMap::new(),
             // Sentinels overwritten immediately after construction.
             // `from_raw(0)` is a placeholder — none of these reads
             // observe the sentinel because the Self return below
@@ -289,38 +276,84 @@ impl TyArena {
     }
 
     /// Intern a `TyKind`, returning its `TyId`. Cache-deduped by the
-    /// hash-cons interner so equal kinds share an id. Fresh kinds are
-    /// `Box::leak`ed to give the underlying `&TyKind` a stable address
-    /// (Vec growth on the spine doesn't move boxed contents); the leak
-    /// is bounded by the program's unique-type count.
-    pub fn intern(&self, kind: TyKind) -> TyId {
-        // Fast path: cache hit — no allocation, no leak, no spine push.
-        if let Some(&id) = self.interner.borrow().get(&kind) {
+    /// hash-cons interner so equal kinds share an id. Cache miss owns
+    /// `kind` by value — pushed to the spine and recorded in the
+    /// interner with one `clone` (cheap for the common shapes).
+    pub fn intern(&mut self, kind: TyKind) -> TyId {
+        // Fast path: cache hit — no allocation, no spine push.
+        if let Some(&id) = self.interner.get(&kind) {
             return id;
         }
-        // Slow path: not interned yet. Leak a Box<TyKind> for stable
-        // address, then push the &'static reference into the arena and
-        // record the kind→id mapping in the interner.
-        let leaked: &'static TyKind = Box::leak(Box::new(kind.clone()));
-        let id = self.arena.borrow_mut().push(leaked);
-        self.interner.borrow_mut().insert(kind, id);
+        // Slow path: push to the spine; record the kind→id mapping in
+        // the interner. The `clone` here is the price of keeping the
+        // interner key independent of the spine slot.
+        let id = self.arena.push(kind.clone());
+        self.interner.insert(kind, id);
         id
     }
 
-    /// Look up the `TyKind` for a given `TyId`. Returns a `&TyKind` whose
-    /// lifetime is tied to `&self`; the underlying memory is leaked
-    /// `'static` so the caller can hold the reference across subsequent
-    /// `intern()` calls (which is what `substitute_ty`'s recursive match
-    /// arms need — `tys.kind(ty)` borrowed across `tys.intern(...)`).
+    /// Look up the `TyKind` for a given `TyId`. The returned reference
+    /// borrows from the arena; callers that want to recurse-and-intern
+    /// (e.g. `substitute_ty`) must `.clone()` first to release the
+    /// borrow before the next `&mut self` call.
     pub fn kind(&self, id: TyId) -> &TyKind {
-        // The element is `&'static TyKind` (Copy reference). Pulling it
-        // out from under the `Ref` guard with `*` copies the static ref
-        // into a temporary that outlives the guard.
-        *self
-            .arena
-            .borrow()
+        self.arena
             .get(id)
             .expect("TyId out of range for TyArena")
+    }
+
+    /// Substitute `Param(_)` leaves in `ty` through the `subst` map,
+    /// re-interning structural arms (`Fn`/`Ptr`/`Array`) into `self`.
+    /// Used by mono (`instantiate` substituting fn signatures) and
+    /// codegen (`ty_of`/`local_ty` substituting body-internal expr/local
+    /// types lazily). Empty `subst` is identity through interning —
+    /// non-generic instances take this path uniformly. See
+    /// spec/16_GENERIC.md §Monomorphization.
+    ///
+    /// `match self.kind(ty).clone() { ... }` releases the kind borrow
+    /// before the recursive `self.substitute_ty(...)` and the re-intern,
+    /// so the `&mut self` API composes despite the simultaneous read.
+    pub fn substitute_ty(&mut self, ty: TyId, subst: &HashMap<ParamId, TyId>) -> TyId {
+        match self.kind(ty).clone() {
+            // Leaf case: substitute Param nodes.
+            TyKind::Param(pid) => *subst.get(&pid).unwrap_or_else(|| {
+                panic!(
+                    "substitute_ty: Param({}) not in subst — caller must supply complete map",
+                    pid.raw()
+                )
+            }),
+
+            // Recursive structural cases.
+            TyKind::Fn(params, ret, c_variadic) => {
+                let params: Vec<_> = params
+                    .iter()
+                    .map(|&p| self.substitute_ty(p, subst))
+                    .collect();
+                let ret = self.substitute_ty(ret, subst);
+                self.intern(TyKind::Fn(params, ret, c_variadic))
+            }
+            TyKind::Ptr(inner, m) => {
+                let inner = self.substitute_ty(inner, subst);
+                self.intern(TyKind::Ptr(inner, m))
+            }
+            TyKind::Array(elem, len) => {
+                let elem = self.substitute_ty(elem, subst);
+                self.intern(TyKind::Array(elem, len))
+            }
+
+            // Pass-through cases. Spelled out (not under a `_` catch-all)
+            // so a future variant addition forces a compile error here
+            // rather than silently breaking substitution.
+            TyKind::Prim(_) | TyKind::Unit | TyKind::Never | TyKind::Error => ty,
+            // ADTs are non-generic in v0 (no `Vec<T>` etc.). When generic
+            // ADTs land they become `Adt(aid, type_args)` and this arm
+            // gains a recursion over `type_args`.
+            TyKind::Adt(_) => ty,
+            // Signatures never carry Infer (decl phase resolves them to
+            // concrete or Param). Pass through defensively; if reached,
+            // it's a Phase C bug worth surfacing later.
+            TyKind::Infer(_) => ty,
+        }
     }
 
     /// Look up a primitive type by its source-level name. `None` if the

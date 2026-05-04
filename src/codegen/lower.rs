@@ -59,7 +59,7 @@ use super::ty::{
 pub fn codegen<'ctx>(
     ctx: &'ctx Context,
     hir: &HirProgram,
-    typeck_results: &TypeckResults,
+    typeck_results: &mut TypeckResults,
     mono: &MonoResults,
     module_name: &str,
 ) -> Module<'ctx> {
@@ -129,7 +129,7 @@ pub fn codegen<'ctx>(
         }
     }
 
-    let cg = Codegen {
+    let mut cg = Codegen {
         ctx,
         module,
         builder,
@@ -169,7 +169,7 @@ struct Codegen<'a, 'ctx> {
     module: Module<'ctx>,
     builder: Builder<'ctx>,
     hir: &'a HirProgram,
-    typeck_results: &'a TypeckResults,
+    typeck_results: &'a mut TypeckResults,
     /// Mono's instance graph. Codegen reads `mono.instances[inst_id]` for
     /// per-instance signatures (substituted params/ret) and consults
     /// `mono.instance_map[(fid, resolved_args)]` at every generic call
@@ -329,7 +329,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// `body`), so allocas stay grouped at the top of the entry block in
     /// emission order.
     fn alloca_in_entry(
-        &self,
+        &mut self,
         fx: &FnCodegenContext<'ctx>,
         ty: BasicTypeEnum<'ctx>,
         name: &str,
@@ -350,23 +350,23 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// Body-internal expr type. Substitutes `typeck.expr_tys[eid]`
     /// through the per-body `fx.subst` so generic-fn bodies see ground
     /// types at codegen. Empty subst → identity through interning, so
-    /// non-generic instances take the same code path. `&self` because
-    /// `TyArena::intern` is interior-mut (Pre-Phase 0).
-    fn ty_of(&self, fx: &FnCodegenContext<'ctx>, eid: HExprId) -> TyId {
-        self.typeck_results
-            .substitute_ty(self.typeck_results.type_of_expr(eid), &fx.subst)
+    /// non-generic instances take the same code path. `&mut self`
+    /// because `TyArena::intern` requires mutable access.
+    fn ty_of(&mut self, fx: &FnCodegenContext<'ctx>, eid: HExprId) -> TyId {
+        let ty = self.typeck_results.type_of_expr(eid);
+        self.typeck_results.substitute_ty(ty, &fx.subst)
     }
 
     /// Body-internal local type. Same substitution shape as `ty_of`.
-    fn local_ty(&self, fx: &FnCodegenContext<'ctx>, lid: LocalId) -> TyId {
-        self.typeck_results
-            .substitute_ty(self.typeck_results.type_of_local(lid), &fx.subst)
+    fn local_ty(&mut self, fx: &FnCodegenContext<'ctx>, lid: LocalId) -> TyId {
+        let ty = self.typeck_results.type_of_local(lid);
+        self.typeck_results.substitute_ty(ty, &fx.subst)
     }
 
     /// `true` iff the resolved typeck kind is `Array(_, Some(_))`.
     /// Used at every "is this a place-form array?" boundary
     /// (let-init, fn-arg, fn-return, Local/Field/Index dispatch).
-    fn is_sized_array(&self, ty: TyId) -> bool {
+    fn is_sized_array(&mut self, ty: TyId) -> bool {
         matches!(
             self.typeck_results.tys().kind(ty),
             TyKind::Array(_, Some(_))
@@ -395,7 +395,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     ///   bounds.ok:  ; builder positioned here on return
     /// Per spec/09_ARRAY.md the guard is always emitted; LLVM folds
     /// const-known-safe cases at any opt level.
-    fn emit_bounds_check(&self, fx: &FnCodegenContext<'ctx>, idx: IntValue<'ctx>, n: u64) {
+    fn emit_bounds_check(&mut self, fx: &FnCodegenContext<'ctx>, idx: IntValue<'ctx>, n: u64) {
         let i64_ty = self.ctx.i64_type();
         let n_v = i64_ty.const_int(n, false);
         let cmp = self
@@ -419,7 +419,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// size — works for arrays, structs, primitives, anything sized. Align
     /// is 1 — soundness-safe and lets LLVM choose the actual alignment via
     /// the operand types.
-    fn emit_memcpy(&self, dst: PointerValue<'ctx>, src: PointerValue<'ctx>, ty: TyId) {
+    fn emit_memcpy(&mut self, dst: PointerValue<'ctx>, src: PointerValue<'ctx>, ty: TyId) {
         let ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, ty);
         let size = ll.size_of().expect("type has size_of");
         self.builder
@@ -440,7 +440,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     ///
     /// Shared by `emit_let`, `emit_assign`, `emit_if`, `emit_loop`,
     /// `emit_break`, anywhere a value flows into memory.
-    fn store_into(&self, dst: PointerValue<'ctx>, op: Operand<'ctx>, ty: TyId) {
+    fn store_into(&mut self, dst: PointerValue<'ctx>, op: Operand<'ctx>, ty: TyId) {
         match op {
             Operand::Value(v) => {
                 self.builder.build_store(dst, v).unwrap();
@@ -454,7 +454,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// operand is a Place; passes through Value; materializes `{} undef`
     /// for Unit. `name` is the LLVM SSA name suffix for the generated
     /// `load` (consumed only when the operand is a Place).
-    fn load_value(&self, op: Operand<'ctx>, ty: TyId, name: &str) -> BasicValueEnum<'ctx> {
+    fn load_value(&mut self, op: Operand<'ctx>, ty: TyId, name: &str) -> BasicValueEnum<'ctx> {
         match op {
             Operand::Value(v) => v,
             Operand::Place(p) => {
@@ -476,7 +476,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     ///   - `emit_field`'s value-form bridge (extract array from a Value
     ///     struct and re-spill so the result has place form).
     fn spill_to_place_fresh(
-        &self,
+        &mut self,
         fx: &FnCodegenContext<'ctx>,
         op: Operand<'ctx>,
         ty: TyId,
@@ -493,7 +493,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// always emit the loop and let LLVM coalesce. Three-bb shape
     /// modeled after `emit_short_circuit`.
     fn emit_repeat_loop(
-        &self,
+        &mut self,
         fx: &mut FnCodegenContext<'ctx>,
         slot: PointerValue<'ctx>,
         arr_ll: BasicTypeEnum<'ctx>,
@@ -539,7 +539,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
     // ---------- per-fn entry ----------
 
-    fn lower_fn(&self, inst_id: InstId) {
+    fn lower_fn(&mut self, inst_id: InstId) {
         let fid = self.mono.instances[inst_id].fid;
         let fnv = self.inst_decls[inst_id];
 
@@ -623,7 +623,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
     // ---------- blocks ----------
 
-    fn emit_block(&self, fx: &mut FnCodegenContext<'ctx>, bid: HBlockId) -> Option<Operand<'ctx>> {
+    fn emit_block(&mut self, fx: &mut FnCodegenContext<'ctx>, bid: HBlockId) -> Option<Operand<'ctx>> {
         // Clone the items vec so we don't borrow self.hir while emitting.
         let block = self.hir.blocks[bid].clone();
         let last_idx = block.items.len().checked_sub(1);
@@ -658,7 +658,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// guarantees the operand cannot be `!`-typed at this site. See
     /// spec/BACKLOG/B005_VOID_TYPES_CODEGEN_MODEL.md (Q3) for the
     /// motivation.
-    fn emit_expr(&self, fx: &mut FnCodegenContext<'ctx>, eid: HExprId) -> Option<Operand<'ctx>> {
+    fn emit_expr(&mut self, fx: &mut FnCodegenContext<'ctx>, eid: HExprId) -> Option<Operand<'ctx>> {
         if self.is_terminated() {
             return None;
         }
@@ -740,7 +740,10 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             }
             HirExprKind::StrLit(s) => Some(self.emit_str_lit(&s)),
             HirExprKind::Index { base, index } => self.emit_index_rvalue(fx, base, index),
-            HirExprKind::ArrayLit(lit) => self.emit_array_lit(fx, lit, self.ty_of(fx, eid)),
+            HirExprKind::ArrayLit(lit) => {
+                let ty = self.ty_of(fx, eid);
+                self.emit_array_lit(fx, lit, ty)
+            }
             HirExprKind::Field { base, name } => self.emit_field(fx, base, &name),
             HirExprKind::StructLit { adt, fields } => self.emit_struct_lit(fx, adt, &fields),
             // `&place` / `&mut place` — the slot pointer that `lvalue`
@@ -785,7 +788,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// terminator and return a pointer to its first byte. The value's
     /// type is opaque `ptr` (LLVM 15+); no GEP needed since the global
     /// itself is already a pointer.
-    fn emit_str_lit(&self, s: &str) -> Operand<'ctx> {
+    fn emit_str_lit(&mut self, s: &str) -> Operand<'ctx> {
         let mut bytes: Vec<u8> = s.as_bytes().to_vec();
         bytes.push(0); // C-style NUL terminator (see spec/07_POINTER.md).
         let i8_ty = self.ctx.i8_type();
@@ -810,7 +813,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         Operand::Value(global.as_pointer_value().into())
     }
 
-    fn emit_int_lit(&self, fx: &FnCodegenContext<'ctx>, eid: HExprId, n: u64) -> Operand<'ctx> {
+    fn emit_int_lit(&mut self, fx: &FnCodegenContext<'ctx>, eid: HExprId, n: u64) -> Operand<'ctx> {
         let ty = self.ty_of(fx, eid);
         match self.typeck_results.tys().kind(ty) {
             TyKind::Prim(p) => Operand::Value(lower_prim(self.ctx, *p).const_int(n, false).into()),
@@ -818,7 +821,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         }
     }
 
-    fn lvalue(&self, fx: &mut FnCodegenContext<'ctx>, eid: HExprId) -> PointerValue<'ctx> {
+    fn lvalue(&mut self, fx: &mut FnCodegenContext<'ctx>, eid: HExprId) -> PointerValue<'ctx> {
         match self.hir.exprs[eid].kind.clone() {
             HirExprKind::Local(lid) => fx.locals[&lid],
             HirExprKind::Index { base, index } => {
@@ -837,13 +840,15 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 // underlying Adt. Mirrors `emit_index_place`'s peel-loop;
                 // typeck's `auto_deref_ptr` already accepted the syntax,
                 // codegen just lowers it.
-                let (base_ptr, base_ty) =
-                    self.peel_ptrs(self.lvalue(fx, base), self.ty_of(fx, base));
+                let lv = self.lvalue(fx, base);
+                let bt = self.ty_of(fx, base);
+                let (base_ptr, base_ty) = self.peel_ptrs(lv, bt);
                 let aid = match self.typeck_results.tys().kind(base_ty) {
                     TyKind::Adt(aid) => *aid,
                     other => panic!("Field base lvalue: non-Adt type after peel {:?}", other),
                 };
-                self.field_gep(base_ptr, base_ty, self.field_index(aid, &name))
+                let fidx = self.field_index(aid, &name);
+                self.field_gep(base_ptr, base_ty, fidx)
             }
             HirExprKind::Unary { op: UnOp::Deref, expr } => self
                 .emit_deref_ptr(fx, expr)
@@ -854,7 +859,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
     /// Position of `name` in `adts[aid]`'s sole variant. Typeck has
     /// already validated the field exists; a miss here is an ICE.
-    fn field_index(&self, aid: AdtId, name: &str) -> u32 {
+    fn field_index(&mut self, aid: AdtId, name: &str) -> u32 {
         let adt = self.typeck_results.adt_def(aid);
         adt.variants[VariantIdx::from_raw(0)]
             .fields
@@ -869,7 +874,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// `lvalue(Field)` and `emit_field`'s Place path so `q.x` for
     /// `q: *mut P` reaches the Adt without the user writing `(*q).x`.
     fn peel_ptrs(
-        &self,
+        &mut self,
         mut cur_ptr: PointerValue<'ctx>,
         mut cur_ty: TyId,
     ) -> (PointerValue<'ctx>, TyId) {
@@ -891,7 +896,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// off `ty` without emitting IR. Used at the top of `emit_field` to
     /// find the `Adt` for `aid` lookup before deciding which lowering
     /// path to take.
-    fn peel_ptrs_ty(&self, mut cur_ty: TyId) -> TyId {
+    fn peel_ptrs_ty(&mut self, mut cur_ty: TyId) -> TyId {
         let tcx = self.typeck_results.tys();
         while let TyKind::Ptr(inner, _) = tcx.kind(cur_ty) {
             cur_ty = *inner;
@@ -904,7 +909,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// targets, `&place.field`) and `emit_field`'s Place path
     /// (single-field rvalue load).
     fn field_gep(
-        &self,
+        &mut self,
         base_ptr: PointerValue<'ctx>,
         base_ty: TyId,
         field_idx: u32,
@@ -916,7 +921,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     }
 
     fn emit_field(
-        &self,
+        &mut self,
         fx: &mut FnCodegenContext<'ctx>,
         base: HExprId,
         name: &str,
@@ -927,7 +932,8 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         // aggregate (Ptr-typed exprs are place-form via Local/Field/Deref),
         // so peeling unconditionally is safe — `peel_ptrs_ty` is a no-op
         // on non-Ptr types.
-        let base_ty = self.peel_ptrs_ty(self.ty_of(fx, base));
+        let bt = self.ty_of(fx, base);
+        let base_ty = self.peel_ptrs_ty(bt);
         let aid = match self.typeck_results.tys().kind(base_ty) {
             TyKind::Adt(aid) => *aid,
             other => panic!("Field rvalue: non-Adt base type after peel {:?}", other),
@@ -942,7 +948,9 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         if base_expr.is_place {
             // Place path — single-field load via `getelementptr`, no whole-struct copy.
             // Peel base_ptr in lockstep with base_ty (loading at each Ptr layer).
-            let (base_ptr, _) = self.peel_ptrs(self.lvalue(fx, base), self.ty_of(fx, base));
+            let lv = self.lvalue(fx, base);
+            let bt = self.ty_of(fx, base);
+            let (base_ptr, _) = self.peel_ptrs(lv, bt);
             let gep = self.field_gep(base_ptr, base_ty, field_idx);
             // Array-typed fields stay in place form: hand back the GEP'd
             // pointer instead of loading the aggregate. Mirrors the
@@ -992,7 +1000,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// Typeck has already validated the field set, so missing/extra/
     /// duplicate are unreachable at this point.
     fn emit_struct_lit(
-        &self,
+        &mut self,
         fx: &mut FnCodegenContext<'ctx>,
         adt: crate::hir::HAdtId,
         fields: &[crate::hir::HirStructLitField],
@@ -1001,15 +1009,19 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         let llty = self.adt_ll[aid];
         let mut agg = llty.get_undef();
 
-        let adt_def = self.typeck_results.adt_def(aid);
-        for (i, declared) in adt_def.variants[VariantIdx::from_raw(0)]
-            .fields
-            .iter()
-            .enumerate()
-        {
+        // Snapshot the declared field names by value so the loop body
+        // can take `&mut self` for ty_of/emit_expr/load_value without
+        // fighting an outstanding `&adt_def` borrow.
+        let declared_names: Vec<String> = self.typeck_results.adt_def(aid).variants
+            [VariantIdx::from_raw(0)]
+        .fields
+        .iter()
+        .map(|f| f.name.clone())
+        .collect();
+        for (i, declared_name) in declared_names.iter().enumerate() {
             let provided = fields
                 .iter()
-                .find(|p| p.name == declared.name)
+                .find(|p| &p.name == declared_name)
                 .expect("typeck guaranteed all fields are provided");
             let provided_ty = self.ty_of(fx, provided.value);
             let provided_op = self.emit_expr(fx, provided.value)?;
@@ -1031,7 +1043,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// spec/09_ARRAY.md "ArrayLit shape" (Q1 in the codegen plan):
     /// alloca + GEP+store, no SSA aggregate.
     fn emit_array_lit(
-        &self,
+        &mut self,
         fx: &mut FnCodegenContext<'ctx>,
         lit: HirArrayLit,
         array_ty: TyId,
@@ -1088,7 +1100,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     ///
     /// See spec/09_ARRAY.md "Index lowering".
     fn emit_index_rvalue(
-        &self,
+        &mut self,
         fx: &mut FnCodegenContext<'ctx>,
         base_eid: HExprId,
         idx_eid: HExprId,
@@ -1115,7 +1127,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// `load ptr`. The first level is implicit (`emit_expr` of a
     /// pointer-typed base already returns the loaded ptr value).
     fn emit_index_place(
-        &self,
+        &mut self,
         fx: &mut FnCodegenContext<'ctx>,
         base_eid: HExprId,
         idx_eid: HExprId,
@@ -1123,7 +1135,6 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         let base_ty = self.ty_of(fx, base_eid);
         let i64_ty = self.ctx.i64_type();
         let zero = i64_ty.const_zero();
-        let tcx = self.typeck_results.tys();
         let ptr_ll = self.ctx.ptr_type(inkwell::AddressSpace::default());
 
         // Array base: Operand::Place — the slot ptr IS the array storage.
@@ -1139,50 +1150,48 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         // Set up the loop. At entry, `cur_ptr` addresses either the
         // array storage (when base is an array place) or the next
         // pointer in a chain (when base is a pointer).
-        let (mut cur_ptr, mut cur_ty) = match tcx.kind(base_ty) {
+        let (mut cur_ptr, mut cur_ty) = match self.typeck_results.tys().kind(base_ty).clone() {
             TyKind::Array(_, _) => (base_v, base_ty),
-            TyKind::Ptr(inner, _) => (base_v, *inner),
+            TyKind::Ptr(inner, _) => (base_v, inner),
             other => panic!(
                 "v0 codegen: index base has non-indexable type; typeck should have rejected ({:?})",
                 other
             ),
         };
-        while let TyKind::Ptr(inner, _) = tcx.kind(cur_ty) {
-            let next = *inner;
+        while let TyKind::Ptr(inner, _) = self.typeck_results.tys().kind(cur_ty).clone() {
             cur_ptr = self
                 .builder
                 .build_load(ptr_ll, cur_ptr, "deref")
                 .unwrap()
                 .into_pointer_value();
-            cur_ty = next;
+            cur_ty = inner;
         }
 
         let idx_ty = self.ty_of(fx, idx_eid);
         let idx_op = self.emit_expr(fx, idx_eid)?;
         let idx_v = self.load_value(idx_op, idx_ty, "load").into_int_value();
 
-        match tcx.kind(cur_ty) {
+        match self.typeck_results.tys().kind(cur_ty).clone() {
             TyKind::Array(elem, Some(n)) => {
-                let elem_ty = *elem;
-                let n_v = *n;
-                self.emit_bounds_check(fx, idx_v, n_v);
-                let arr_ll = lower_ty(self.ctx, tcx, &self.adt_ll, cur_ty);
+                self.emit_bounds_check(fx, idx_v, n);
+                let arr_ll =
+                    lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, cur_ty);
                 let elt_ptr = unsafe {
                     self.builder
                         .build_in_bounds_gep(arr_ll, cur_ptr, &[zero, idx_v], "idx.gep")
                         .unwrap()
                 };
-                Some((elt_ptr, elem_ty))
+                Some((elt_ptr, elem))
             }
             TyKind::Array(elem, None) => {
-                let elem_ty = *elem;
-                let elem_ll = lower_ty(self.ctx, tcx, &self.adt_ll, elem_ty);
+                let elem_ll =
+                    lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, elem);
                 let elt_ptr = unsafe {
                     self.builder
                         .build_in_bounds_gep(elem_ll, cur_ptr, &[idx_v], "idx.gep")
                         .unwrap()
                 };
-                Some((elt_ptr, elem_ty))
+                Some((elt_ptr, elem))
             }
             other => panic!(
                 "v0 codegen: non-array reached after auto-deref; typeck should have rejected ({:?})",
@@ -1194,7 +1203,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     // ---------- unary / binary ----------
 
     fn emit_unary(
-        &self,
+        &mut self,
         fx: &mut FnCodegenContext<'ctx>,
         op: UnOp,
         expr: HExprId,
@@ -1226,7 +1235,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// Shared by `emit_unary`'s Deref rvalue arm (wraps in `Operand::Place`)
     /// and `lvalue`'s Deref arm (returns the ptr directly).
     fn emit_deref_ptr(
-        &self,
+        &mut self,
         fx: &mut FnCodegenContext<'ctx>,
         expr: HExprId,
     ) -> Option<PointerValue<'ctx>> {
@@ -1239,7 +1248,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     }
 
     fn emit_binary(
-        &self,
+        &mut self,
         fx: &mut FnCodegenContext<'ctx>,
         eid: HExprId,
         op: BinOp,
@@ -1348,7 +1357,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
     /// LLVM requires shift amounts to match the lhs's int type.
     fn coerce_shift_amt(
-        &self,
+        &mut self,
         r: IntValue<'ctx>,
         target: inkwell::types::IntType<'ctx>,
     ) -> IntValue<'ctx> {
@@ -1363,7 +1372,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     }
 
     fn emit_short_circuit(
-        &self,
+        &mut self,
         fx: &mut FnCodegenContext<'ctx>,
         op: BinOp,
         lhs: HExprId,
@@ -1428,7 +1437,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     }
 
     fn emit_assign(
-        &self,
+        &mut self,
         fx: &mut FnCodegenContext<'ctx>,
         op: AssignOp,
         target: HExprId,
@@ -1489,7 +1498,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     // ---------- calls ----------
 
     fn emit_call(
-        &self,
+        &mut self,
         fx: &mut FnCodegenContext<'ctx>,
         parent_eid: HExprId,            // the call expression's eid
         callee_eid: HExprId,
@@ -1512,8 +1521,16 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         // parents (`outer<i32>` vs `outer<i64>` body), which is the
         // whole reason this lookup lives at codegen time and not in a
         // per-eid mono cache.
+        // Clone the typeck-recorded args first so the `&mut typeck`
+        // borrow taken by substitute_ty doesn't fight with the
+        // `&Vec<TyId>` borrow into `call_type_args`.
+        let typeck_args_opt: Option<Vec<TyId>> = self
+            .typeck_results
+            .call_type_args
+            .get(&parent_eid)
+            .cloned();
         let (fnv, n_fixed, ret_ty, c_variadic, param_src) =
-            if let Some(typeck_args) = self.typeck_results.call_type_args.get(&parent_eid) {
+            if let Some(typeck_args) = typeck_args_opt {
                 let resolved_args: Vec<TyId> = typeck_args
                     .iter()
                     .map(|&t| self.typeck_results.substitute_ty(t, &fx.subst))
@@ -1547,16 +1564,16 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 )
             };
 
-        // Per-param type lookup. Reads from the appropriate side
-        // (mono.instances[inst].params for generic, fn_sig.params for
-        // non-generic) at use site — no Vec<TyId> clone out of the
-        // dispatch match above. TyId is Copy.
-        let param_ty = |i: usize| -> TyId {
-            match param_src {
+        // Materialize the n_fixed param types up front (TyId is Copy)
+        // so the arg-loop body can take `&mut self` for ty_of /
+        // emit_expr / is_sized_array without fighting a long-lived
+        // `&self.typeck_results` borrow inside a closure capture.
+        let param_tys_for_dispatch: Vec<TyId> = (0..n_fixed)
+            .map(|i| match param_src {
                 ParamSource::Inst(inst_id) => self.mono.instances[inst_id].params[i],
                 ParamSource::Fn(fid) => self.typeck_results.fn_sig(fid).params[i],
-            }
-        };
+            })
+            .collect();
 
         // Args. For each `Array(_, Some(_))`-typed arg: byval ABI per
         // spec/09_ARRAY.md — caller owns a fresh slot, memcpys from the
@@ -1579,7 +1596,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 // ABI), not the arg type — for generic instances these
                 // differ from the raw FnSig because the param type was
                 // substituted.
-                let pty = param_ty(i);
+                let pty = param_tys_for_dispatch[i];
                 if self.is_sized_array(pty) {
                     let fresh = self.spill_to_place_fresh(fx, op, arg_ty, "call.arg.slot");
                     arg_vals.push(fresh.into());
@@ -1633,7 +1650,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// unsigned-narrow + `bool` zero-extend to `i32`; `i32`/`u32`/`i64`/
     /// `u64`/`isize`/`usize`/`Ptr(_, _)` pass through. Anything else is
     /// unreachable — typeck E0272 already rejected it at the call site.
-    fn promote_for_variadic(&self, op: Operand<'ctx>, ty: TyId) -> BasicValueEnum<'ctx> {
+    fn promote_for_variadic(&mut self, op: Operand<'ctx>, ty: TyId) -> BasicValueEnum<'ctx> {
         let v = self.load_value(op, ty, "load");
         match self.typeck_results.tys().kind(ty) {
             TyKind::Prim(p) => match p {
@@ -1665,7 +1682,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     // ---------- casts ----------
 
     fn emit_cast(
-        &self,
+        &mut self,
         fx: &mut FnCodegenContext<'ctx>,
         eid: HExprId,
         inner: HExprId,
@@ -1704,7 +1721,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     // ---------- if / else ----------
 
     fn emit_if(
-        &self,
+        &mut self,
         fx: &mut FnCodegenContext<'ctx>,
         eid: HExprId,
         cond: HExprId,
@@ -1716,7 +1733,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         /// merge block. No-op if the arm terminated the BB on its own
         /// (`return`/`break` in the arm body).
         fn seal_arm<'a, 'ctx>(
-            codegen: &Codegen<'a, 'ctx>,
+            codegen: &mut Codegen<'a, 'ctx>,
             result_slot: Option<PointerValue<'ctx>>,
             arm_val: Option<Operand<'ctx>>,
             if_ty: TyId,
@@ -1814,7 +1831,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     ///                                  break jumps to end_bb
     /// ```
     fn emit_loop(
-        &self,
+        &mut self,
         fx: &mut FnCodegenContext<'ctx>,
         eid: HExprId,
         init: Option<HExprId>,
@@ -1938,7 +1955,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// Mirrors `emit_return`'s "compute operand, then exit" shape — the
     /// difference is that return calls `build_return` while break stores
     /// to a slot and branches.
-    fn emit_break(&self, fx: &mut FnCodegenContext<'ctx>, expr: Option<HExprId>) {
+    fn emit_break(&mut self, fx: &mut FnCodegenContext<'ctx>, expr: Option<HExprId>) {
         let target = *fx
             .loop_targets
             .last()
@@ -1964,7 +1981,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
     /// Emit `continue` — branch to the innermost loop's
     /// `continue_target_bb`. No operand in v0.
-    fn emit_continue(&self, fx: &mut FnCodegenContext<'ctx>) {
+    fn emit_continue(&mut self, fx: &mut FnCodegenContext<'ctx>) {
         let target = *fx
             .loop_targets
             .last()
@@ -1978,7 +1995,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
     // ---------- return ----------
 
-    fn emit_return(&self, fx: &mut FnCodegenContext<'ctx>, val: Option<HExprId>) {
+    fn emit_return(&mut self, fx: &mut FnCodegenContext<'ctx>, val: Option<HExprId>) {
         // Use the instance's substituted ret type, not the raw FnSig's
         // (which carries Param leaves for generic fns). For non-generic
         // instances, inst.ret == sig.ret.
@@ -2000,7 +2017,8 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 // Array return: Path A — load the place into an SSA aggregate
                 // before returning by value. load_value handles this uniformly
                 // (Place → load, Value → passthrough).
-                let v = self.load_value(op, self.ty_of(fx, eid), "ret.load");
+                let ty = self.ty_of(fx, eid);
+                let v = self.load_value(op, ty, "ret.load");
                 self.builder.build_return(Some(&v)).unwrap();
             }
             None => {
@@ -2016,7 +2034,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
     // ---------- let ----------
 
-    fn emit_let(&self, fx: &mut FnCodegenContext<'ctx>, lid: LocalId, init: Option<HExprId>) {
+    fn emit_let(&mut self, fx: &mut FnCodegenContext<'ctx>, lid: LocalId, init: Option<HExprId>) {
         let ty = self.local_ty(fx, lid);
         let local = &self.hir.locals[lid];
 
