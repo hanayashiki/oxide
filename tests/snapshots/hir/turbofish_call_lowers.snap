@@ -1,0 +1,9 @@
+HirProgram
+  Module turbofish_call_lowers.ox (root)
+    Fn[0] id<T[TyParam(0)]>(x[Local(0)]: Param(0)) -> Param(0)
+      Block
+        tail: Local(0, "x", place)
+    Fn[1] main() -> i32
+      Block
+        ExprStmt Call(Fn(0, "id"), ::<i32>, Int(7))
+        tail: Int(0)

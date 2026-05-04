@@ -59,6 +59,10 @@ impl ModuleScopeCtx {
 pub(super) struct ProgramItems {
     pub adts: IndexVec<HAdtId, HirAdt>,
     pub fns: IndexVec<FnId, HirFn>,
+    /// All type parameters in the program, keyed by `TyParamId`.
+    /// Populated at prescan time so `lower_ty` can resolve `Named(T)`
+    /// → `Param(tpid)` during body lowering. See spec/16_GENERIC.md §HIR.
+    pub ty_params: IndexVec<TyParamId, TyParamInfo>,
 }
 
 #[derive(Default)]
@@ -200,6 +204,26 @@ impl Scanner {
                         ..HirFn::default()
                     });
 
+                    // Mint TyParamIds for the fn's generic params and
+                    // store them on the stub. Done at prescan because
+                    // `lower_ty` (called from body lowering) needs the
+                    // IDs allocated *before* any body walk runs, so
+                    // `Named(T)` can resolve to `Param(tpid)`. The
+                    // arena is global on `HirProgram.ty_params`.
+                    // See spec/16_GENERIC.md §HIR.
+                    let mut generic_params =
+                        Vec::with_capacity(fn_decl.generic_params.len());
+                    for (idx, gp_ident) in fn_decl.generic_params.iter().enumerate() {
+                        let tpid = self.items.ty_params.push(TyParamInfo {
+                            owner: fn_id,
+                            idx_in_owner: idx as u32,
+                            name: gp_ident.name.clone(),
+                            span: gp_ident.span.clone(),
+                        });
+                        generic_params.push(tpid);
+                    }
+                    self.items.fns[fn_id].generic_params = generic_params;
+
                     // Insert and check in one shot. `HashMap.insert`
                     // returns the displaced (older) entry — that's
                     // the *first* definition; the one we just pushed
@@ -219,6 +243,17 @@ impl Scanner {
                     if scan_ctx.in_extern_c {
                         if fn_decl.body.is_some() {
                             self.emit_error(HirError::ExternFnHasBody {
+                                name: name.clone(),
+                                span: span.clone(),
+                            });
+                        }
+                        // spec/16: extern "C" fns cannot be generic.
+                        // Recovery contract: signature kept intact;
+                        // driver short-circuits on HirError so
+                        // downstream phases never see the contradictory
+                        // `is_extern && !generic_params.is_empty()`.
+                        if !fn_decl.generic_params.is_empty() {
+                            self.emit_error(HirError::GenericExternFn {
                                 name: name.clone(),
                                 span: span.clone(),
                             });
@@ -389,7 +424,9 @@ impl Scanner {
             let mut fields: IndexVec<FieldIdx, HirField> = IndexVec::new();
             let mut seen: HashMap<String, Span> = HashMap::new();
             for fd in decls {
-                let lowered_ty = ty::lower_ty(&lf.ast, scope, fd.ty);
+                // ADT fields aren't inside a generic-fn body, so no
+                // type-param scope. spec/16 doesn't add generic ADTs in v0.
+                let lowered_ty = ty::lower_ty(&lf.ast, scope, ty::TyParamScope::empty(), fd.ty);
                 if let Some(first_span) = seen.get(&fd.name.name) {
                     self.emit_error(HirError::DuplicateField {
                         adt: adt_name.clone(),

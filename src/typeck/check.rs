@@ -476,6 +476,14 @@ impl<'hir> Checker<'hir> {
                 tys.intern(TyKind::Array(elem_id, len_opt))
             }
             HirTyKind::Error => tys.error,
+            // Phase B HIR may produce `Param(tpid)` for refs to a fn's
+            // generic params. Phase C will introduce `TyKind::Param`
+            // and resolve them properly. For Phase B (typeck blind to
+            // generics) we degrade to `Error` so generic-fn bodies don't
+            // panic typeck — the driver short-circuits before mono on
+            // any prior errors, and clean generic fns will be addressed
+            // in Phase C. See spec/16_GENERIC.md §Typeck rules.
+            HirTyKind::Param(_) => tys.error,
         }
     }
 
@@ -696,7 +704,12 @@ impl<'hir> Checker<'hir> {
             HirExprKind::Assign { op, target, rhs } => {
                 self.infer_assign(inf, op, target, rhs, &span)
             }
-            HirExprKind::Call { callee, args } => self.infer_call(inf, callee, args, &span),
+            // Phase B added `type_args` to HIR's Call; typeck doesn't
+            // consume it until Phase C wires generic instantiation.
+            // See spec/16_GENERIC.md §Typeck rules.
+            HirExprKind::Call { callee, args, type_args: _ } => {
+                self.infer_call(inf, callee, args, &span)
+            }
             HirExprKind::Index { base, index } => {
                 let base_ty = self.infer_expr(inf, base);
                 let idx_ty = self.infer_expr(inf, index);

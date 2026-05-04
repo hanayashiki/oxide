@@ -125,6 +125,7 @@ impl<'a> Lowerer<'a> {
                 errors: &mut self.errors,
                 scopes: Vec::new(),
                 loop_stack: Vec::new(),
+                ty_params: Vec::new(),
             };
             bcx.lower_fn(fid, iid);
         }
@@ -171,6 +172,7 @@ impl<'a> Lowerer<'a> {
             locals: self.locals,
             exprs: self.exprs,
             blocks: self.blocks,
+            ty_params: self.scan.items.ty_params,
             modules,
             root,
         }
@@ -208,6 +210,11 @@ struct BodyCtx<'a> {
     /// frame's `has_break = true`; an empty stack at `Break` /
     /// `Continue` time produces the matching HIR error.
     loop_stack: Vec<LoopFrame>,
+    /// Type-parameter scope of the fn currently being lowered. Empty
+    /// for non-generic fns. Built once at the start of `lower_fn` and
+    /// passed to every `ty::lower_ty(...)` call so `Named(T)` references
+    /// resolve to `Param(tpid)`. See spec/16_GENERIC.md §HIR.
+    ty_params: Vec<(String, TyParamId)>,
 }
 
 impl<'a> BodyCtx<'a> {
@@ -245,13 +252,27 @@ impl<'a> BodyCtx<'a> {
             (fn_decl.params.clone(), fn_decl.ret_ty, fn_decl.body)
         };
 
+        // Build the per-fn type-parameter scope from the prescanned
+        // `HirFn.generic_params` (populated by scanner.rs at prescan
+        // time). Empty for non-generic fns. Lives on `self.ty_params`
+        // for the duration of this fn's lowering; cleared at the end
+        // so the next fn starts fresh. See spec/16_GENERIC.md §HIR.
+        self.ty_params = self.scan.items.fns[fid]
+            .generic_params
+            .iter()
+            .map(|&tpid| {
+                let info = &self.scan.items.ty_params[tpid];
+                (info.name.clone(), tpid)
+            })
+            .collect();
+
         // Outer scope holds parameters; the body block (if any) pushes
         // its own sub-scope on top.
         self.scopes.push(HashMap::new());
 
         let mut params = Vec::with_capacity(params_ast.len());
         for p in &params_ast {
-            let ty = ty::lower_ty(self.ast(), self.scope(), p.ty);
+            let ty = ty::lower_ty(self.ast(), self.scope(), self.ty_param_scope(), p.ty);
             let lid = self.locals.push(HirLocal {
                 name: p.name.name.clone(),
                 mutable: p.mutable,
@@ -265,7 +286,8 @@ impl<'a> BodyCtx<'a> {
             params.push(lid);
         }
 
-        let ret_ty = ret_ty_id.map(|t| ty::lower_ty(self.ast(), self.scope(), t));
+        let ret_ty = ret_ty_id
+            .map(|t| ty::lower_ty(self.ast(), self.scope(), self.ty_param_scope(), t));
         let body = body_id.map(|bid| self.lower_block(bid));
 
         self.scopes.pop();
@@ -278,6 +300,16 @@ impl<'a> BodyCtx<'a> {
         fn_stub.params = params;
         fn_stub.ret_ty = ret_ty;
         fn_stub.body = body;
+
+        // Clear the per-fn ty-param scope — next `lower_fn` call
+        // rebuilds it from the next fn's `generic_params`.
+        self.ty_params.clear();
+    }
+
+    /// Borrow the current fn's type-parameter scope as a `TyParamScope`
+    /// for `ty::lower_ty`. Cheap (slice borrow); rebuilt per call site.
+    fn ty_param_scope(&self) -> ty::TyParamScope<'_> {
+        ty::TyParamScope(&self.ty_params)
     }
 
     fn lower_block(&mut self, bid: ast::BlockId) -> HBlockId {
@@ -338,15 +370,24 @@ impl<'a> BodyCtx<'a> {
             ast::ExprKind::Call {
                 callee,
                 args,
-                // Phase A: AST carries turbofish type-args, but HIR has no
-                // slot for them yet (Phase B will add `HirExprKind::Call.type_args`).
-                // Drop them here for now — typeck doesn't need them until
-                // generics resolution lands. See spec/16_GENERIC.md §HIR.
-                type_args: _,
+                type_args,
             } => {
                 let callee = self.lower_expr(callee);
                 let args: Vec<_> = args.into_iter().map(|a| self.lower_expr(a)).collect();
-                HirExprKind::Call { callee, args }
+                // Lower turbofish type-args alongside value-args.
+                // Empty for non-turbofish and `::<>` calls; non-empty
+                // for `name::<T, U>(...)`. See spec/16_GENERIC.md §HIR.
+                let type_args: Vec<HirTy> = type_args
+                    .into_iter()
+                    .map(|tid| {
+                        ty::lower_ty(self.ast(), self.scope(), self.ty_param_scope(), tid)
+                    })
+                    .collect();
+                HirExprKind::Call {
+                    callee,
+                    args,
+                    type_args,
+                }
             }
             ast::ExprKind::Index { base, index } => {
                 let base = self.lower_expr(base);
@@ -363,7 +404,7 @@ impl<'a> BodyCtx<'a> {
             ast::ExprKind::StructLit { name, fields } => self.lower_struct_lit(name, fields),
             ast::ExprKind::Cast { expr, ty } => {
                 let expr = self.lower_expr(expr);
-                let ty = ty::lower_ty(self.ast(), self.scope(), ty);
+                let ty = ty::lower_ty(self.ast(), self.scope(), self.ty_param_scope(), ty);
                 HirExprKind::Cast { expr, ty }
             }
             ast::ExprKind::AddrOf { mutability, expr } => {
@@ -406,7 +447,7 @@ impl<'a> BodyCtx<'a> {
                 // Lower init FIRST so `let x = x;` doesn't see the new binding —
                 // matches Rust's semantics.
                 let init = init.map(|i| self.lower_expr(i));
-                let ty = ty.map(|t| ty::lower_ty(self.ast(), self.scope(), t));
+                let ty = ty.map(|t| ty::lower_ty(self.ast(), self.scope(), self.ty_param_scope(), t));
                 let lid = self.locals.push(HirLocal {
                     name: name.name.clone(),
                     mutable,

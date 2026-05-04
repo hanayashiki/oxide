@@ -566,7 +566,12 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     Some(Operand::Unit)
                 }
             }
-            HirExprKind::Call { callee, args } => self.emit_call(fx, callee, &args),
+            // Phase B added `type_args` to HIR's Call; codegen
+            // doesn't consume it until Phase E (mono-driven instance
+            // emission). See spec/16_GENERIC.md §Codegen.
+            HirExprKind::Call { callee, args, type_args: _ } => {
+                self.emit_call(fx, callee, &args)
+            }
             HirExprKind::Cast { expr, ty: _ } => self.emit_cast(fx, eid, expr),
             HirExprKind::If {
                 cond,

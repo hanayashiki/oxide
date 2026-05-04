@@ -1,0 +1,5 @@
+HirProgram
+  Module generic_fn_decl_one_param_lowers.ox (root)
+    Fn[0] id<T[TyParam(0)]>(x[Local(0)]: Param(0)) -> Param(0)
+      Block
+        tail: Local(0, "x", place)

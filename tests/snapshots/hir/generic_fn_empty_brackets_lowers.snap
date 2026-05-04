@@ -1,0 +1,4 @@
+HirProgram
+  Module generic_fn_empty_brackets_lowers.ox (root)
+    Fn[0] weird()
+      Block

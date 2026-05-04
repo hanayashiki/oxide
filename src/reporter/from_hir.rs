@@ -111,5 +111,19 @@ pub fn from_hir_error(err: &HirError) -> Diagnostic {
         )
         .with_label(Label::primary(span.file, span.clone(), "not allowed here"))
         .with_help("v0 only accepts foreign `fn` declarations inside extern blocks"),
+        HirError::GenericExternFn { name, span } => Diagnostic::error(
+            "E0212",
+            format!("extern \"C\" fn `{name}` cannot be generic"),
+        )
+        .with_label(Label::primary(
+            span.file,
+            span.clone(),
+            "remove the type parameters",
+        ))
+        .with_help(
+            "extern fns resolve to a single linker symbol; generic instantiation \
+             would produce multiple mangled symbols with no corresponding \
+             foreign definitions. See spec/16_GENERIC.md.",
+        ),
     }
 }

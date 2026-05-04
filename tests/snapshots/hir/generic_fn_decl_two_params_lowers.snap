@@ -1,0 +1,4 @@
+HirProgram
+  Module generic_fn_decl_two_params_lowers.ox (root)
+    Fn[0] pair<T[TyParam(0)], U[TyParam(1)]>(a[Local(0)]: Param(0), b[Local(1)]: Param(1))
+      Block

@@ -1,0 +1,7 @@
+HirProgram
+  Module turbofish_call_empty_lowers.ox (root)
+    Fn[0] foo()
+      Block
+    Fn[1] main()
+      Block
+        ExprStmt Call(Fn(0, "foo"))

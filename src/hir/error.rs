@@ -57,6 +57,15 @@ pub enum HirError {
     /// declarations there. `kind` is the item's source-form label
     /// (`"struct"`, `"extern block"`, `"import"`).
     UnsupportedExternItem { kind: String, span: Span },
+    /// `extern "C" fn f<T>(...)` — externs cannot be generic because
+    /// their symbols are linker-fixed; instantiation has nowhere to
+    /// go. Emitted at scanner prescan time. **Recovery**: the offending
+    /// fn's signature is kept intact in HIR (do *not* clear
+    /// `generic_params`); the driver short-circuits the pipeline on
+    /// any HirError so downstream phases never observe the
+    /// contradictory `is_extern && !generic_params.is_empty()` state.
+    /// See spec/16_GENERIC.md §HIR.
+    GenericExternFn { name: String, span: Span },
 }
 
 impl HirError {
@@ -71,7 +80,8 @@ impl HirError {
             | Self::ContinueOutsideLoop { span }
             | Self::BodylessFnOutsideExtern { span, .. }
             | Self::ExternFnHasBody { span, .. }
-            | Self::UnsupportedExternItem { span, .. } => span,
+            | Self::UnsupportedExternItem { span, .. }
+            | Self::GenericExternFn { span, .. } => span,
             Self::DuplicateFn { dup, .. }
             | Self::DuplicateAdt { dup, .. }
             | Self::DuplicateField { dup, .. }

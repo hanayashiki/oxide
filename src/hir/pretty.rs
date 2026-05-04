@@ -103,7 +103,22 @@ impl<'a> Printer<'a> {
     fn print_fn(&mut self, fid: FnId) {
         let f = &self.m.fns[fid];
         let prefix = if f.is_extern { "ExternFn" } else { "Fn" };
-        let mut header = format!("{}[{}] {}(", prefix, fid.raw(), f.name);
+        let mut header = format!("{}[{}] {}", prefix, fid.raw(), f.name);
+        // Generic-param list. Empty → no decoration (matches non-generic
+        // and `fn name<>()` source forms; both store
+        // `generic_params: vec![]`). See spec/16_GENERIC.md §HIR.
+        if !f.generic_params.is_empty() {
+            header.push('<');
+            for (i, &tpid) in f.generic_params.iter().enumerate() {
+                if i > 0 {
+                    header.push_str(", ");
+                }
+                let info = &self.m.ty_params[tpid];
+                write!(header, "{}[TyParam({})]", info.name, tpid.raw()).unwrap();
+            }
+            header.push('>');
+        }
+        header.push('(');
         for (i, &lid) in f.params.iter().enumerate() {
             if i > 0 {
                 header.push_str(", ");
@@ -333,9 +348,20 @@ impl<'a> Printer<'a> {
                 self.render_expr(*target),
                 self.render_expr(*rhs),
             ],
-            HirExprKind::Call { callee, args } => {
-                let mut out = Vec::with_capacity(1 + args.len());
+            HirExprKind::Call {
+                callee,
+                args,
+                type_args,
+            } => {
+                let mut out = Vec::with_capacity(1 + type_args.len() + args.len());
                 out.push(self.render_expr(*callee));
+                // Turbofish type-args. Empty → omitted (matches
+                // non-turbofish and `::<>` source forms).
+                // See spec/16_GENERIC.md §HIR.
+                if !type_args.is_empty() {
+                    let parts: Vec<_> = type_args.iter().map(ty_str).collect();
+                    out.push(format!("::<{}>", parts.join(", ")));
+                }
                 for a in args {
                     out.push(self.render_expr(*a));
                 }
@@ -510,6 +536,7 @@ fn ty_str(ty: &HirTy) -> String {
     match &ty.kind {
         HirTyKind::Named(name) => name.clone(),
         HirTyKind::Adt(haid) => format!("Adt({})", haid.raw()),
+        HirTyKind::Param(tpid) => format!("Param({})", tpid.raw()),
         HirTyKind::Ptr { mutability, pointee } => {
             format!("*{} {}", mutability.as_str(), ty_str(pointee))
         }
