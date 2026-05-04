@@ -1,0 +1,11 @@
+== diagnostics ==
+== instances ==
+Inst[0] mangled=left depth=0 origin=EntryPoint
+Inst[1] mangled=right depth=0 origin=EntryPoint
+Inst[2] mangled=main depth=0 origin=EntryPoint
+Inst[3] mangled=id__$i32 depth=1 origin=Inst[0]
+== sig ==
+Inst[0] params=[] ret=i32
+Inst[1] params=[] ret=i32
+Inst[2] params=[] ret=i32
+Inst[3] params=[i32] ret=i32

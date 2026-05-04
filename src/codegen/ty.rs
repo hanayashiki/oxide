@@ -1,50 +1,103 @@
 //! `TyId` → LLVM type lowering. Signedness lives on the *operations*,
 //! not the LLVM type — `i32` and `u32` both lower to LLVM `i32`.
 //!
-//! ADTs need a per-`AdtId` cache because LLVM struct types are by
-//! identity (each `opaque_struct_type` call creates a fresh distinct
-//! type). Callers populate the cache once via `prepare_adt_types` and
-//! pass it to `lower_ty` / `lower_fn_type` thereafter.
+//! Generic ADTs are materialized **lazily** at codegen, keyed on
+//! `(AdtId, Vec<TyId>)`. Each distinct instantiation gets its own LLVM
+//! struct type — `LinkedList<i32>` and `LinkedList<u8>` produce two
+//! different layouts. Hash-cons at the TyId level dedupes the cache:
+//! structurally-identical instances reach the same key. See
+//! spec/16_GENERIC.md §Codegen (extension).
 
-use index_vec::IndexVec;
+use std::collections::HashMap;
+
 use inkwell::context::Context;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType};
 
 use crate::hir::VariantIdx;
-use crate::typeck::{AdtId, PrimTy, TyArena, TyId, TyKind, TypeckResults};
+use crate::typeck::{AdtId, PrimTy, TyArena, TyId, TyKind, TypeckResults, subst_from};
 
-/// Per-`AdtId` cache of the LLVM struct types. Indexed by `AdtId`; entry
-/// `aid` is the type used for any `TyKind::Adt(aid)` lowering.
-pub type AdtLlTypes<'ctx> = IndexVec<AdtId, StructType<'ctx>>;
+/// Per-`(AdtId, Vec<TyId>)` cache of LLVM struct types. The args list
+/// is empty for non-generic ADTs and saturates the ADT's
+/// `generic_params` for generic instantiations. See
+/// spec/16_GENERIC.md §Codegen (extension).
+pub type AdtLlTypes<'ctx> = HashMap<(AdtId, Vec<TyId>), StructType<'ctx>>;
 
-/// Two-phase ADT type construction (mirrors typeck's phase 0 / 0.5):
-///   - Phase A: `opaque_struct_type` for every adt, so each gets a stable
-///     identity before any field type is resolved.
-///   - Phase B: `set_body` for every adt, recursively lowering each
-///     declared field type (which may itself be an `Adt(_)` referring
-///     to one of the now-allocated opaque handles).
+/// Lazy materialization of an LLVM struct for a specific
+/// `(AdtId, args)` pair. Two-phase per-call (mirrors typeck's
+/// phase 0 / 0.5):
+///   - Insert opaque struct into the cache **before** recursing, so
+///     self-referential types via pointer (`LinkedList<T>.next: *mut
+///     LinkedList<T>`) hit the cache on recursion. `Ptr` lowers to
+///     opaque LLVM `ptr` without re-entering `lower_adt_type`, so the
+///     recursion converges anyway, but the cache-first insert is
+///     belt-and-suspenders.
+///   - Substitute the ADT's declared field types via
+///     `(generic_params, args)` and lower each substituted type. The
+///     substituted types are concrete (or fn-Param when this is being
+///     called from inside a generic-fn body's lowering, in which case
+///     mono's body subst handles it).
 ///
-/// Self-referential types via pointer (`struct Node { next: *const Node }`)
-/// resolve cleanly because `Ptr` lowers to opaque `ptr` without recursing
-/// into the pointee. Direct self-containment (`struct A { x: A }`) is
-/// rejected by typeck (TBD-T2) before we get here.
-pub fn prepare_adt_types<'ctx>(
+/// The display name carries the args via the same Display style as
+/// `TyArena::render` (`Adt(<raw>, [<args>])`) so LLVM IR dumps line up
+/// with diagnostic output.
+pub fn lower_adt_type<'ctx>(
     ctx: &'ctx Context,
-    typeck_results: &TypeckResults,
-) -> AdtLlTypes<'ctx> {
-    let mut adt_ll: AdtLlTypes<'ctx> = IndexVec::with_capacity(typeck_results.adts.len());
-    for adt in typeck_results.adts.iter() {
-        adt_ll.push(ctx.opaque_struct_type(&adt.name));
+    typeck: &mut TypeckResults,
+    adt_ll: &mut AdtLlTypes<'ctx>,
+    aid: AdtId,
+    args: &[TyId],
+) -> StructType<'ctx> {
+    let key = (aid, args.to_vec());
+    if let Some(&st) = adt_ll.get(&key) {
+        return st;
     }
-    for (aid, adt) in typeck_results.adts.iter_enumerated() {
-        let fields: Vec<BasicTypeEnum<'ctx>> = adt.variants[VariantIdx::from_raw(0)]
-            .fields
-            .iter()
-            .map(|f| lower_ty(ctx, typeck_results.tys(), &adt_ll, f.ty))
-            .collect();
-        adt_ll[aid].set_body(&fields, false);
+    let display_name = render_adt_instance_name(typeck, aid, args);
+    let opaque = ctx.opaque_struct_type(&display_name);
+    adt_ll.insert(key, opaque);
+
+    // Build subst + snapshot field decl types in a tight `&typeck.adts`
+    // borrow scope. The borrow ends at block-exit so the loop below is
+    // free to call `&mut typeck` for substitution and recursion.
+    // For non-generic ADTs the subst is empty and `substitute_ty` is
+    // identity (hash-cons returns the same TyId).
+    let (subst, field_decl_tys) = {
+        let adt = &typeck.adts[aid];
+        (
+            subst_from(&adt.generic_params, args),
+            adt.variants[VariantIdx::from_raw(0)]
+                .fields
+                .iter()
+                .map(|f| f.ty)
+                .collect::<Vec<TyId>>(),
+        )
+    };
+
+    let fields_ll: Vec<BasicTypeEnum<'ctx>> = field_decl_tys
+        .into_iter()
+        .map(|f_ty| {
+            let concrete = typeck.tys.substitute_ty(f_ty, &subst);
+            lower_ty(ctx, typeck, adt_ll, concrete)
+        })
+        .collect();
+    opaque.set_body(&fields_ll, false);
+    opaque
+}
+
+fn render_adt_instance_name(typeck: &TypeckResults, aid: AdtId, args: &[TyId]) -> String {
+    let name = &typeck.adts[aid].name;
+    if args.is_empty() {
+        // Preserve source name for non-generic ADTs — keeps existing
+        // LLVM IR snapshots and `nm` output user-recognizable.
+        name.clone()
+    } else {
+        // Generic instances: source name plus the rendered args. The
+        // mangler at `mono::mangle` is what LLVM consumes; this string
+        // is purely the LLVM struct *type name* (debug-friendly), so
+        // collisions across instantiations are fine — LLVM struct
+        // type names are not symbol names.
+        let rendered: Vec<String> = args.iter().map(|&a| typeck.tys.render(a)).collect();
+        format!("{}<{}>", name, rendered.join(", "))
     }
-    adt_ll
 }
 
 /// Lower a `TyId` to a `BasicTypeEnum`. `Unit` lowers to LLVM `{}`
@@ -52,16 +105,25 @@ pub fn prepare_adt_types<'ctx>(
 /// `Never` (no value form ever — `!`-typed expressions terminate the
 /// BB before any consumer reaches lower_ty), `Fn` (use `lower_fn_type`),
 /// or post-typeck poison (`Infer`/`Error`).
+///
+/// Takes `&mut TypeckResults` and `&mut AdtLlTypes` because lazy
+/// materialization of `Adt(aid, args)` interns substituted types into
+/// the arena and inserts into the LLVM struct cache. For all non-Adt
+/// arms this is a no-op on the arena (no substitution); for Adt arms
+/// the work is hash-cons-cheap (most types are already interned).
 pub fn lower_ty<'ctx>(
     ctx: &'ctx Context,
-    tcx: &TyArena,
-    adt_ll: &AdtLlTypes<'ctx>,
+    typeck: &mut TypeckResults,
+    adt_ll: &mut AdtLlTypes<'ctx>,
     ty: TyId,
 ) -> BasicTypeEnum<'ctx> {
-    match tcx.kind(ty) {
-        TyKind::Prim(p) => lower_prim(ctx, *p).into(),
+    let kind = typeck.tys.kind(ty).clone();
+    match kind {
+        TyKind::Prim(p) => lower_prim(ctx, p).into(),
         TyKind::Ptr(..) => ctx.ptr_type(inkwell::AddressSpace::default()).into(),
-        TyKind::Adt(aid) => adt_ll[*aid].as_basic_type_enum(),
+        TyKind::Adt(aid, args) => {
+            lower_adt_type(ctx, typeck, adt_ll, aid, &args).as_basic_type_enum()
+        }
         TyKind::Unit => ctx.struct_type(&[], false).into(),
         TyKind::Never => panic!(
             "lower_ty called on Never — !-typed expressions terminate \
@@ -69,14 +131,14 @@ pub fn lower_ty<'ctx>(
         ),
         TyKind::Fn(_, _, _) => panic!("lower_ty called on Fn — use lower_fn_type"),
         TyKind::Array(elem, Some(n)) => {
-            let elem_ll = lower_ty(ctx, tcx, adt_ll, *elem);
-            elem_ll.array_type(*n as u32).into()
+            let elem_ll = lower_ty(ctx, typeck, adt_ll, elem);
+            elem_ll.array_type(n as u32).into()
         }
         TyKind::Array(_, None) => {
             unreachable!("Array(_, None) is not a value type; typeck E0269 should have rejected")
         }
         TyKind::Infer(_) | TyKind::Error => {
-            panic!("post-typeck type is unresolved: {}", tcx.render(ty))
+            panic!("post-typeck type is unresolved: {}", typeck.tys.render(ty))
         }
         // Phase D (mono) substitutes Param leaves into concrete types
         // before codegen runs. If a Param survives into codegen, it's a
@@ -84,7 +146,7 @@ pub fn lower_ty<'ctx>(
         TyKind::Param(_) => {
             panic!(
                 "lower_ty called on Param — mono should have substituted: {}",
-                tcx.render(ty)
+                typeck.tys.render(ty)
             )
         }
     }
@@ -123,26 +185,26 @@ pub fn lower_prim<'ctx>(ctx: &'ctx Context, p: PrimTy) -> inkwell::types::IntTyp
 /// register-return per target — Path A in the codegen plan.
 pub fn lower_fn_type<'ctx>(
     ctx: &'ctx Context,
-    tcx: &TyArena,
-    adt_ll: &AdtLlTypes<'ctx>,
+    typeck: &mut TypeckResults,
+    adt_ll: &mut AdtLlTypes<'ctx>,
     params: &[TyId],
     ret: TyId,
     c_variadic: bool,
 ) -> FunctionType<'ctx> {
-    let params: Vec<BasicMetadataTypeEnum<'ctx>> = params
+    let lowered_params: Vec<BasicMetadataTypeEnum<'ctx>> = params
         .iter()
         .map(|&p| {
-            if let TyKind::Array(_, Some(_)) = tcx.kind(p) {
+            if let TyKind::Array(_, Some(_)) = typeck.tys.kind(p) {
                 ctx.ptr_type(inkwell::AddressSpace::default()).into()
             } else {
-                lower_ty(ctx, tcx, adt_ll, p).into()
+                lower_ty(ctx, typeck, adt_ll, p).into()
             }
         })
         .collect();
-    if is_void_ret(tcx, ret) {
-        ctx.void_type().fn_type(&params, c_variadic)
+    if is_void_ret(&typeck.tys, ret) {
+        ctx.void_type().fn_type(&lowered_params, c_variadic)
     } else {
-        lower_ty(ctx, tcx, adt_ll, ret).fn_type(&params, c_variadic)
+        lower_ty(ctx, typeck, adt_ll, ret).fn_type(&lowered_params, c_variadic)
     }
 }
 

@@ -7,5 +7,5 @@ Module
    │                            ─┬─  
    │                             ╰─── unexpected here
    │ 
-   │ Note: expected: token, token
+   │ Note: expected: token, token, token
 ───╯

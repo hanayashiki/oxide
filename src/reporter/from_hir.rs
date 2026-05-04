@@ -123,7 +123,20 @@ pub fn from_hir_error(err: &HirError) -> Diagnostic {
         .with_help(
             "extern fns resolve to a single linker symbol; generic instantiation \
              would produce multiple mangled symbols with no corresponding \
-             foreign definitions. See spec/16_GENERIC.md.",
+             foreign definitions",
+        ),
+        HirError::TypeParamWithArgs { name, span } => Diagnostic::error(
+            "E0213",
+            format!("type parameter `{name}` cannot take type arguments"),
+        )
+        .with_label(Label::primary(
+            span.file,
+            span.clone(),
+            "type parameters have arity 0",
+        ))
+        .with_help(
+            "no higher-kinded types; a generic param `T` is always applied \
+             to zero type arguments. Drop the `<...>` after the param",
         ),
     }
 }

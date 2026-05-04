@@ -1,0 +1,14 @@
+HirProgram
+  Module error_type_param_with_args.ox (root)
+    Struct[0] Bad
+      v: <err>
+== diagnostics ==
+[E0213] Error: type parameter `T` cannot take type arguments
+   ╭─[ error_type_param_with_args.ox:2:8 ]
+   │
+ 2 │     v: T<i32>,
+   │        ───┬──  
+   │           ╰──── type parameters have arity 0
+   │ 
+   │ Help: no higher-kinded types; a generic param `T` is always applied to zero type arguments. Drop the `<...>` after the param
+───╯

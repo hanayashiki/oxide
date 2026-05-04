@@ -1,0 +1,22 @@
+; ModuleID = 'test'
+source_filename = "test"
+
+define i32 @main() {
+allocas:
+  br label %body
+
+body:                                             ; preds = %allocas
+  %call = call ptr @"id__$mutptr_$array_$constptr_$i32_$n4"(ptr null)
+  ret i32 0
+}
+
+define ptr @"id__$mutptr_$array_$constptr_$i32_$n4"(ptr %x) {
+allocas:
+  %x.0.slot = alloca ptr, align 8
+  br label %body
+
+body:                                             ; preds = %allocas
+  store ptr %x, ptr %x.0.slot, align 8
+  %load = load ptr, ptr %x.0.slot, align 8
+  ret ptr %load
+}

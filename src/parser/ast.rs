@@ -75,6 +75,11 @@ pub struct ImportItem {
 #[derive(Clone, Debug)]
 pub struct StructDecl {
     pub name: Ident,
+    /// Type parameters in declaration order. Empty for non-generic structs
+    /// *and* for `struct G<>` (matches Rust). Stored as `Ident` (with span)
+    /// so HIR lowering can produce span-bearing diagnostics on duplicate-
+    /// param-name. See spec/16_GENERIC.md §HIR (extension).
+    pub generic_params: Vec<Ident>,
     pub fields: Vec<FieldDecl>,
     pub span: Span,
 }
@@ -200,8 +205,15 @@ pub enum ExprKind {
     /// `Name { f: expr, ... }` — record struct literal. The type-name is
     /// resolved at HIR lowering against the type namespace; field names
     /// stay as strings until typeck.
+    ///
+    /// `type_args` carries the optional turbofish args (`Name::<T> { ... }`).
+    /// Empty for the bare `Name { ... }` case and for the empty-turbofish
+    /// `Name::<> { ... }` (both collapse). Resolution (turbofish vs.
+    /// inferred) happens at typeck. See spec/16_GENERIC.md §Surface syntax
+    /// (extension).
     StructLit {
         name: Ident,
+        type_args: Vec<TypeId>,
         fields: Vec<StructLitField>,
     },
     /// `[a, b, c]` (Elems) or `[init; N]` (Repeat). See `ArrayLit`.
@@ -358,7 +370,15 @@ pub struct Type {
 
 #[derive(Clone, Debug)]
 pub enum TypeKind {
-    Named(Ident),
+    /// `Foo`, `Foo<T>`, `Foo<T, U>`, `Foo<>` — named type with optional
+    /// type-arg list. The args list is empty for the bare-name case and
+    /// for the explicit-empty `Foo<>` (matches Rust). Resolution against
+    /// generic-param scope and ADT scope happens at HIR lowering. See
+    /// spec/16_GENERIC.md §Surface syntax (extension).
+    Named {
+        name: Ident,
+        type_args: Vec<TypeId>,
+    },
     /// `*const T` or `*mut T`. Pointee is recursive — `*const *mut u8`
     /// nests another `Ptr` inside.
     Ptr {

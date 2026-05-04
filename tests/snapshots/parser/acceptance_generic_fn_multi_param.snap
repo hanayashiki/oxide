@@ -1,0 +1,7 @@
+Module
+  Fn f<T, U, V>(x: T, y: U, z: V) -> T
+    Block
+      tail: Ident("x")
+  Fn main() -> i32
+    Block
+      tail: Int(0)

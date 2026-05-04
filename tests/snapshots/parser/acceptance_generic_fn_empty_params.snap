@@ -1,0 +1,7 @@
+Module
+  Fn id(x: i32) -> i32
+    Block
+      tail: Ident("x")
+  Fn main() -> i32
+    Block
+      tail: Ident("id")(Int(42))

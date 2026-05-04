@@ -1,0 +1,4 @@
+HirProgram
+  Module acceptance_generic_struct_decl.ox (root)
+    Struct[0] Wrap
+      v: Param(0)

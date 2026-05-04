@@ -1,0 +1,42 @@
+; ModuleID = 'test'
+source_filename = "test"
+
+define i32 @main() {
+allocas:
+  %a.1.slot = alloca i32, align 4
+  %b.2.slot = alloca i8, align 1
+  br label %body
+
+body:                                             ; preds = %allocas
+  %call = call i32 @"id__$i32"(i32 42)
+  store i32 %call, ptr %a.1.slot, align 4
+  %call1 = call i8 @"id__$u8"(i8 7)
+  store i8 %call1, ptr %b.2.slot, align 1
+  %load = load i32, ptr %a.1.slot, align 4
+  %load2 = load i8, ptr %b.2.slot, align 1
+  %zext = zext i8 %load2 to i32
+  %add = add i32 %load, %zext
+  ret i32 %add
+}
+
+define i32 @"id__$i32"(i32 %x) {
+allocas:
+  %x.0.slot = alloca i32, align 4
+  br label %body
+
+body:                                             ; preds = %allocas
+  store i32 %x, ptr %x.0.slot, align 4
+  %load = load i32, ptr %x.0.slot, align 4
+  ret i32 %load
+}
+
+define i8 @"id__$u8"(i8 %x) {
+allocas:
+  %x.0.slot = alloca i8, align 1
+  br label %body
+
+body:                                             ; preds = %allocas
+  store i8 %x, ptr %x.0.slot, align 1
+  %load = load i8, ptr %x.0.slot, align 1
+  ret i8 %load
+}

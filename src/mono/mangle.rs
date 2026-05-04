@@ -72,11 +72,18 @@ fn mangle_ty(out: &mut String, tys: &TyArena, ty: TyId) {
             mangle_ty(out, tys, *elem);
             let _ = write!(out, "_$n{n}");
         }
-        TyKind::Adt(aid) => {
-            // Identity form — unique per compilation. Once mangle gains a
-            // `&TypeckResults` reach, this can route through the ADT name
-            // (`typeck.adts[aid].name`) for human-grep-friendly symbols.
+        TyKind::Adt(aid, args) => {
+            // Identity form — unique per compilation. AdtId raw is
+            // digits-only, so the `$adt<digits>` boundary is unambiguous
+            // even when followed by more `$`-prefixed type-arg encodings.
+            // For non-generic ADTs `args` is empty and the suffix is
+            // omitted; for generic ADTs each arg encoding starts with
+            // `$`, self-delimiting. See spec/16_GENERIC.md §Mangling
+            // (extension).
             let _ = write!(out, "$adt{}", aid.raw());
+            for &arg in args {
+                mangle_ty(out, tys, arg);
+            }
         }
         TyKind::Param(_) | TyKind::Infer(_) | TyKind::Fn(_, _, _) | TyKind::Array(_, None) => {
             unreachable!(

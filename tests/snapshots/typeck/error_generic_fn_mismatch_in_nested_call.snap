@@ -1,0 +1,22 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `Param(0)`, found `i32`
+   ╭─[ error_generic_fn_mismatch_in_nested_call.ox:1:32 ]
+   │
+ 1 │ ╭─▶ fn outer<T>(x: T, y: i32) -> T {
+   ┆ ┆   
+ 3 │ ├─▶ }
+   │ │       
+   │ ╰─────── type mismatch here
+───╯
+== types ==
+Fn[0] outer<Param(0)>(x[Local(0)]: Param(0), y[Local(1)]: i32) -> Param(0)
+  HExprId(0) : fn(Param(1)) -> Param(1)
+  HExprId(1) : i32
+  HExprId(2) : i32  call_type_args=[i32]
+Fn[1] inner<Param(1)>(u[Local(2)]: Param(1)) -> Param(1)
+  HExprId(3) : Param(1)
+Fn[2] main() -> ()
+  HExprId(4) : fn(Param(0), i32) -> Param(0)
+  HExprId(5) : i32
+  HExprId(6) : i32
+  HExprId(7) : i32  call_type_args=[i32]

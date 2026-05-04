@@ -373,11 +373,19 @@ impl<'a> Printer<'a> {
             HirExprKind::Field { base, name } => {
                 vec![self.render_expr(*base), format!("{name:?}")]
             }
-            HirExprKind::StructLit { adt, fields } => {
+            HirExprKind::StructLit {
+                adt,
+                type_args,
+                fields,
+            } => {
                 let adt_name = &self.m.adts[*adt].name;
-                let mut out = Vec::with_capacity(2 + fields.len());
+                let mut out = Vec::with_capacity(3 + fields.len());
                 out.push(adt.raw().to_string());
                 out.push(format!("{adt_name:?}"));
+                if !type_args.is_empty() {
+                    let rendered: Vec<String> = type_args.iter().map(ty_str).collect();
+                    out.push(format!("type_args: [{}]", rendered.join(", ")));
+                }
                 for f in fields {
                     out.push(format!("{}: {}", f.name, self.render_expr(f.value)));
                 }
@@ -535,7 +543,14 @@ fn expr_name(kind: &HirExprKind) -> &'static str {
 fn ty_str(ty: &HirTy) -> String {
     match &ty.kind {
         HirTyKind::Named(name) => name.clone(),
-        HirTyKind::Adt(haid) => format!("Adt({})", haid.raw()),
+        HirTyKind::Adt(haid, args) => {
+            if args.is_empty() {
+                format!("Adt({})", haid.raw())
+            } else {
+                let rendered: Vec<String> = args.iter().map(ty_str).collect();
+                format!("Adt({}, [{}])", haid.raw(), rendered.join(", "))
+            }
+        }
         HirTyKind::Param(tpid) => format!("Param({})", tpid.raw()),
         HirTyKind::Ptr { mutability, pointee } => {
             format!("*{} {}", mutability.as_str(), ty_str(pointee))

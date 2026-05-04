@@ -1,0 +1,6 @@
+Module
+  Struct Wrap<T>
+    v: T
+  Fn make() -> Wrap<i32>
+    Block
+      tail: StructLit Wrap::<i32> { v: Int(0) }

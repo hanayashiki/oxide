@@ -1,0 +1,11 @@
+== diagnostics ==
+== types ==
+Fn[0] choose<Param(0), Param(1)>(flag[Local(0)]: i32, x[Local(1)]: Param(0), y[Local(2)]: Param(1)) -> Param(1)
+  HExprId(0) : Param(1)
+Fn[1] main() -> ()
+  HExprId(1) : fn(i32, Param(0), Param(1)) -> Param(1)
+  HExprId(2) : i32
+  HExprId(3) : i32
+  HExprId(4) : i32
+  HExprId(5) : u8
+  HExprId(6) : u8  call_type_args=[i32, u8]

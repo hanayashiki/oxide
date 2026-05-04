@@ -1,0 +1,12 @@
+== diagnostics ==
+== types ==
+Fn[0] process<Param(0)>(p[Local(0)]: *mut *const Param(0)) -> Param(0)
+  HExprId(0) : *mut *const Param(0)
+  HExprId(1) : *const Param(0)
+  HExprId(2) : Param(0)
+Fn[1] main() -> ()
+  HExprId(3) : *mut *const i32
+  HExprId(4) : ()
+  HExprId(5) : fn(*mut *const Param(0)) -> Param(0)
+  HExprId(6) : *mut *const i32
+  HExprId(7) : i32  call_type_args=[i32]

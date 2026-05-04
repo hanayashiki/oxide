@@ -1,0 +1,7 @@
+== diagnostics ==
+== instances ==
+Inst[0] mangled=main depth=0 origin=EntryPoint
+Inst[1] mangled=size_of__$array_$i32_$n10 depth=1 origin=Inst[0]
+== sig ==
+Inst[0] params=[] ret=usize
+Inst[1] params=[] ret=usize

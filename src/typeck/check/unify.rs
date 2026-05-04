@@ -264,6 +264,27 @@ fn relate_with_ctx(
             }
             relate_with_ctx(cx, inf, fi, ei, span, ctx.under_ptr());
         }
+        // Adt-Adt: nominal identity (same `AdtId`) plus structural
+        // recursion over args. The arity is fixed by AdtId, so length
+        // mismatches are an internal invariant violation, not a user-
+        // facing E0250. See spec/16_GENERIC.md §Typeck rules
+        // (extension).
+        (TyKind::Adt(af, args_f), TyKind::Adt(ae, args_e)) => {
+            if af != ae {
+                inf.errors
+                    .push(build_mismatch(ctx.mismatch, expected, found, span));
+                return;
+            }
+            debug_assert_eq!(
+                args_f.len(),
+                args_e.len(),
+                "Adt arity invariant violated for AdtId {}",
+                af.raw()
+            );
+            for (a_f, a_e) in args_f.iter().zip(&args_e) {
+                relate_with_ctx(cx, inf, *a_f, *a_e, span.clone(), ctx);
+            }
+        }
         // Array-Array: recurse on elem; length is gated.
         // - Same length: OK.
         // - Different concrete lengths: E0265.

@@ -1,0 +1,15 @@
+== diagnostics ==
+[E0256] Error: could not infer a type
+   ╭─[ error_generic_struct_unconstrained.ox:6:13 ]
+   │
+ 6 │     let w = Wrap { v: null };
+   │             ────────┬───────  
+   │                     ╰───────── ambiguous type
+   │ 
+   │ Help: add a type annotation to disambiguate
+───╯
+== types ==
+Fn[0] main() -> ()
+  HExprId(0) : *mut {error}
+  HExprId(1) : Adt(0, [{error}])
+  HExprId(2) : ()

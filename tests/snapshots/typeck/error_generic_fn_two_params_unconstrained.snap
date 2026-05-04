@@ -1,0 +1,26 @@
+== diagnostics ==
+[E0256] Error: could not infer a type
+   ╭─[ error_generic_fn_two_params_unconstrained.ox:6:5 ]
+   │
+ 6 │     choose(1);
+   │     ────┬────  
+   │         ╰────── ambiguous type
+   │ 
+   │ Help: add a type annotation to disambiguate
+───╯
+[E0256] Error: could not infer a type
+   ╭─[ error_generic_fn_two_params_unconstrained.ox:6:5 ]
+   │
+ 6 │     choose(1);
+   │     ────┬────  
+   │         ╰────── ambiguous type
+   │ 
+   │ Help: add a type annotation to disambiguate
+───╯
+== types ==
+Fn[0] choose<Param(0), Param(1)>(flag[Local(0)]: i32) -> i32
+  HExprId(0) : i32
+Fn[1] main() -> ()
+  HExprId(1) : fn(i32) -> i32
+  HExprId(2) : i32
+  HExprId(3) : i32  call_type_args=[{error}, {error}]

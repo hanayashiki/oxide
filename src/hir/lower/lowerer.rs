@@ -272,7 +272,7 @@ impl<'a> BodyCtx<'a> {
 
         let mut params = Vec::with_capacity(params_ast.len());
         for p in &params_ast {
-            let ty = ty::lower_ty(self.ast(), self.scope(), self.ty_param_scope(), p.ty);
+            let ty = self.lower_ty(p.ty);
             let lid = self.locals.push(HirLocal {
                 name: p.name.name.clone(),
                 mutable: p.mutable,
@@ -286,8 +286,7 @@ impl<'a> BodyCtx<'a> {
             params.push(lid);
         }
 
-        let ret_ty = ret_ty_id
-            .map(|t| ty::lower_ty(self.ast(), self.scope(), self.ty_param_scope(), t));
+        let ret_ty = ret_ty_id.map(|t| self.lower_ty(t));
         let body = body_id.map(|bid| self.lower_block(bid));
 
         self.scopes.pop();
@@ -308,8 +307,20 @@ impl<'a> BodyCtx<'a> {
 
     /// Borrow the current fn's type-parameter scope as a `TyParamScope`
     /// for `ty::lower_ty`. Cheap (slice borrow); rebuilt per call site.
-    fn ty_param_scope(&self) -> ty::TyParamScope<'_> {
-        ty::TyParamScope(&self.ty_params)
+    /// Type-position lowering helper. Inlines the field-disjoint
+    /// borrows of `ast`/`scope`/`ty_params`/`errors` so callers can
+    /// stay compact without confusing the borrow checker (calling
+    /// `self.ast()` / `self.scope()` etc. inline alongside
+    /// `&mut self.errors` would conflict on `&self`).
+    fn lower_ty(&mut self, tid: ast::TypeId) -> HirTy {
+        let ast = &self.files[self.file].ast;
+        let scope = self
+            .scan
+            .file_scopes
+            .get(&self.file)
+            .expect("scope built by scanner");
+        let ty_params = ty::TyParamScope(&self.ty_params);
+        ty::lower_ty(ast, scope, ty_params, self.errors, tid)
     }
 
     fn lower_block(&mut self, bid: ast::BlockId) -> HBlockId {
@@ -379,9 +390,7 @@ impl<'a> BodyCtx<'a> {
                 // for `name::<T, U>(...)`. See spec/16_GENERIC.md §HIR.
                 let type_args: Vec<HirTy> = type_args
                     .into_iter()
-                    .map(|tid| {
-                        ty::lower_ty(self.ast(), self.scope(), self.ty_param_scope(), tid)
-                    })
+                    .map(|tid| self.lower_ty(tid))
                     .collect();
                 HirExprKind::Call {
                     callee,
@@ -401,10 +410,14 @@ impl<'a> BodyCtx<'a> {
                     name: name.name,
                 }
             }
-            ast::ExprKind::StructLit { name, fields } => self.lower_struct_lit(name, fields),
+            ast::ExprKind::StructLit {
+                name,
+                type_args,
+                fields,
+            } => self.lower_struct_lit(name, type_args, fields),
             ast::ExprKind::Cast { expr, ty } => {
                 let expr = self.lower_expr(expr);
-                let ty = ty::lower_ty(self.ast(), self.scope(), self.ty_param_scope(), ty);
+                let ty = self.lower_ty(ty);
                 HirExprKind::Cast { expr, ty }
             }
             ast::ExprKind::AddrOf { mutability, expr } => {
@@ -447,7 +460,7 @@ impl<'a> BodyCtx<'a> {
                 // Lower init FIRST so `let x = x;` doesn't see the new binding —
                 // matches Rust's semantics.
                 let init = init.map(|i| self.lower_expr(i));
-                let ty = ty.map(|t| ty::lower_ty(self.ast(), self.scope(), self.ty_param_scope(), t));
+                let ty = ty.map(|t| self.lower_ty(t));
                 let lid = self.locals.push(HirLocal {
                     name: name.name.clone(),
                     mutable,
@@ -564,10 +577,19 @@ impl<'a> BodyCtx<'a> {
     fn lower_struct_lit(
         &mut self,
         name: ast::Ident,
+        type_args: Vec<ast::TypeId>,
         fields: Vec<ast::StructLitField>,
     ) -> HirExprKind {
         match self.scope().lookup_type(&name.name) {
             Some(adt) => {
+                // Lower turbofish type-args alongside field values.
+                // Empty for the inferred form `Foo { ... }` and the
+                // empty-turbofish `Foo::<> { ... }` (both collapse).
+                // See spec/16_GENERIC.md §HIR (extension).
+                let type_args: Vec<HirTy> = type_args
+                    .into_iter()
+                    .map(|tid| self.lower_ty(tid))
+                    .collect();
                 let fields = fields
                     .into_iter()
                     .map(
@@ -582,7 +604,11 @@ impl<'a> BodyCtx<'a> {
                         },
                     )
                     .collect();
-                HirExprKind::StructLit { adt, fields }
+                HirExprKind::StructLit {
+                    adt,
+                    type_args,
+                    fields,
+                }
             }
             None => {
                 // Lower the field expressions for side effects (so any

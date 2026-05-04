@@ -80,6 +80,11 @@ pub struct HirModule {
 pub struct HirAdt {
     pub name: String,
     pub kind: AdtKind,
+    /// Type parameters in declaration order. Empty for non-generic
+    /// structs *and* for `struct G<>` (matches Rust). Each `HTyParamId`
+    /// is a global index into `HirProgram.ty_params` with `owner:
+    /// TyParamOwner::Adt(_)`. See spec/16_GENERIC.md §HIR (extension).
+    pub generic_params: Vec<HTyParamId>,
     pub variants: IndexVec<VariantIdx, HirVariant>,
     /// Source span — origin file is `span.file`.
     pub span: Span,
@@ -107,14 +112,25 @@ pub struct HirField {
     pub span: Span,
 }
 
-/// Metadata for one type parameter declared by some fn. Self-contained:
-/// `TyKind::Param(tpid)` downstream needs only the `HTyParamId` to
-/// identify ownership, since `owner` is recoverable here. See
-/// spec/16_GENERIC.md §HIR.
+/// Which item declared a type parameter — fn or ADT. The substitution
+/// machinery (`substitute_ty`, `resolve_fully`, mangler) doesn't dispatch
+/// on owner kind; it just looks up `pid` in a `HashMap<ParamId, TyId>`.
+/// The owner tag is consulted only at diagnostic-rendering sites.
+/// See spec/16_GENERIC.md §HIR (extension).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TyParamOwner {
+    Fn(FnId),
+    Adt(HAdtId),
+}
+
+/// Metadata for one type parameter declared by some fn or ADT.
+/// Self-contained: `TyKind::Param(tpid)` downstream needs only the
+/// `HTyParamId` to identify ownership, since `owner` is recoverable
+/// here. See spec/16_GENERIC.md §HIR.
 #[derive(Clone, Debug)]
 pub struct TyParamInfo {
-    /// Fn that declared this type param.
-    pub owner: FnId,
+    /// Item that declared this type param.
+    pub owner: TyParamOwner,
     /// Position within `owner`'s `generic_params` list (0-indexed).
     pub idx_in_owner: u32,
     pub name: String,
@@ -249,12 +265,18 @@ pub enum HirExprKind {
         base: HExprId,
         name: String,
     },
-    /// `Name { f: expr, ... }` — record struct literal. The type-name has
-    /// been resolved (`adt`) but field names stay as strings; typeck
-    /// validates the field set and types each value expression against
-    /// the declared field type.
+    /// `Name { f: expr, ... }` or `Name::<T> { f: expr, ... }` — record
+    /// struct literal. The type-name has been resolved (`adt`) but field
+    /// names stay as strings; typeck validates the field set and types
+    /// each value expression against the declared field type.
+    ///
+    /// `type_args` is the optional turbofish args. Empty for the inferred
+    /// form `Name { ... }` and for the empty-turbofish `Name::<> { ... }`
+    /// (both collapse). Resolution (turbofish vs. inferred) is typeck's
+    /// job — see spec/16_GENERIC.md §Typeck rules (extension).
     StructLit {
         adt: HAdtId,
+        type_args: Vec<HirTy>,
         fields: Vec<HirStructLitField>,
     },
     /// `&expr` / `&mut expr`. Operand validated to be a place at lower
@@ -380,7 +402,13 @@ pub enum HirTyKind {
     /// error.
     Named(String),
     /// Resolved use of a user-defined ADT (struct/enum/union).
-    Adt(HAdtId),
+    /// Args carry the type-arguments supplied at this use site:
+    /// `Adt(haid, [])` for non-generic ADTs and bare names of generic
+    /// ADTs whose args are inferred elsewhere (typeck handles that),
+    /// `Adt(haid, [t1, t2])` for `Foo<t1, t2>`. **Arity invariant**:
+    /// `args.len() == hir.adts[haid].generic_params.len()` always —
+    /// see spec/16_GENERIC.md §Typeck rules (extension).
+    Adt(HAdtId, Vec<HirTy>),
     /// A reference to a generic type parameter declared by the
     /// enclosing fn. Resolved at HIR-lower time when the source name
     /// matches one of the fn's `generic_params`. Typeck (Phase C) maps

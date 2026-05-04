@@ -444,3 +444,702 @@ fn main() -> i32 {
 
 1. **`transmute` declaration site**: spec/17 will define the intrinsic as a body-less generic. Does it have a source declaration (`fn transmute<Src, Dst>(x: Src) -> Dst;` in stdlib, requiring HIR to permit body-less non-extern), or is it compiler-known with no source presence? Recommend the latter; spec/17 will commit.
 2. **HIR-side error code for `GenericExternFn`**: not a typeck error, lives in `HirError`. HIR errors don't follow the E0NNN scheme — confirm the convention.
+
+---
+
+# Generic structs (extension)
+
+The sections below grow the spec to cover *generic record structs*, e.g.:
+
+```rust
+struct LinkedList<T> {
+    value: T,
+    next: *mut LinkedList<T>,
+}
+
+let mut head = LinkedList::<i32> { value: 0, next: null };
+```
+
+Every decision the generic-fn portion of this spec already locked down — single TyArena, Param-in-`expr_tys` contract, `substitute_ty` primitive, lean `Instance`, mangling shape, error-but-keep-signature recovery, driver short-circuit, out-of-scope list — is **preserved verbatim**. Where an existing section grows, the change is shown in diff form.
+
+## Requirements (extension)
+
+Once generic fns land, fns can be parametric but every ADT must be monomorphic. Every typed container (linked list, pair, stack, hash map) ends up either copy-pasted per element type or punted to `*mut u8` with manual casts. Solving it generically extends the same `T: Sized`-only model the fn portion already commits to.
+
+This extension adds **generic record structs only**. Generic enums, generic unions, trait bounds, where clauses, HKT, specialization, const generics, variance, and lifetimes remain explicitly out of scope.
+
+## Subset-of-Rust constraint (extension)
+
+Anything we accept must parse and mean the same thing in Rust:
+
+- `struct G<T, U> { f: ty1, g: ty2 }` — same syntax, same scoping rule (params in scope inside the field type positions only).
+- `Name<T>` and `Name::<T>` in type positions (e.g., `*mut Name<i32>`, `[Name<u8>; 4]`) — the type grammar has no `<` operator, so no `::` is required.
+- `Name::<T> { f: v }` — turbofish on struct literal, mandatory `::` (matches Rust; without `::`, `Name<T>{...}` parses as comparison and fails on the trailing `{`).
+- `Name { f: v }` (no turbofish on a generic struct) — accepted when T is inferable from field-value types.
+- Implicit bound is `T: Sized` only. `LinkedList<[i32]>` is rejected at the construction site (E0269), same path as `f::<[i32]>(...)`.
+
+Where we differ, we accept *fewer* programs:
+
+- No trait bounds on struct generic params (`struct Foo<T: Display>` is a parse error).
+- No `where` clauses on struct decls.
+- No generic enums or unions (enum/union themselves are reserved-but-unimplemented).
+- No `impl<T>` blocks (no `impl` in oxide yet).
+
+## Acceptance (extension)
+
+```rust
+struct LinkedList<T> {                                  // ✓ generic struct
+    value: T,
+    next: *mut LinkedList<T>,
+}
+
+let n: LinkedList<i32> = LinkedList::<i32> {            // ✓ turbofish form
+    value: 0,
+    next: null,
+};
+
+let m = LinkedList { value: 0i32, next: null };         // ✓ T inferred from field
+
+struct Pair<T, U> { l: T, r: U }                        // ✓ multi-param
+let p = Pair::<i32, *mut S> { l: 0, r: null };          // ✓
+let q = Pair { l: 7i32, r: 'a' };                       // ✓ inferred
+```
+
+```rust
+struct Vec<T: Sized> { ... }                            // ✗ trait bounds rejected (parse)
+struct Wrap<T> where T: Sized { ... }                   // ✗ where clauses rejected (parse)
+fn main() { let n = LinkedList { value: null, next: null }; } // ✗ E0256 — T unconstrained
+fn main() { LinkedList::<i32, u8> { ... }; }            // ✗ E0275 — arity mismatch
+struct B<T> { x: T }
+fn main() { B::<[i32]> { x: ??? } }                     // ✗ E0269 — T = [i32] is unsized
+```
+
+## Position in the pipeline (no change)
+
+The pipeline stays:
+
+```
+parse → hir → typeck → mono → codegen
+```
+
+Mono does **not** gain a struct-instantiation step. Generic structs are materialized lazily in codegen, keyed on the post-mono `(AdtId, Vec<TyId>)` pair. Rationale below.
+
+## Surface syntax (extension)
+
+Four cases:
+
+- **Struct decl**: `struct G<T, U, ...> { f1: ty1, ... }`. Generic param list comes between the struct name and the opening brace. Empty list `<>` accepted (matches Rust); `struct G<> { }` parses identically to `struct G { }`. Trailing comma allowed inside `<>`.
+- **Type position**: any `Named` type position may carry type-args — `*mut G<T>`, `[G<i32>; 4]`, `G<G<i32>>`. Type-args are recursive; every nesting may carry its own list. No `::` required (the type grammar has no `<` operator).
+- **Struct lit turbofish**: `G::<T> { f: v }`. The `::` is mandatory (without it, `G<T>{...}` parses as comparison and fails on the trailing `{`). Empty `G::<>` accepted, equivalent to `G { ... }`.
+- **Inferred form**: `G { f: v }`. Typeck mints fresh Infer vars per `G.generic_params` and lets field-value unification pin them — same machinery as fn-call inference. Failure mode: if no field unification pins T, finalize emits E0256 at the lit's span.
+
+The choice to accept inferred form mirrors fn-call inference: same plumbing (fresh Infer + Sized obligation + finalize), same ergonomics, same failure-mode (E0256). No new error code.
+
+## HIR (extension)
+
+### Data model
+
+```rust
+pub struct HirAdt {
+    pub name: String,
+    pub kind: AdtKind,
+    pub generic_params: Vec<HTyParamId>,    // NEW — empty for non-generic structs
+    pub variants: IndexVec<VariantIdx, HirVariant>,
+    pub span: Span,
+}
+
+pub enum TyParamOwner {                      // NEW
+    Fn(FnId),
+    Adt(HAdtId),
+}
+
+pub struct TyParamInfo {
+    pub owner: TyParamOwner,                 // CHANGED from FnId
+    pub idx_in_owner: u32,
+    pub name: String,
+    pub span: Span,
+}
+
+pub enum HirTyKind {
+    // ...
+    Adt(HAdtId, Vec<HirTy>),                 // CHANGED from Adt(HAdtId)
+    // ...
+}
+
+pub enum HirExprKind {
+    // ...
+    StructLit {
+        adt: HAdtId,
+        type_args: Vec<HirTy>,               // NEW — empty for inferred form
+        fields: Vec<HirStructLitField>,
+    },
+    // ...
+}
+```
+
+`HirAdt.generic_params` is the source-of-truth for "how many type params does this ADT take" downstream — read by typeck (to size the substitution map), by codegen (to align args with params at field-type substitution).
+
+`TyParamOwner` is an enum because the substitution machinery (`substitute_ty`, `resolve_fully`, mangler) doesn't dispatch on owner kind — it just looks up `pid` in `subst: HashMap<ParamId, TyId>`. A single `ParamId` arena keeps these consumers owner-agnostic. The owner tag is consulted only at diagnostic-rendering sites that want to attribute a Param to its declaring item.
+
+`HirTyKind::Adt(haid, args)` carries the type-args that appear in source. A bare ADT name lowers to `Adt(haid, vec![])`. **Arity invariant**: `args.len() == hir.adts[haid].generic_params.len()` always — there is no "unsaturated ADT" representable as a `HirTyKind`.
+
+`HirExprKind::StructLit.type_args` is empty for the inferred form (`G { ... }`) AND for explicit empty turbofish (`G::<> { ... }`); both collapse at the parser level.
+
+### Multi-pass scanner re-ordering
+
+`prescan_file` (the pass-1 ID-allocation phase of `src/hir/lower/scanner.rs`) currently mints `HTyParamId`s for fns at the `ItemKind::Fn` arm. **The struct arm at `ItemKind::Struct` gains the same shape**: walk `struct_decl.generic_params`, mint an `HTyParamId` per ident with `owner: TyParamOwner::Adt(haid)`, store the resulting `Vec<HTyParamId>` on `HirAdt.generic_params`. No new pass.
+
+`seal_adts` (the pass-4 ADT field-type lowering pass) currently calls `ty::lower_ty(..., TyParamScope::empty(), ...)`. **It now builds a per-ADT `TyParamScope`** from `HirAdt.generic_params` and passes that scope to `lower_ty`, so a field type `value: T` resolves to `Param(htypid)` rather than falling through to `Named("T")`.
+
+The pass-ordering invariant — type-param IDs allocated before any field-type lowering needs them — holds because pass 1 still runs strictly before pass 4. The 4-pass count stays at 4.
+
+### `lower_ty` resolution rule
+
+Today the Named arm has precedence Param > Adt > Named-unresolved (matches Rust's "type params shadow ADT names"). The new shape `ast::TypeKind::Named { name, type_args }` is handled:
+
+- `name` resolves to a Param **and** `type_args` is empty: lower to `HirTyKind::Param(tpid)` (unchanged).
+- `name` resolves to a Param **and** `type_args` is non-empty: emit `HirError::TypeParamWithArgs { name, span }`. Recovery: lower to `HirTyKind::Error`. Driver short-circuits before typeck (same shape as `GenericExternFn`).
+- `name` resolves to an ADT: recursively lower each `type_arg` under the same `TyParamScope`. Result is `HirTyKind::Adt(haid, lowered_args)`. The recursion ensures `*mut G<T>` inside a generic fn body resolves T → `Param(htypid)` correctly.
+- `name` doesn't resolve: fall through to `HirTyKind::Named(name)` (typeck's job to diagnose). Type-args on an unresolved name are dropped silently — primitives have arity 0, and the unresolved diagnostic at typeck takes precedence.
+
+### Generic-extern-analog for ADTs
+
+None needed. `extern "C"` blocks already reject non-fn items at `scanner.rs` (the existing `UnsupportedExternItem` path) before generic_params is even inspected. There is no shape analogous to `is_extern && !generic_params.is_empty()` for structs.
+
+### New HIR error variant
+
+```rust
+HirError::TypeParamWithArgs { name: String, span: Span }
+```
+
+Fires when source writes `T<X>` for a name `T` already in scope as a generic param. Recovery: position becomes `HirTyKind::Error`, downstream Param-bearing trees that included it eventually reach typeck as `tys.error`. Driver short-circuits before typeck because this is a `HirError`. Not E0NNN-numbered (HIR errors don't follow that scheme).
+
+## Typeck rules (extension)
+
+### Data model
+
+```rust
+pub enum TyKind {
+    // ...
+    Adt(AdtId, Vec<TyId>),                  // CHANGED from Adt(AdtId)
+    // ...
+}
+
+pub struct AdtDef {
+    pub name: String,
+    pub kind: AdtKind,
+    pub generic_params: Vec<ParamId>,       // NEW — 1:1 with HIR HTyParamId via from_raw
+    pub variants: IndexVec<VariantIdx, VariantDef>,
+    pub partial: bool,
+}
+```
+
+### Arity invariant
+
+Every `Adt(aid, args)` interned in the arena satisfies `args.len() == cx.adts[aid].generic_params.len()`. There is no "uninitialized" or "short" form. For non-generic ADTs, `args` is always `vec![]`. For a generic ADT `LinkedList<T>` (arity 1), the two well-formed shapes are:
+
+- **Decl-form**: `Adt(ll_aid, [Param(pid_T)])` — args are the Param leaves of the ADT's own generic_params. Phase 0 pre-interns this. Field types reference it via `*mut LinkedList<T>` lowering to `Ptr(Adt(ll_aid, [Param(pid_T)]), Mut)`.
+- **Instantiated form**: `Adt(ll_aid, [i32])` — args are concrete TyIds (or fn-Params if we're inside a generic fn body).
+
+Both shapes are arity-correct; they're distinct TyIds via hash-cons; the only difference is whether their args contain Param leaves. **The "have we substituted yet?" question is answered by Param-occurrence, not args-emptiness.** This preserves the Param-in-`expr_tys` contract verbatim.
+
+### DAG invariant — decl-time cycle detection is sufficient
+
+The TyId arena is a DAG by construction: hash-consing requires every sub-TyId to be interned strictly before its parent, so no `TyKind` can contain a TyId that points back to itself. The only structure re-used by name across distinct TyIds is `AdtId`. Therefore, value-typed cycles can only arise *through ADT identifiers*. Substitution (mono's `substitute_ty`, codegen's lazy materialization) inserts already-interned TyIds for `Param` leaves; never introduces a back-edge.
+
+This separates two phenomena that are sometimes conflated:
+
+- **Cycles** (a value-typed type contains itself) — caught at typeck decl phase by `check_recursive_adts` (see below). Reachability-agnostic: every ADT decl is checked regardless of whether `main` ever reaches it.
+- **Divergent monomorphization** (unboundedly many *distinct* acyclic types, e.g., `f<T>() { f::<S<T>>() }`) — caught at mono via the existing `depth_limit` / E0278. Reachability-bounded: only fires for cascade chains rooted at a reachable entry point.
+
+### `check_recursive_adts` — tri-color DFS over substituted types
+
+The non-generic implementation walks each ADT's static decl edges via `walk_ty` over `field.ty`. With generic ADTs that walk over-approximates (`struct B<T> { y: *mut T } / struct A { x: B<A> }` is finite — `B<A>` = `{ y: *mut A }` — but a static walk of A's fields pushes `a` from B's args list without knowing B uses T only via Ptr). The correct check eagerly substitutes at each ADT step and uses a gray-set for cycle detection along the walk path:
+
+```rust
+fn check_field(
+    cx: &mut Checker,
+    start_aid: AdtId,
+    ty: TyId,
+    span: &Span,
+    gray: &mut HashSet<AdtId>,                              // current walk path
+    visited: &mut HashSet<(AdtId, Vec<TyId>)>,              // dedup
+) {
+    match cx.tys.kind(ty).clone() {
+        TyKind::Adt(child, args) => {
+            if gray.contains(&child) {
+                cx.errors.push(TypeError::RecursiveAdt {
+                    adt: cx.adts[start_aid].name.clone(),
+                    span: span.clone(),
+                });
+                return;                                     // back-edge — cycle closes here
+            }
+            let key = (child, args.clone());
+            if visited.contains(&key) { return; }
+            visited.insert(key);
+            gray.insert(child);
+
+            let subst: HashMap<ParamId, TyId> = cx.adts[child].generic_params
+                .iter().copied()
+                .zip(args.iter().copied())
+                .collect();
+            for variant in &cx.adts[child].variants.clone() {
+                for field in &variant.fields {
+                    let substituted = cx.tys.substitute_ty(field.ty, &subst);
+                    check_field(cx, start_aid, substituted, &field.span, gray, visited);
+                }
+            }
+
+            gray.remove(&child);
+        }
+        TyKind::Ptr(_, _) => {}                             // pointer breaks cycle
+        TyKind::Array(elem, Some(_)) => {
+            check_field(cx, start_aid, elem, span, gray, visited);
+        }
+        _ => {}                                             // Prim / Param / Unit / Never / Fn / Infer / Error
+    }
+}
+```
+
+Driven once per ADT as the start. The "occurs check" is the `gray` set — checks occurrences on the *current walk path*, not history. Visited dedups branches.
+
+**Termination guaranteed.** Gray's depth is bounded by `|adts|` — any second encounter of an aid (in any args shape) fires cycle and returns immediately. Visited grows monotonically; each new entry advances the walk by one substituted step, and growing-args divergence is absorbed by the gray-set: `struct S<T> { inner: S<*mut T> }` fires immediately at the first `Adt(s, [Ptr(Param, Mut)])` because `s ∈ gray` already.
+
+**No false positives.** Ptr arms break cycles cleanly, even when the Ptr wraps a Param — because we walk the *substituted* body, not the static decl.
+
+**Cost**: O(|adts|² × |fields per ADT|) calls to `substitute_ty`, each a hash-cons hit in practice. Acceptable at decl phase.
+
+### Phase 0 — declaration form pre-intern
+
+`alloc_partial_adts` (the existing pre-allocation pass) gains:
+
+1. Allocate `ParamId` per ADT generic param via `ParamId::from_raw(htypid.raw())` (1:1 with HIR's IDs, same convention as `AdtId::from_raw(haid.raw())`).
+2. Populate `AdtDef.generic_params` with the ParamId list.
+3. Pre-intern the **declaration form** `Adt(aid, [Param(p0), Param(p1), ...])` — same TyId that field types reference via `*mut LinkedList<T>` etc., so hash-cons makes them shared.
+
+For a non-generic ADT, the declaration form collapses to `Adt(aid, [])` — identical to today's pre-intern modulo the empty-vec wrapper.
+
+### `resolve_ty` — Adt arm
+
+```rust
+HirTyKind::Adt(haid, args) => {
+    let aid = AdtId::from_raw(haid.raw());
+    let arg_tys: Vec<TyId> = args.iter()
+        .map(|a| Self::resolve_ty(tys, errors, a))
+        .collect();
+    tys.intern(TyKind::Adt(aid, arg_tys))
+}
+```
+
+`HirTyKind::Param(tpid) → TyKind::Param(pid)` is unchanged — the same translation works for both fn-Param and ADT-Param IDs (single ParamId arena).
+
+### `substitute_ty` — Adt arm
+
+The line that today reads `TyKind::Adt(_) => ty,` (with the comment anticipating this growth) becomes:
+
+```rust
+TyKind::Adt(aid, args) => {
+    let new_args: Vec<TyId> = args.iter()
+        .map(|&a| self.substitute_ty(a, subst))
+        .collect();
+    self.intern(TyKind::Adt(aid, new_args))
+}
+```
+
+Param leaves nested inside args (e.g., `Adt(aid, [Param(T)])` substituting `T → i32`) are handled by recursion: `self.substitute_ty(Param(T), subst)` returns `i32`, the new args list is `[i32]`, the outer intern produces `Adt(aid, [i32])`.
+
+### `resolve_fully` — Adt arm
+
+Symmetric — recurse over args and re-intern. This is what carries Infer-resolution through args at finalize: `Adt(aid, [Infer(?T0)])` resolves to `Adt(aid, [i32])` if `?T0` got bound to `i32`.
+
+### `infer_struct_lit` — generic shape
+
+Mirrors `infer_call`'s generic branch:
+
+```rust
+fn infer_struct_lit(
+    &mut self,
+    inf: &mut Inferer,
+    lit_eid: HExprId,
+    aid: AdtId,
+    type_args: &[HirTy],            // turbofish args (empty for inferred form)
+    fields: &[HirStructLitField],
+    lit_span: &Span,
+) -> TyId {
+    let adt_def = self.adts[aid].clone();
+    let n_type_params = adt_def.generic_params.len();
+
+    // (1) Arity check — same shape as infer_call.
+    if !type_args.is_empty() && type_args.len() != n_type_params {
+        inf.errors.push(TypeError::GenericArityMismatch {
+            expected: n_type_params,
+            found: type_args.len(),
+            span: lit_span.clone(),
+        });
+        return self.tys.error;
+    }
+
+    // (2) Allocate fresh Infer per ADT generic param.
+    let fresh: Vec<TyId> = (0..n_type_params)
+        .map(|_| self.fresh_infer(inf, false, lit_span.clone()))
+        .collect();
+
+    // (3) Optional turbofish equate.
+    for (i, hty) in type_args.iter().enumerate() {
+        let user_ty = Self::resolve_ty(&mut self.tys, &mut inf.errors, hty);
+        unify::equate(self, inf, fresh[i], user_ty, hty.span.clone());
+    }
+
+    // (4) Sized obligation per fresh — implicit T: Sized at construction.
+    for &fresh_ty in &fresh {
+        inf.obligations.push(Obligation::Sized {
+            ty: fresh_ty,
+            pos: SizedPos::TypeArg,
+            span: lit_span.clone(),
+        });
+    }
+
+    // (5) Build subst, substitute declared field types, unify with provided values.
+    let subst: HashMap<ParamId, TyId> = adt_def.generic_params
+        .iter().copied()
+        .zip(fresh.iter().copied())
+        .collect();
+    let declared = &adt_def.variants[VariantIdx::from_raw(0)].fields;
+    let mut seen: HashMap<String, Span> = HashMap::new();
+    for provided in fields {
+        let value_ty = self.infer_expr(inf, provided.value);
+        // ... existing duplicate-field check unchanged ...
+        match declared.iter().find(|f| f.name == provided.name) {
+            Some(field_def) => {
+                let target_ty = self.tys.substitute_ty(field_def.ty, &subst);
+                unify::subtype(self, inf, value_ty, target_ty, /* span */);
+            }
+            None => { /* existing unknown-field path */ }
+        }
+    }
+    // ... existing missing-field check ...
+
+    // (6) Return result type. fresh is moved (not cloned); resolve_fully
+    //     walks args at finalize and pins them to concrete types.
+    self.tys.intern(TyKind::Adt(aid, fresh))
+}
+```
+
+**No type-arg side-table needed.** Unlike fn calls — where the call expr's type is the *return*, so args have to be stored separately on `Inferer.call_type_args` — struct-lit type-args live directly in the result type `expr_tys[lit_eid] = Adt(aid, args)`. `resolve_fully`'s new Adt arm walks the args at finalize and resolves any Infer leaves to concrete types. Codegen reads `expr_tys[lit_eid]` and gets the concrete instantiation directly.
+
+### `infer_field` — substitution at field access
+
+For `p.value` where `p: *mut LinkedList<i32>`:
+
+```rust
+TyKind::Adt(aid, args) => {
+    let adt_def = self.adts[aid].clone();
+    match adt_def.variants[VariantIdx::from_raw(0)].fields.iter().find(|f| f.name == name) {
+        Some(field_def) => {
+            if args.is_empty() {
+                field_def.ty                                        // non-generic fast path
+            } else {
+                let subst: HashMap<ParamId, TyId> = adt_def.generic_params
+                    .iter().copied()
+                    .zip(args.iter().copied())
+                    .collect();
+                self.tys.substitute_ty(field_def.ty, &subst)
+            }
+        }
+        None => { /* existing NoFieldOnAdt path */ }
+    }
+}
+```
+
+The substitution **must** happen at typeck — leaving `Param(pid_T_Struct)` in `expr_tys` would violate the Param-in-`expr_tys` contract (Param leaves are permitted only when they reference a fn's generic_params, which the body subst at codegen Phase 2 substitutes; struct-Params are not in that subst and would survive into codegen, panicking `lower_ty(_, Param(_))`).
+
+After substitution: inside a non-generic fn, the field type is concrete (e.g., `i32`); inside a generic fn, the field type may be a fn-Param (`Param(pid_T_make)`) — which is fine, it's caught by mono's body subst at codegen Phase 2. Either way, struct-Params don't escape `infer_field`.
+
+### Param-in-`expr_tys` — extends naturally
+
+The fn-only contract said "TyKind::Param may appear in `TypeckResults.expr_tys[eid]` for any expression inside a generic fn's body." With generic structs, `Param` may also appear *nested inside an Adt arg slot* — e.g., `Adt(wrap_aid, [Param(pid_T_make)])` for `Wrap { x: v }` inside `fn make<T>(v: T) -> Wrap<T>`. The contract extends verbatim: `resolve_fully` doesn't substitute Param leaves (only Infer); mono substitutes during codegen Phase 2 walk via the local subst map, now correctly recursing through Adt args via the new arm in `substitute_ty`.
+
+### `call_type_args` — unchanged
+
+The fn-call type-arg side-table keeps its name and shape. Struct lits don't need a parallel table because their type-args live in `expr_tys[lit_eid]` directly.
+
+### Unconstrained type params — E0256 reuse
+
+The fresh Infer vars allocated by `infer_struct_lit` are normal Bindings. If no field unification or turbofish pins them by finalize, the existing `CannotInfer` mechanism emits E0256 at `creation_span` (the `lit_span` we passed when minting the var). Same path as fn calls; no new code path.
+
+## Mono (extension)
+
+**Mono does not gain a struct-instantiation step.** Generic structs are materialized at codegen, keyed by `(AdtId, Vec<TyId>)` post-substitution. Justification:
+
+1. Structs have no body to walk. The mono fixpoint walk drives instantiation by inspecting fn bodies and discovering callees. ADTs only have field types — they don't *invoke* anything.
+2. `Adt(aid, args)` is materializable on its own. Given concrete args, codegen has all the information needed: the ADT's `generic_params`, the args, and `substitute_ty` to materialize each field. No prior instantiation is required.
+3. Hash-cons dedup at the TyId level already works. Post-mono, every reference to `Adt(aid, [i32])` shares the same TyId. Codegen's lazy cache keyed on `(AdtId, Vec<TyId>)` deduplicates LLVM struct types automatically.
+4. No new `Instance`-like struct needed. An `AdtInstance` would duplicate `(aid, args)`; kept off the books for simplicity.
+
+### `Instance.params` / `.ret` — already cover Adt-arg substitution
+
+When a generic fn `f<T>(x: G<T>)` is instantiated with `T = i32`:
+
+- `instantiate(f_fid, [i32], _)` builds `subst = { pid_T → i32 }`.
+- `substitute_ty` walks `params: [Adt(g_aid, [Param(T)])]` via the new Adt arm and produces `Adt(g_aid, [i32])`.
+- `Instance.params = [Adt(g_aid, [i32])]`.
+
+Codegen Phase 1 reads `Instance.params` directly; lazy ADT materialization handles the LLVM struct type the first time `Adt(g_aid, [i32])` is encountered.
+
+### Cascade walk — only fns drive it
+
+The work queue holds `InstId`s for fn instances. `walk_body` only inspects call expressions. ADT field types are walked indirectly — they appear in fn signatures and local annotations as already-substituted TyIds.
+
+### Divergent monomorphization through structs — same E0278
+
+```rust
+struct Wrap<T> { x: T }
+fn f<T>() { f::<Wrap<T>>() }
+fn main() { f::<i32>() }
+```
+
+Cascade: `f<i32>` → `f<Wrap<i32>>` → `f<Wrap<Wrap<i32>>>` → ... Each step mints a new `(FnId, Vec<TyId>)` pair; dedup never fires; the existing `depth_limit = 256` catches at depth 256 and emits E0278 with the breadcrumb chain. **No new error code.** The chain renderer prints `f<Wrap<i32>>` correctly via the new Adt arm (when Display-rendering of Adt with args lands; until then, the chain shows `Adt(<raw>, [...])`).
+
+## Mangling (extension)
+
+The non-generic implementation chose `Adt(aid)` → `$adt<raw>` (AdtId raw integer) over the bare-source-name idea this spec originally floated, to dodge cross-module name collisions cleanly. Generic structs extend the same pattern:
+
+| `TyKind` | Mangle (`mangle_inst`) | Display (`TyArena::render`) |
+|----------|------------------------|------------------------------|
+| `Adt(aid, [])` | `$adt<raw>` (preserved) | `Adt(<raw>)` (preserved) |
+| `Adt(aid, args)` non-empty | `$adt<raw>$<rec(arg1)>$<rec(arg2)>...` | `Adt(<raw>, [<rec(arg1)>, <rec(arg2)>, ...])` |
+
+Boundary: AdtId raw is digits-only, args always start with `$` — unambiguous. Demangling needs the registry for arity (same caveat as the bare-name scheme).
+
+### Worked examples
+
+| Instance / type | Mangle | Display |
+|---|---|---|
+| `LinkedList<i32>` (LinkedList aid raw = 7) | `$adt7$i32` | `Adt(7, [i32])` |
+| `LinkedList<*mut i32>` | `$adt7$mutptr_$i32` | `Adt(7, [*mut i32])` |
+| `Pair<LinkedList<i32>, u8>` (Pair aid raw = 8) | `$adt8$adt7$i32$u8` | `Adt(8, [Adt(7, [i32]), u8])` |
+| `f<*mut LinkedList<i32>>` (fn instance, top-level) | `f__$mutptr_$adt7$i32` | — |
+
+Properties (injective, deterministic, parseable-with-registry) preserved. Display column is mechanical; human-friendly `LinkedList<i32>` rendering is deferred to a future TypeckResults-aware printer (per the existing TODO at `ty.rs:410–412`). This extension does NOT extend `TyArena::render` to be name-aware.
+
+## Codegen (extension)
+
+### `AdtLlTypes` — keyed by `(AdtId, Vec<TyId>)`
+
+```rust
+pub type AdtLlTypes<'ctx> = HashMap<(AdtId, Vec<TyId>), StructType<'ctx>>;
+```
+
+Different generic instances need different LLVM struct types — `LinkedList<i32>` has `value: i32`, `LinkedList<u8>` has `value: i8`. Two layouts, two struct types. Keying by `(AdtId, Vec<TyId>)` mirrors mono's `(FnId, Vec<TyId>)` instance key. For non-generic ADTs the key is `(aid, vec![])` — one entry per ADT, identical to the IndexVec behavior modulo the empty-vec wrapper.
+
+### `lower_adt_type` — lazy materialization
+
+```rust
+pub fn lower_adt_type<'ctx>(
+    ctx: &'ctx Context,
+    tcx: &TyArena,                             // interior-mut interning
+    cache: &mut AdtLlTypes<'ctx>,
+    adts: &IndexVec<AdtId, AdtDef>,
+    aid: AdtId,
+    args: &[TyId],
+) -> StructType<'ctx> {
+    let key = (aid, args.to_vec());
+    if let Some(&st) = cache.get(&key) {
+        return st;
+    }
+    // Cache-insert opaque struct BEFORE recursing into fields, so
+    // self-referential types via pointer (`LinkedList<T>.next: *mut LinkedList<T>`)
+    // hit the cache on recursion. Ptr lowers to opaque ptr (doesn't recurse
+    // into pointee) so the recursion converges.
+    let adt = &adts[aid];
+    let display_name = render_adt_instance_name(adt, args, tcx);
+    let opaque = ctx.opaque_struct_type(&display_name);
+    cache.insert(key.clone(), opaque);
+
+    // Build subst from the ADT's generic_params and the supplied args.
+    let subst: HashMap<ParamId, TyId> = adt.generic_params
+        .iter().copied()
+        .zip(args.iter().copied())
+        .collect();
+
+    let fields_ll: Vec<BasicTypeEnum<'ctx>> = adt.variants[VariantIdx::from_raw(0)]
+        .fields
+        .iter()
+        .map(|f| {
+            let field_ty_concrete = tcx.substitute_ty(f.ty, &subst);
+            lower_ty(ctx, tcx, cache, adts, field_ty_concrete)
+        })
+        .collect();
+    opaque.set_body(&fields_ll, false);
+    opaque
+}
+```
+
+The cache insertion *before* recursing is load-bearing for self-referential types: when lowering `LinkedList<i32>`, the `next: *mut LinkedList<i32>` field lowers `*mut` to opaque LLVM `ptr` without recursing into the pointee.
+
+### `lower_ty` — Adt arm
+
+```rust
+TyKind::Adt(aid, args) => {
+    lower_adt_type(ctx, tcx, cache, adts, aid, &args).as_basic_type_enum()
+}
+```
+
+The `Param(_)` panic in `lower_ty` is preserved exactly — post-mono, any `Param` reaching codegen is a bug.
+
+### `field_index` / `field_gep` — unchanged
+
+Field name → position is independent of type-args. `LinkedList<i32>.value` is at position 0 just as `LinkedList<u8>.value` is at position 0.
+
+### `emit_field` and lvalue Field arm — substitute via args
+
+For `p.value` access where `p: *mut LinkedList<i32>`:
+
+1. Peel ptr → `Adt(ll_aid, [i32])`.
+2. `field_index(ll_aid, "value") = 0`.
+3. Look up `value`'s declared TyId: `Param(pid_T_LinkedList)`.
+4. Build subst from `(adt.generic_params, args)` = `{pid_T_LinkedList → i32}`.
+5. `substitute_ty` → `i32`.
+6. `lower_ty` → LLVM `i32`.
+
+For non-generic ADTs, `args.is_empty()`, the subst is empty, and `substitute_ty` passes the field type through unchanged — backward-compat.
+
+### TyArena borrow
+
+Mono already borrows `TypeckResults.tys` through interior-mut `substitute_ty`. Codegen does the same — `lower_adt_type` and the field-substitution path go through `tcx.substitute_ty(...)` on `&TyArena`. No new borrow contract.
+
+## Errors (extension)
+
+| Code | Variant | Owner | When |
+|------|---------|-------|------|
+| E0275 | `GenericArityMismatch` (existing) | typeck | Struct-lit turbofish supplies wrong number of type-args (e.g., `LinkedList::<i32, u8> { ... }`). Same shape as fn-call arity mismatch. |
+| E0256 | `CannotInfer` (existing) | typeck | Struct-lit type-param unconstrained at finalize (e.g., `LinkedList { value: null, next: null }` — both fields are `*mut α`, T never pinned). |
+| E0269 | `UnsizedArrayAsValue` (existing) | typeck | Struct-lit turbofish arg is `[T]` (e.g., `LinkedList::<[i32]> { ... }`). Same `Obligation::Sized { pos: SizedPos::TypeArg }` path as fn calls. |
+| E0278 | `DivergentMonomorphization` (existing) | mono | Cascade through struct-wrapping fn (e.g., `f<T>() { f::<Wrap<T>>() }`). Same depth_limit. |
+| (HIR) | `TypeParamWithArgs { name, span }` | hir | Source writes `T<X>` for a name `T` already in scope as a generic param. Recovery: type position becomes `HirTyKind::Error`, driver short-circuits. Not E0NNN-numbered. |
+
+No new error codes for typeck. The only new shape is the HIR-side `TypeParamWithArgs`, following the same not-E0NNN convention as `GenericExternFn`.
+
+## Out of scope (this round)
+
+Same as the fn portion, restated for completeness:
+
+- Generic enums and unions (enum/union themselves are reserved-but-unimplemented).
+- Trait bounds on generic params (`T: Display`).
+- `where` clauses.
+- `impl<T>` blocks (no `impl` in oxide).
+- Generic type aliases (no aliases in oxide).
+- Specialization, HKT, const generics, variance, lifetimes — unchanged from the fn portion's list.
+- Cross-module ADT name collisions — the AdtId-raw mangle scheme handles this cleanly (each `struct S` in different modules gets a different AdtId, hence a different mangle). The Display-side rendering would still need module-qualification when modules nest; deferred.
+
+## Worked examples (extension)
+
+### `LinkedList<T>` end-to-end
+
+Source:
+
+```rust
+struct LinkedList<T> {
+    value: T,
+    next: *mut LinkedList<T>,
+}
+
+fn main() -> i32 {
+    let mut head = LinkedList::<i32> { value: 0, next: null };
+    head.value
+}
+```
+
+After HIR:
+
+- `HirAdt { name: "LinkedList", generic_params: [tpid_T], variants: [{ fields: [
+  { name: "value", ty: HirTyKind::Param(tpid_T) },
+  { name: "next", ty: HirTyKind::Ptr(HirTyKind::Adt(ll_haid, [HirTyKind::Param(tpid_T)]), Mut) },
+  ] }] }`
+- `HirFn { name: "main", generic_params: [], body: HBlockId(...) }`
+- The struct lit lowers to `HirExprKind::StructLit { adt: ll_haid, type_args: [<i32 type-id>], fields: [...] }`
+
+After typeck:
+
+- `AdtDef { name: "LinkedList", generic_params: [pid_T], partial: false }`. Field types: `value: Param(pid_T)`, `next: Ptr(Adt(ll_aid, [Param(pid_T)]), Mut)`.
+- `FnSig` for `main`: empty generic_params, `ret = i32`.
+- `infer_struct_lit` for the literal: turbofish is `[i32]`; fresh = `[?T0]`; equate `?T0 = i32`; subst `{pid_T → ?T0}`; substitute fields (value's target = `?T0` = i32, next's target = `Ptr(Adt(ll_aid, [?T0]), Mut)`); unify `0: ?Tlit` with `i32`, `null: Ptr(α, Mut)` with `Ptr(Adt(ll_aid, [i32]), Mut)`.
+- `head: Adt(ll_aid, [i32])` after finalize.
+- `expr_tys[lit_eid] = Adt(ll_aid, [i32])`.
+
+After mono:
+
+- `MonoResults.instances` contains one `Instance` for `main` (entry point, no type_args). Nothing for the struct — it's not a fn.
+
+Codegen:
+
+- Phase 1: declare `main`. `lower_ty(i32)` → LLVM i32.
+- Phase 2: walk `main`'s body.
+  - At the struct lit, `expr_tys[lit_eid] = Adt(ll_aid, [i32])`. `lower_ty(_, Adt(ll_aid, [i32]))` → cache miss → `lower_adt_type(ll_aid, [i32])`:
+    - Display name: `Adt(7, [i32])` (or whatever raw); opaque struct created and inserted.
+    - Subst `{pid_T → i32}`.
+    - Field 0 (`value: Param(pid_T)`): substitute → `i32` → LLVM i32.
+    - Field 1 (`next: Ptr(Adt(ll_aid, [Param(pid_T)]), Mut)`): substitute → `Ptr(Adt(ll_aid, [i32]), Mut)`. `lower_ty` → LLVM `ptr` (opaque). No re-entry into `lower_adt_type`.
+    - `set_body([i32, ptr], false)`.
+  - Allocate stack slot for `head` typed as the materialized struct.
+  - Field stores: `head.value ← 0`, `head.next ← null`.
+  - `head.value` field load: `field_index(ll_aid, "value") = 0`; `field_gep` over the stack slot; `lower_ty(i32)` → load i32.
+
+LLVM IR sketch:
+
+```llvm
+%"Adt(7, [i32])" = type { i32, ptr }
+
+define i32 @main() {
+entry:
+  %head = alloca %"Adt(7, [i32])", align 8
+  %head.value.gep = getelementptr inbounds %"Adt(7, [i32])", ptr %head, i32 0, i32 0
+  store i32 0, ptr %head.value.gep, align 4
+  %head.next.gep = getelementptr inbounds %"Adt(7, [i32])", ptr %head, i32 0, i32 1
+  store ptr null, ptr %head.next.gep, align 8
+  %v = load i32, ptr %head.value.gep, align 4
+  ret i32 %v
+}
+```
+
+### `Pair<T, U>` — multi-param inferred
+
+```rust
+struct Pair<T, U> { l: T, r: U }
+fn main() -> i32 {
+    let p = Pair { l: 7i32, r: 'a' };
+    p.l
+}
+```
+
+`infer_struct_lit`: `n_type_params = 2`, `fresh = [?T0, ?T1]`, no turbofish. Subst `{pid_T → ?T0, pid_U → ?T1}`. Field unifications: `7i32 ⊑ ?T0` → `?T0 ↪ i32`; `'a' (u8) ⊑ ?T1` → `?T1 ↪ u8`. Result: `Adt(pair_aid, [i32, u8])`.
+
+LLVM: `%"Adt(8, [i32, u8])" = type { i32, i8 }`.
+
+### Inference-vs-turbofish matrix
+
+```rust
+LinkedList::<i32> { value: 0, next: null }    // ✓ turbofish pins T = i32
+LinkedList { value: 0i32, next: null }         // ✓ inferred from `value: 0i32`
+LinkedList { value: 0, next: null }            // ✓ value: 0 is IntLit, defaults to i32 at finalize
+LinkedList { value: null, next: null }         // ✗ E0256 — both fields are *mut α; T never pinned
+```
+
+The third case works because typeck's int-default mechanism fires at finalize and assigns `?T → i32` before the unconstrained-T check runs. The fourth case fails because `null` mints `Ptr(α, Mut)` without an int-default flag — finalize emits E0256 at the unconstrained binding's `creation_span`.
+
+### `make<T>(v: T) -> Wrap<T>` — Param-in-Adt-args
+
+```rust
+struct Wrap<T> { x: T }
+fn make<T>(v: T) -> Wrap<T> { Wrap { x: v } }
+```
+
+`infer_struct_lit` for `Wrap { x: v }`: fresh = `[?T0]`. Field unification: `v: Param(pid_T_make) ⊑ ?T0` → `?T0 ↪ Param(pid_T_make)`. Result: `Adt(wrap_aid, [?T0])` → resolve_fully → `Adt(wrap_aid, [Param(pid_T_make)])`.
+
+So `expr_tys[lit_eid] = Adt(wrap_aid, [Param(pid_T_make)])` — a `Param` leaf nested inside the Adt's args. This is the Param-in-`expr_tys` contract extending to Adt arg slots. `resolve_fully` doesn't substitute Param (only Infer); mono's `instantiate(make, [i32], _)` substitutes via the new Adt arm in `substitute_ty`, producing `Adt(wrap_aid, [i32])` for the lit's TyId at codegen Phase 2.
+
+## Open questions for spec iteration (extension)
+
+3. **Display rendering of generic-Adt for diagnostics**: today `TyArena::render` prints `Adt(<raw>)` because it lacks AdtDef name access. Extending to `Adt(<raw>, [<args>])` is mechanical; human-friendly `LinkedList<i32>` rendering needs a TypeckResults-aware printer. Tracked by the existing TODO at `ty.rs:410–412`. Not a v0 blocker.
+4. **`recursion_limit` configurability**: `depth_limit = 256` covers both pointer cascade (`f<T>() { f::<*mut T>() }`) and struct-wrap cascade (`f<T>() { f::<Wrap<T>>() }`). User-configurable limit deferred.
+5. **Cross-module display rendering**: Mangle uses AdtId raw, so cross-module collisions are impossible at the symbol level. Display rendering would still want module-qualified names when modules nest deeper; deferred to the same future fix.

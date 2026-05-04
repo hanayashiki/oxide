@@ -1,0 +1,7 @@
+== diagnostics ==
+== instances ==
+Inst[0] mangled=main depth=0 origin=EntryPoint
+Inst[1] mangled=id__$mutptr_$array_$constptr_$i32_$n5 depth=1 origin=Inst[0]
+== sig ==
+Inst[0] params=[] ret=i32
+Inst[1] params=[*mut [*const i32; 5]] ret=*mut [*const i32; 5]

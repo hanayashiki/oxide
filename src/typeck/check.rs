@@ -25,7 +25,7 @@ mod decl;
 mod obligation;
 mod unify;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use index_vec::IndexVec;
 
@@ -39,7 +39,9 @@ use crate::reporter::Span;
 use self::obligation::Obligation;
 use self::unify::MismatchCtx;
 use super::error::{MutateOp, SizedPos, TypeError};
-use super::ty::{AdtDef, AdtId, FnSig, InferId, ParamId, PrimTy, TyArena, TyId, TyKind};
+use super::ty::{
+    AdtDef, AdtId, FnSig, InferId, ParamId, PrimTy, TyArena, TyId, TyKind, subst_from,
+};
 
 /// Not `Clone` — `TypeckResults` has exactly one owner per compilation
 /// (the unique-id contract on `tys` is global to one arena, so a clone
@@ -292,7 +294,7 @@ impl<'hir> Checker<'hir> {
         let i32_id = self.tys.i32;
         let unit_id = self.tys.unit;
         let error_id = self.tys.error;
-        let prior_error_spans: std::collections::HashSet<Span> =
+        let prior_error_spans: HashSet<Span> =
             inf.errors.iter().map(|e| e.span().clone()).collect();
 
         for b in inf.bindings.iter_mut() {
@@ -505,14 +507,20 @@ impl<'hir> Checker<'hir> {
                     tys.error
                 }
             },
-            HirTyKind::Adt(haid) => {
-                // 1:1 HAdtId → AdtId today. Phase 0 in `decl::resolve_decls`
-                // pre-allocated the AdtDef stub and pre-interned this
-                // identity, so the intern is a hit; partial state of the
-                // AdtDef itself is irrelevant here — `TyKind::Adt(_)`
-                // only carries the identity.
+            HirTyKind::Adt(haid, args) => {
+                // 1:1 HAdtId → AdtId. Phase 0 pre-interned the
+                // declaration form `Adt(aid, [Param(p0), ...])` and
+                // (for non-generic ADTs) `Adt(aid, [])`; recursive
+                // arg lowering rebuilds whatever the use-site shape
+                // is. Hash-cons makes shared shapes (decl-form, fully-
+                // concrete instantiations) reuse TyIds. See
+                // spec/16_GENERIC.md §Typeck rules (extension).
                 let aid = AdtId::from_raw(haid.raw());
-                tys.intern(TyKind::Adt(aid))
+                let arg_tys: Vec<TyId> = args
+                    .iter()
+                    .map(|a| Self::resolve_ty(tys, errors, a))
+                    .collect();
+                tys.intern(TyKind::Adt(aid, arg_tys))
             }
             HirTyKind::Ptr {
                 mutability,
@@ -651,8 +659,18 @@ impl<'hir> Checker<'hir> {
                 let elem = self.resolve_fully(inf, elem);
                 self.tys.intern(TyKind::Array(elem, len))
             }
-            // Adt is identity-only — nothing to substitute.
-            TyKind::Adt(_) => resolved,
+            // Generic ADTs: recurse over args. This is what carries
+            // Infer-resolution through args at finalize:
+            // `Adt(aid, [Infer(?T0)])` resolves to `Adt(aid, [i32])`
+            // when `?T0` was bound to `i32`. Non-generic ADTs (empty
+            // args) take the fast-path leaf return — no Vec allocation,
+            // no re-intern. See spec/16_GENERIC.md §Typeck rules.
+            TyKind::Adt(_, ref args) if args.is_empty() => resolved,
+            TyKind::Adt(aid, args) => {
+                let new_args: Vec<TyId> =
+                    args.iter().map(|&a| self.resolve_fully(inf, a)).collect();
+                self.tys.intern(TyKind::Adt(aid, new_args))
+            }
             _ => resolved,
         }
     }
@@ -807,9 +825,13 @@ impl<'hir> Checker<'hir> {
                 }
             }
             HirExprKind::Field { base, name } => self.infer_field(inf, base, &name, &span),
-            HirExprKind::StructLit { adt, fields } => {
+            HirExprKind::StructLit {
+                adt,
+                type_args,
+                fields,
+            } => {
                 let aid = AdtId::from_raw(adt.raw());
-                self.infer_struct_lit(inf, aid, &fields, &span)
+                self.infer_struct_lit(inf, aid, &type_args, &fields, &span)
             }
             HirExprKind::Cast { expr: inner, ty } => {
                 let _ = self.infer_expr(inf, inner);
@@ -867,24 +889,64 @@ impl<'hir> Checker<'hir> {
         &mut self,
         inf: &mut Inferer,
         aid: AdtId,
+        type_args: &[HirTy],
         fields: &[HirStructLitField],
         lit_span: &Span,
     ) -> TyId {
-        let result_ty = self.tys.intern(TyKind::Adt(aid));
+        let n_type_params = {
+            let adt_def = &self.adts[aid];
+            adt_def.generic_params.len()
+        };
 
-        // Snapshot the declared fields so we don't hold a borrow on
-        // `self.adts` while inferring sub-expressions (which may mutably
-        // touch `self.tys`/`self.errors`).
-        let adt_def = self.adts[aid].clone();
-        let declared = &adt_def.variants[VariantIdx::from_raw(0)].fields;
+        // (1) Arity check (E0275). Empty turbofish is always allowed
+        // (means "infer everything"); non-empty must match arity. Same
+        // shape as `infer_call`'s generic branch. See
+        // spec/16_GENERIC.md §Typeck rules (extension).
+        if !type_args.is_empty() && type_args.len() != n_type_params {
+            inf.errors.push(TypeError::GenericArityMismatch {
+                expected: n_type_params,
+                found: type_args.len(),
+                span: lit_span.clone(),
+            });
+            return self.tys.error;
+        }
 
-        // Track first occurrences for duplicate-detection and to exclude
-        // already-seen names from the missing-field check.
-        let mut seen: std::collections::HashMap<String, Span> = std::collections::HashMap::new();
+        // (2) Allocate fresh Infer per ADT generic param. Empty for
+        // non-generic ADTs; the rest of the path collapses cleanly.
+        let fresh: Vec<TyId> = (0..n_type_params)
+            .map(|_| self.fresh_infer(inf, false, lit_span.clone()))
+            .collect();
+
+        // (3) Optional turbofish equate. Pin fresh to user-supplied
+        // type-args.
+        for (i, hty) in type_args.iter().enumerate() {
+            let user_ty = Self::resolve_ty(&mut self.tys, &mut inf.errors, hty);
+            unify::equate(self, inf, fresh[i], user_ty, hty.span.clone());
+        }
+
+        // (4) Sized obligation per fresh — implicit T: Sized at the
+        // construction site. Reuses E0269 path. Mirror of
+        // `infer_call`'s generic branch.
+        for &fresh_ty in &fresh {
+            inf.obligations.push(Obligation::Sized {
+                ty: fresh_ty,
+                pos: SizedPos::TypeArg,
+                span: lit_span.clone(),
+            });
+        }
+
+        // (5) Build subst from ADT's generic_params and the fresh args.
+        let (subst, declared) = {
+            let adt_def = &self.adts[aid];
+            (
+                subst_from(&adt_def.generic_params, &fresh),
+                adt_def.variants[VariantIdx::from_raw(0)].fields.clone(), // Clone to make checker happy
+            )
+        };
+
+        let mut seen: HashMap<String, Span> = HashMap::new();
 
         for provided in fields {
-            // Type-check the value first so inner errors still surface
-            // even if the field-set check fails.
             let value_ty = self.infer_expr(inf, provided.value);
             let value_span = self.hir.exprs[provided.value].span.clone();
 
@@ -894,18 +956,21 @@ impl<'hir> Checker<'hir> {
                     first: first_span.clone(),
                     dup: provided.span.clone(),
                 });
-                // Don't unify the second occurrence — its target slot is
-                // already accounted for; treat the second as a free-floating
-                // expression for diagnostic purposes only.
                 continue;
             }
             seen.insert(provided.name.clone(), provided.span.clone());
 
             match declared.iter().find(|f| f.name == provided.name) {
                 Some(field_def) => {
-                    unify::subtype(self, inf, value_ty, field_def.ty, value_span);
+                    // Substitute the field's declared type with the
+                    // ADT's args. For non-generic ADTs subst is empty
+                    // and `substitute_ty` is identity (hash-cons).
+                    let target_ty = self.tys.substitute_ty(field_def.ty, &subst);
+                    unify::subtype(self, inf, value_ty, target_ty, value_span);
                 }
                 None => {
+                    let adt_def = &self.adts[aid];
+
                     inf.errors.push(TypeError::StructLitUnknownField {
                         field: provided.name.clone(),
                         adt: adt_def.name.clone(),
@@ -917,6 +982,8 @@ impl<'hir> Checker<'hir> {
 
         for declared_field in declared.iter() {
             if !seen.contains_key(&declared_field.name) {
+                let adt_def = &self.adts[aid];
+
                 inf.errors.push(TypeError::StructLitMissingField {
                     field: declared_field.name.clone(),
                     adt: adt_def.name.clone(),
@@ -925,7 +992,13 @@ impl<'hir> Checker<'hir> {
             }
         }
 
-        result_ty
+        // (6) Return result type. `fresh` is moved into the result.
+        // `resolve_fully` walks args at finalize and pins each Infer
+        // to its concrete binding via the new Adt arm — so post-finalize
+        // `expr_tys[lit_eid] = Adt(aid, [<concrete>...])`. No type-arg
+        // side-table needed — args live directly in the result type.
+        // See spec/16_GENERIC.md §Typeck rules (extension).
+        self.tys.intern(TyKind::Adt(aid, fresh))
     }
 
     /// Type `base.name` as a value (rvalue). Place-vs-value distinction is
@@ -946,14 +1019,33 @@ impl<'hir> Checker<'hir> {
         let base_ty = self.infer_expr(inf, base);
         let (peeled, _ptr_mut) = self.auto_deref_ptr(inf, base_ty);
         match self.tys.kind(peeled).clone() {
-            TyKind::Adt(aid) => {
+            TyKind::Adt(aid, args) => {
+                // Snapshot the AdtDef before any operation that takes
+                // `&mut self.tys` (substitute_ty does).
                 let adt_def = &self.adts[aid];
                 match adt_def.variants[VariantIdx::from_raw(0)]
                     .fields
                     .iter()
                     .find(|f| f.name == name)
                 {
-                    Some(field_def) => field_def.ty,
+                    Some(field_def) => {
+                        if args.is_empty() {
+                            // Non-generic fast path — no substitution.
+                            field_def.ty
+                        } else {
+                            // Build subst from `(adt.generic_params,
+                            // args extracted from the peeled base
+                            // type)` and substitute the field's
+                            // declared type. The substituted type may
+                            // be concrete (inside a non-generic fn) or
+                            // a fn-Param (inside a generic fn body) —
+                            // both preserve the Param-in-`expr_tys`
+                            // contract. See spec/16_GENERIC.md §Typeck
+                            // rules (extension).
+                            let subst = subst_from(&adt_def.generic_params, &args);
+                            self.tys.substitute_ty(field_def.ty, &subst)
+                        }
+                    }
                     None => {
                         inf.errors.push(TypeError::NoFieldOnAdt {
                             field: name.to_string(),
@@ -1324,12 +1416,7 @@ impl<'hir> Checker<'hir> {
             // `&self.fn_sigs[fid]` borrow.
             let (sig_params_in, sig_ret_in, subst): (Vec<TyId>, TyId, HashMap<ParamId, TyId>) = {
                 let sig = &self.fn_sigs[fid];
-                let subst = sig
-                    .generic_params
-                    .iter()
-                    .copied()
-                    .zip(fresh.iter().copied())
-                    .collect();
+                let subst = subst_from(&sig.generic_params, &fresh);
                 (sig.params.clone(), sig.ret, subst)
             };
             let sub_params: Vec<TyId> = sig_params_in

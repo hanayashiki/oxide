@@ -1,0 +1,15 @@
+== diagnostics ==
+[E0269] Error: unsized array `[T]` cannot appear as a generic type argument
+   ╭─[ error_generic_struct_unsized_arg.ox:6:13 ]
+   │
+ 6 │     let w = Wrap::<[i32]> { v: null };
+   │             ────────────┬────────────  
+   │                         ╰────────────── unsized type argument
+   │ 
+   │ Help: generic functions assume T to be sized; pass a pointer (`*const [T]` / `*mut [T]`) or a sized array (`[T; N]`) instead.
+───╯
+== types ==
+Fn[0] main() -> ()
+  HExprId(0) : *mut [i32]
+  HExprId(1) : Adt(0, [[i32]])
+  HExprId(2) : ()

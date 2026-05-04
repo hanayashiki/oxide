@@ -1,0 +1,6 @@
+== diagnostics ==
+== types ==
+Fn[0] unused<Param(0)>(x[Local(0)]: Param(0)) -> Param(0)
+  HExprId(0) : Param(0)
+Fn[1] main() -> i32
+  HExprId(1) : i32

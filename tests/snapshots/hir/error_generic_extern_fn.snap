@@ -1,0 +1,15 @@
+HirProgram
+  Module error_generic_extern_fn.ox (root)
+    ExternFn[0] malloc_generic<T[TyParam(0)]>(size[Local(0)]: usize) -> *mut Param(0)
+    Fn[1] main()
+      Block
+== diagnostics ==
+[E0212] Error: extern "C" fn `malloc_generic` cannot be generic
+   ╭─[ error_generic_extern_fn.ox:2:5 ]
+   │
+ 2 │     fn malloc_generic<T>(size: usize) -> *mut T;
+   │     ──────────────────────┬─────────────────────  
+   │                           ╰─────────────────────── remove the type parameters
+   │ 
+   │ Help: extern fns resolve to a single linker symbol; generic instantiation would produce multiple mangled symbols with no corresponding foreign definitions
+───╯

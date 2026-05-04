@@ -50,10 +50,19 @@ pub enum TyKind {
     /// equivalently (shape only); the coercion check at use sites enforces
     /// the actual `mut → const` direction rule. See `spec/07_POINTER.md`.
     Ptr(TyId, Mutability),
-    /// Identity-only handle to an ADT. Structural data (fields, variants)
-    /// lives in `TypeckResults.adts[aid]`; equality is `aid == aid`.
-    /// See `spec/08_ADT.md` "Typeck phase ordering and ADT vocabulary".
-    Adt(AdtId),
+    /// Handle to an ADT plus its type-arguments. For non-generic ADTs
+    /// `args` is `vec![]`. For generic ADTs, the args list saturates the
+    /// ADT's `generic_params` — both the **decl-form** `Adt(aid,
+    /// [Param(p0), Param(p1)])` (used inside the ADT's own body and for
+    /// hash-cons-shared field types) and the **instantiated form**
+    /// `Adt(aid, [i32, u8])` are valid; both are arity-correct and
+    /// distinct TyIds via interning. Structural data (fields, variants)
+    /// lives in `TypeckResults.adts[aid]`. **Arity invariant**:
+    /// `args.len() == cx.adts[aid].generic_params.len()` always — the
+    /// "have we substituted yet?" question is answered by Param-occurrence
+    /// in `args`, not by `args.is_empty()`. See `spec/08_ADT.md` and
+    /// spec/16_GENERIC.md §Typeck rules (extension).
+    Adt(AdtId, Vec<TyId>),
     /// `[T; N]` (sized — `Some(n)`) or `[T]` (unsized — `None`). The
     /// unified shape mirrors the `[T] ≡ [T; ∞]` mental model directly.
     /// `Array(_, None)` is rejected as a value type at typeck (E0269);
@@ -156,6 +165,12 @@ pub struct FnSig {
 pub struct AdtDef {
     pub name: String,
     pub kind: AdtKind,
+    /// Type parameters in declaration order. Empty for non-generic ADTs.
+    /// Each `ParamId` is 1:1 with HIR's `HTyParamId` via
+    /// `ParamId::from_raw(htypid.raw())`. Same convention as
+    /// `FnSig.generic_params`. See spec/16_GENERIC.md §Typeck rules
+    /// (extension).
+    pub generic_params: Vec<ParamId>,
     pub variants: IndexVec<VariantIdx, VariantDef>,
     pub partial: bool,
 }
@@ -171,6 +186,25 @@ pub struct FieldDef {
     pub name: String,
     pub ty: TyId,
     pub span: Span,
+}
+
+/// Build a `Param → TyId` substitution by zipping a parameter list
+/// with its concrete type arguments. Used in 7 sites across typeck,
+/// codegen, and the recursive-ADT walk; the pattern is always
+/// `params.iter().copied().zip(args.iter().copied()).collect()`.
+/// Both slices must have equal length — every caller is on a path
+/// where arity is already enforced (E0275 at infer, invariant at
+/// codegen). Debug-asserts on mismatch. See spec/16_GENERIC.md §Typeck
+/// rules (extension) "arity invariant".
+pub fn subst_from(params: &[ParamId], args: &[TyId]) -> HashMap<ParamId, TyId> {
+    debug_assert_eq!(
+        params.len(),
+        args.len(),
+        "subst_from: params/args arity mismatch ({} vs {})",
+        params.len(),
+        args.len()
+    );
+    params.iter().copied().zip(args.iter().copied()).collect()
 }
 
 /// Hash-cons interner. Plain ownership — `intern` takes `&mut self`.
@@ -345,10 +379,18 @@ impl TyArena {
             // so a future variant addition forces a compile error here
             // rather than silently breaking substitution.
             TyKind::Prim(_) | TyKind::Unit | TyKind::Never | TyKind::Error => ty,
-            // ADTs are non-generic in v0 (no `Vec<T>` etc.). When generic
-            // ADTs land they become `Adt(aid, type_args)` and this arm
-            // gains a recursion over `type_args`.
-            TyKind::Adt(_) => ty,
+            // Generic ADTs: recurse into args. Non-generic ADTs (empty
+            // args) take the fast-path leaf return — no Vec allocation,
+            // no re-intern. See spec/16_GENERIC.md §Typeck rules
+            // (extension).
+            TyKind::Adt(_, ref args) if args.is_empty() => ty,
+            TyKind::Adt(aid, args) => {
+                let new_args: Vec<TyId> = args
+                    .iter()
+                    .map(|&a| self.substitute_ty(a, subst))
+                    .collect();
+                self.intern(TyKind::Adt(aid, new_args))
+            }
             // Signatures never carry Infer (decl phase resolves them to
             // concrete or Param). Pass through defensively; if reached,
             // it's a Phase C bug worth surfacing later.
@@ -410,7 +452,15 @@ impl TyArena {
             // Bare arena rendering doesn't have access to the AdtDef table —
             // print just the identity. A future `TypeckResults`-aware
             // Printer can resolve the name. See spec/08_ADT.md "Render".
-            TyKind::Adt(aid) => format!("Adt({})", aid.raw()),
+            TyKind::Adt(aid, args) => {
+                if args.is_empty() {
+                    format!("Adt({})", aid.raw())
+                } else {
+                    let rendered: Vec<String> =
+                        args.iter().map(|&a| self.render(a)).collect();
+                    format!("Adt({}, [{}])", aid.raw(), rendered.join(", "))
+                }
+            }
             TyKind::Array(elem, None) => format!("[{}]", self.render(*elem)),
             TyKind::Array(elem, Some(n)) => format!("[{}; {}]", self.render(*elem), n),
             TyKind::Infer(id) => format!("?T{}", id.raw()),

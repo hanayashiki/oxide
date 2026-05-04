@@ -1,0 +1,19 @@
+== ir ==
+; ModuleID = 'jit'
+source_filename = "jit"
+
+%"LinkedList<i32>" = type { i32, ptr }
+
+define i32 @main() {
+allocas:
+  %head.0.slot = alloca %"LinkedList<i32>", align 8
+  br label %body
+
+body:                                             ; preds = %allocas
+  store %"LinkedList<i32>" { i32 42, ptr null }, ptr %head.0.slot, align 8
+  %fld.gep = getelementptr inbounds %"LinkedList<i32>", ptr %head.0.slot, i32 0, i32 0
+  %fld.load = load i32, ptr %fld.gep, align 4
+  ret i32 %fld.load
+}
+== result ==
+42

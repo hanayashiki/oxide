@@ -26,7 +26,9 @@ use crate::hir::HAdtId;
 use crate::reporter::Span;
 
 use super::super::error::{ParamOrReturn, SizedPos, TypeError};
-use super::super::ty::{AdtDef, AdtId, FieldDef, FnSig, ParamId, TyId, TyKind, VariantDef};
+use super::super::ty::{
+    AdtDef, AdtId, FieldDef, FnSig, ParamId, TyId, TyKind, VariantDef, subst_from,
+};
 use super::Checker;
 use super::obligation::Obligation;
 
@@ -37,20 +39,44 @@ pub(super) fn resolve_decls(cx: &mut Checker<'_>) {
     resolve_fn_sigs(cx);
 }
 
-/// Phase 0 — push an `AdtDef` stub per HIR adt and pre-intern its
-/// `TyKind::Adt(aid)`. The `IndexVec` order is HAdtId-aligned so
-/// `AdtId::from_raw(haid.raw())` is the lookup throughout.
-/// FIXME: do not assume they are equal!
+/// Phase 0 — push an `AdtDef` stub per HIR adt, allocate `ParamId`s
+/// for its generic params, and pre-intern its **declaration form**
+/// `Adt(aid, [Param(p0), Param(p1), ...])`. The `IndexVec` order is
+/// HAdtId-aligned so `AdtId::from_raw(haid.raw())` is the lookup
+/// throughout, and `ParamId::from_raw(htypid.raw())` mirrors HIR's
+/// `HTyParamId` 1:1.
+///
+/// Pre-interning the declaration form (rather than `Adt(aid, [])`) is
+/// load-bearing for non-generic and generic ADTs alike: field types
+/// inside `LinkedList<T>`'s body reference `Adt(ll_aid, [Param(T)])`
+/// directly via Phase 0.5's `resolve_ty`. Hash-cons makes the
+/// declaration form and any field-type-recovery shape share TyIds.
+/// For non-generic ADTs the args list is `[]` and the form collapses
+/// to today's behavior. See spec/16_GENERIC.md §Typeck rules
+/// (extension).
+/// FIXME: do not assume HAdtId == AdtId raw!
 fn alloc_partial_adts(cx: &mut Checker<'_>) {
     for hir_adt in cx.hir.adts.iter() {
+        // 1:1 ParamId allocation, mirrors HTyParamId numbering.
+        let generic_params: Vec<ParamId> = hir_adt
+            .generic_params
+            .iter()
+            .map(|hid| ParamId::from_raw(hid.raw()))
+            .collect();
         let aid = cx.adts.push(AdtDef {
             name: hir_adt.name.clone(),
             kind: hir_adt.kind,
+            generic_params: generic_params.clone(),
             variants: IndexVec::new(),
             partial: true,
         });
-        // Pre-intern the identity so resolve_ty in phase 0.5 / 1 hits.
-        let _ = cx.tys.intern(TyKind::Adt(aid));
+        // Pre-intern the declaration form. Empty args for non-generic
+        // ADTs; `[Param(p0), ...]` for generic ones.
+        let arg_tys: Vec<TyId> = generic_params
+            .iter()
+            .map(|&pid| cx.tys.intern(TyKind::Param(pid)))
+            .collect();
+        let _ = cx.tys.intern(TyKind::Adt(aid, arg_tys));
     }
 }
 
@@ -102,76 +128,142 @@ fn resolve_adt_fields(cx: &mut Checker<'_>) {
 }
 
 /// Phase 0.6 — reject ADTs whose field-type graph contains a cycle
-/// without a `Ptr` indirection layer. `Ptr(_, _)` lowers to opaque
-/// `ptr` and breaks the cycle (the pointee isn't entered
-/// structurally); `Array(T, Some(_))` propagates through `T`; every
-/// other `TyKind` is a leaf for this purpose.
+/// without a `Ptr` indirection layer.
 ///
-/// Tri-color DFS over the ADT graph: white = unvisited,
-/// gray = currently on the DFS stack, black = fully explored. A gray
-/// child is a back-edge — the cycle closes there. Emit one
-/// `RecursiveAdt` per back-edge with the offending field's span. See
-/// spec/08_ADT.md "Recursive type rejection" and
-/// spec/BACKLOG/B013_RECURSIVE_ADT_ACCEPTED.md.
+/// **Algorithm**: tri-color DFS over **substituted** types, driven once
+/// per ADT as the start. For each `Adt(child, args)` encountered,
+/// substitute `child`'s decl-time fields with `args` and recurse into
+/// the substituted body. The "occurs check" is a `gray` set of AdtIds
+/// on the current walk path — encountering an aid already in `gray`
+/// is a back-edge and emits `RecursiveAdt`. A `visited` set on
+/// `(AdtId, Vec<TyId>)` deduplicates branches.
+///
+/// **Termination**: gray's depth is bounded by `|adts|` (any second
+/// encounter of an aid fires cycle and returns immediately); visited
+/// grows monotonically, but each new entry advances the walk by one
+/// substituted step. Growing-args divergence (e.g., `struct S<T> {
+/// inner: S<*mut T> }`) is absorbed by the gray-set: the very first
+/// visit to S, while still gray, fires cycle on the inner `Adt(s, _)`
+/// regardless of args shape.
+///
+/// **Why "over substituted types" and not the static decl graph**: the
+/// naive walk-static-edges approach over-rejects valid programs like
+/// `struct B<T> { y: *mut T } / struct A { x: B<A> }` (B uses T only
+/// via Ptr, so `B<A>` = `{ y: *mut A }` is finite — but a static walk
+/// of A's fields would push `a` from B's args list without knowing
+/// that B uses T pointer-only). Substituting B's body before walking
+/// makes the Ptr arm cleanly break the cycle.
+///
+/// `Ptr(_, _)` skips (pointer breaks cycle); `Array(T, Some(_))` walks
+/// `T`; every other leaf TyKind is a non-edge. See spec/16_GENERIC.md
+/// §Typeck rules (extension), spec/08_ADT.md "Recursive type
+/// rejection".
 fn check_recursive_adts(cx: &mut Checker<'_>) {
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Color {
-        White,
-        Gray,
-        Black,
-    }
+    use std::collections::HashSet;
 
-    let mut color: IndexVec<AdtId, Color> =
-        IndexVec::from_vec(vec![Color::White; cx.adts.len()]);
+    // Track ADTs already known to participate in a cycle; skip them as
+    // start nodes to avoid noisy duplicate diagnostics for mutual
+    // cycles (`A → B → A` would otherwise emit two errors, one for
+    // each start).
+    let mut already_flagged: HashSet<AdtId> = HashSet::new();
 
     for raw in 0..cx.adts.len() {
-        let aid = AdtId::from_raw(raw as u32);
-        if color[aid] == Color::White {
-            visit(cx, aid, &mut color);
+        let start_aid = AdtId::from_raw(raw as u32);
+        if already_flagged.contains(&start_aid) {
+            continue;
+        }
+        let mut gray: HashSet<AdtId> = HashSet::new();
+        let mut visited: HashSet<(AdtId, Vec<TyId>)> = HashSet::new();
+        gray.insert(start_aid);
+        let fields_to_walk: Vec<(TyId, Span)> = cx.adts[start_aid]
+            .variants
+            .iter()
+            .flat_map(|v| v.fields.iter().map(|f| (f.ty, f.span.clone())))
+            .collect();
+        let errors_before = cx.errors.len();
+        for (field_ty, field_span) in fields_to_walk {
+            check_field(
+                cx,
+                start_aid,
+                field_ty,
+                &field_span,
+                &mut gray,
+                &mut visited,
+            );
+        }
+        // If this start emitted any cycle, the entire SCC participating
+        // in the cycle is now in `visited` (transitively, every
+        // (aid, args) we explored). Mark those AdtIds as already
+        // flagged so we don't re-report the cycle from another entry
+        // point.
+        if cx.errors.len() > errors_before {
+            for (aid, _) in &visited {
+                already_flagged.insert(*aid);
+            }
         }
     }
 
-    fn visit(cx: &mut Checker<'_>, a: AdtId, color: &mut IndexVec<AdtId, Color>) {
-        color[a] = Color::Gray;
-        // Snapshot the outgoing edges before recursing — the call to
-        // `visit(cx, ...)` needs `&mut cx`, which conflicts with a
-        // live `&cx.adts` borrow held by an iterator.
-        let edges = collect_adt_edges(cx, a);
-        for (child, field_span) in edges {
-            match color[child] {
-                Color::Gray => {
-                    let name = cx.adts[a].name.clone();
+    /// `cur_outer_aid` is the *most recently entered* ADT — the one
+    /// whose substituted body we're currently walking. When a back-edge
+    /// fires, the diagnostic is attributed to this ADT (not to
+    /// `start_aid`) so the message points at the cycle's discovery
+    /// frame, matching the prior tri-color-DFS attribution. For the
+    /// initial call from the start ADT's own fields, `cur_outer_aid`
+    /// is `start_aid`.
+    fn check_field(
+        cx: &mut Checker<'_>,
+        cur_outer_aid: AdtId,
+        ty: TyId,
+        span: &Span,
+        gray: &mut std::collections::HashSet<AdtId>,
+        visited: &mut std::collections::HashSet<(AdtId, Vec<TyId>)>,
+    ) {
+        // Clone to release the `&cx.tys` borrow before any recursive
+        // call that might mutate `cx.tys` via `substitute_ty`.
+        let kind = cx.tys.kind(ty).clone();
+        match kind {
+            TyKind::Adt(child, args) => {
+                if gray.contains(&child) {
+                    // Back-edge — cycle closes here. Attribute to the
+                    // current outer ADT.
+                    let name = cx.adts[cur_outer_aid].name.clone();
                     cx.errors.push(TypeError::RecursiveAdt {
                         adt: name,
-                        span: field_span,
+                        span: span.clone(),
                     });
+                    return;
                 }
-                Color::White => visit(cx, child, color),
-                Color::Black => {}
-            }
-        }
-        color[a] = Color::Black;
-    }
+                let key = (child, args.clone());
+                if visited.contains(&key) {
+                    return;
+                }
+                visited.insert(key);
+                gray.insert(child);
 
-    fn collect_adt_edges(cx: &Checker<'_>, a: AdtId) -> Vec<(AdtId, Span)> {
-        let mut out = Vec::new();
-        for variant in &cx.adts[a].variants {
-            for field in &variant.fields {
-                walk_ty(cx, field.ty, &field.span, &mut out);
-            }
-        }
-        out
-    }
+                let child_subst = subst_from(&cx.adts[child].generic_params, &args);
+                let child_field_tys: Vec<(TyId, Span)> = cx.adts[child]
+                    .variants
+                    .iter()
+                    .flat_map(|v| v.fields.iter().map(|f| (f.ty, f.span.clone())))
+                    .collect();
+                for (field_ty, field_span) in child_field_tys {
+                    let substituted = cx.tys.substitute_ty(field_ty, &child_subst);
+                    // `cur_outer_aid` advances to `child` for the
+                    // recursive walk of child's body — that's the
+                    // ADT whose body discovered the next edge.
+                    check_field(cx, child, substituted, &field_span, gray, visited);
+                }
 
-    fn walk_ty(cx: &Checker<'_>, ty: TyId, span: &Span, out: &mut Vec<(AdtId, Span)>) {
-        match cx.tys.kind(ty) {
-            TyKind::Adt(child) => out.push((*child, span.clone())),
-            TyKind::Array(elem, Some(_)) => walk_ty(cx, *elem, span, out),
-            // Ptr breaks the cycle; Prim / Unit / Never / Fn / Infer /
-            // Error don't contribute edges. Unsized arrays
-            // (Array(_, None)) at field position are rejected earlier
-            // by the Sized obligation (E0269), but treating them as
-            // non-edges here is harmless.
+                gray.remove(&child);
+            }
+            TyKind::Ptr(_, _) => {
+                // Pointer breaks the cycle.
+            }
+            TyKind::Array(elem, Some(_)) => {
+                check_field(cx, cur_outer_aid, elem, span, gray, visited);
+            }
+            // Prim, Unit, Never, Param, Infer, Fn, Array(_, None), Error
+            // don't contribute edges.
             _ => {}
         }
     }

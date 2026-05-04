@@ -115,6 +115,16 @@ impl<'a> Printer<'a> {
         self.begin_line();
         self.write("Struct ");
         self.write(&s.name.name);
+        if !s.generic_params.is_empty() {
+            self.write("<");
+            for (i, p) in s.generic_params.iter().enumerate() {
+                if i > 0 {
+                    self.write(", ");
+                }
+                self.write(&p.name);
+            }
+            self.write(">");
+        }
         self.end_line();
         self.indent += 1;
         for f in &s.fields {
@@ -405,9 +415,23 @@ impl<'a> Printer<'a> {
                 self.write(".");
                 self.write(&name.name);
             }
-            ExprKind::StructLit { name, fields } => {
+            ExprKind::StructLit {
+                name,
+                type_args,
+                fields,
+            } => {
                 self.write("StructLit ");
                 self.write(&name.name);
+                if !type_args.is_empty() {
+                    self.write("::<");
+                    for (i, t) in type_args.iter().enumerate() {
+                        if i > 0 {
+                            self.write(", ");
+                        }
+                        self.write_type(*t);
+                    }
+                    self.write(">");
+                }
                 self.write(" {");
                 for (i, f) in fields.iter().enumerate() {
                     if i > 0 {
@@ -503,7 +527,19 @@ impl<'a> Printer<'a> {
     fn write_type(&mut self, tid: TypeId) {
         let kind = self.m.types[tid].kind.clone();
         match &kind {
-            TypeKind::Named(id) => self.write(&id.name),
+            TypeKind::Named { name, type_args } => {
+                self.write(&name.name);
+                if !type_args.is_empty() {
+                    self.write("<");
+                    for (i, t) in type_args.iter().enumerate() {
+                        if i > 0 {
+                            self.write(", ");
+                        }
+                        self.write_type(*t);
+                    }
+                    self.write(">");
+                }
+            }
             TypeKind::Ptr { mutability, pointee } => {
                 self.write("*");
                 self.write(mutability.as_str());

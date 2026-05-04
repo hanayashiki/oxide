@@ -256,17 +256,32 @@ fn lower_fixture(
 /// Safety: the caller asserts the function's actual return type matches
 /// `R`. A mismatch here is undefined behaviour.
 pub unsafe fn jit_run_with_ir<R: Copy + 'static>(src: &str, entry: &str) -> (String, R) {
-    let (_map, file) = make_map("<jit>", src);
+    let (map, file) = make_map("<jit>", src);
     let tokens = lex(src, file);
     let (ast, parse_errs) = parse(&tokens, file);
     assert!(parse_errs.is_empty(), "parse errors: {parse_errs:#?}");
     let (hir, hir_errs) = lower(&ast);
-    assert!(hir_errs.is_empty(), "hir errors: {hir_errs:#?}");
+    if !hir_errs.is_empty() {
+        let diags: Vec<_> = hir_errs.iter().map(from_hir_error).collect();
+        panic!("hir errors:\n{}", render_diagnostics(&diags, &map));
+    }
     let (mut results, type_errs) = check(&hir);
-    assert!(type_errs.is_empty(), "type errors: {type_errs:#?}");
+    if !type_errs.is_empty() {
+        let diags: Vec<_> = type_errs
+            .iter()
+            .map(|e| from_typeck_error(e, file, &results.tys))
+            .collect();
+        panic!("type errors:\n{}", render_diagnostics(&diags, &map));
+    }
 
     let (mono, mono_errs) = monomorphize(&hir, &mut results);
-    assert!(mono_errs.is_empty(), "mono errors: {mono_errs:#?}");
+    if !mono_errs.is_empty() {
+        let diags: Vec<_> = mono_errs
+            .iter()
+            .map(|e| from_mono_error(e, file, &hir, &results.tys))
+            .collect();
+        panic!("mono errors:\n{}", render_diagnostics(&diags, &map));
+    }
 
     let ctx = Context::create();
     let module = codegen(&ctx, &hir, &mut results, &mono, "jit");
@@ -300,7 +315,7 @@ pub unsafe fn jit_run<R: Copy + 'static>(src: &str, entry: &str) -> R {
 /// on the resulting `Module` and the text is returned verbatim — already
 /// trailing-newline terminated.
 pub fn render_codegen(file_name: &str, src: &str) -> String {
-    let (_map, file) = make_map(file_name, src);
+    let (map, file) = make_map(file_name, src);
     let tokens = lex(src, file);
     let (ast, parse_errs) = parse(&tokens, file);
     assert!(
@@ -308,21 +323,36 @@ pub fn render_codegen(file_name: &str, src: &str) -> String {
         "parse errors in {file_name}: {parse_errs:#?}"
     );
     let (hir, hir_errs) = lower(&ast);
-    assert!(
-        hir_errs.is_empty(),
-        "hir errors in {file_name}: {hir_errs:#?}"
-    );
+    if !hir_errs.is_empty() {
+        let diags: Vec<_> = hir_errs.iter().map(from_hir_error).collect();
+        panic!(
+            "hir errors in {file_name}:\n{}",
+            render_diagnostics(&diags, &map)
+        );
+    }
     let (mut results, type_errs) = check(&hir);
-    assert!(
-        type_errs.is_empty(),
-        "type errors in {file_name}: {type_errs:#?}"
-    );
+    if !type_errs.is_empty() {
+        let diags: Vec<_> = type_errs
+            .iter()
+            .map(|e| from_typeck_error(e, file, &results.tys))
+            .collect();
+        panic!(
+            "type errors in {file_name}:\n{}",
+            render_diagnostics(&diags, &map)
+        );
+    }
 
     let (mono, mono_errs) = monomorphize(&hir, &mut results);
-    assert!(
-        mono_errs.is_empty(),
-        "mono errors in {file_name}: {mono_errs:#?}"
-    );
+    if !mono_errs.is_empty() {
+        let diags: Vec<_> = mono_errs
+            .iter()
+            .map(|e| from_mono_error(e, file, &hir, &results.tys))
+            .collect();
+        panic!(
+            "mono errors in {file_name}:\n{}",
+            render_diagnostics(&diags, &map)
+        );
+    }
 
     let ctx = Context::create();
     let module = codegen(&ctx, &hir, &mut results, &mono, "test");
@@ -350,15 +380,24 @@ pub fn render_mono(file_name: &str, src: &str) -> String {
         "parse errors in {file_name}: {parse_errs:#?}"
     );
     let (hir, hir_errs) = lower(&ast);
-    assert!(
-        hir_errs.is_empty(),
-        "hir errors in {file_name}: {hir_errs:#?}"
-    );
+    if !hir_errs.is_empty() {
+        let diags: Vec<_> = hir_errs.iter().map(from_hir_error).collect();
+        panic!(
+            "hir errors in {file_name}:\n{}",
+            render_diagnostics(&diags, &map)
+        );
+    }
     let (mut results, type_errs) = check(&hir);
-    assert!(
-        type_errs.is_empty(),
-        "type errors in {file_name}: {type_errs:#?}"
-    );
+    if !type_errs.is_empty() {
+        let diags: Vec<_> = type_errs
+            .iter()
+            .map(|e| from_typeck_error(e, file, &results.tys))
+            .collect();
+        panic!(
+            "type errors in {file_name}:\n{}",
+            render_diagnostics(&diags, &map)
+        );
+    }
 
     // Tests use a small depth_limit to keep the output manageable
     let (mono, mono_errs) = monomorphize_with_limit(&hir, &mut results, 8);

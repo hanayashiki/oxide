@@ -1,0 +1,13 @@
+== diagnostics ==
+== instances ==
+Inst[0] mangled=main depth=0 origin=EntryPoint
+Inst[1] mangled=level_a__$i32 depth=1 origin=Inst[0]
+Inst[2] mangled=level_b__$mutptr_$i32 depth=2 origin=Inst[1]
+Inst[3] mangled=level_c__$mutptr_$mutptr_$i32 depth=3 origin=Inst[2]
+Inst[4] mangled=level_d__$mutptr_$mutptr_$mutptr_$i32 depth=4 origin=Inst[3]
+== sig ==
+Inst[0] params=[] ret=()
+Inst[1] params=[] ret=()
+Inst[2] params=[] ret=()
+Inst[3] params=[] ret=()
+Inst[4] params=[] ret=()

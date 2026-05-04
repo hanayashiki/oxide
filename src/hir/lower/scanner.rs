@@ -215,7 +215,7 @@ impl Scanner {
                         Vec::with_capacity(fn_decl.generic_params.len());
                     for (idx, gp_ident) in fn_decl.generic_params.iter().enumerate() {
                         let tpid = self.items.ty_params.push(TyParamInfo {
-                            owner: fn_id,
+                            owner: TyParamOwner::Fn(fn_id),
                             idx_in_owner: idx as u32,
                             name: gp_ident.name.clone(),
                             span: gp_ident.span.clone(),
@@ -288,6 +288,25 @@ impl Scanner {
                     });
                     // Field decls captured for `seal_adts`.
                     self.adt_field_decls.push(struct_decl.fields.clone());
+
+                    // Mint HTyParamIds for the ADT's generic params,
+                    // mirror of the fn arm above. Done at prescan
+                    // because `seal_adts` (Pass 4a) lowers field types
+                    // and needs the IDs allocated to build a per-ADT
+                    // `TyParamScope`. See spec/16_GENERIC.md §HIR
+                    // (extension).
+                    let mut generic_params =
+                        Vec::with_capacity(struct_decl.generic_params.len());
+                    for (idx, gp_ident) in struct_decl.generic_params.iter().enumerate() {
+                        let tpid = self.items.ty_params.push(TyParamInfo {
+                            owner: TyParamOwner::Adt(adt_id),
+                            idx_in_owner: idx as u32,
+                            name: gp_ident.name.clone(),
+                            span: gp_ident.span.clone(),
+                        });
+                        generic_params.push(tpid);
+                    }
+                    self.items.adts[adt_id].generic_params = generic_params;
 
                     if let Some(displaced_adt_id) = self
                         .get_local_scope_mut(file.file)
@@ -405,9 +424,16 @@ impl Scanner {
     }
 
     /// Pass 4a: lower each ADT's field types under its origin file's
-    /// resolution scope. Walks all ADTs in `HAdtId` (= prescan = source)
-    /// order. `DuplicateField` recovery skips the duplicate but keeps
+    /// resolution scope and the ADT's own generic-param scope. Walks
+    /// all ADTs in `HAdtId` (= prescan = source) order.
+    /// `DuplicateField` recovery skips the duplicate but keeps
     /// subsequent fields.
+    ///
+    /// The per-ADT type-param scope is built from `HirAdt.generic_params`
+    /// (minted in prescan). This is what makes `value: T` inside
+    /// `struct LinkedList<T> { value: T, ... }` lower to
+    /// `HirTyKind::Param(tpid)` rather than `Named("T")`. See
+    /// spec/16_GENERIC.md §HIR (extension).
     fn seal_adts(&mut self, files: &IndexVec<FileId, LoadedFile>) {
         // Move out so iteration doesn't alias self.items.adts when we
         // push variants back.
@@ -421,12 +447,28 @@ impl Scanner {
                 .expect("file scope built in passes 1+2");
             let adt_name = self.items.adts[haid].name.clone();
 
+            // Build per-ADT TyParamScope from the ADT's generic_params.
+            // Empty for non-generic ADTs.
+            let ty_param_pairs: Vec<(String, HTyParamId)> = self.items.adts[haid]
+                .generic_params
+                .iter()
+                .map(|&tpid| {
+                    let info = &self.items.ty_params[tpid];
+                    (info.name.clone(), tpid)
+                })
+                .collect();
+            let ty_params_scope = ty::TyParamScope(&ty_param_pairs);
+
             let mut fields: IndexVec<FieldIdx, HirField> = IndexVec::new();
             let mut seen: HashMap<String, Span> = HashMap::new();
             for fd in decls {
-                // ADT fields aren't inside a generic-fn body, so no
-                // type-param scope. spec/16 doesn't add generic ADTs in v0.
-                let lowered_ty = ty::lower_ty(&lf.ast, scope, ty::TyParamScope::empty(), fd.ty);
+                let lowered_ty = ty::lower_ty(
+                    &lf.ast,
+                    scope,
+                    ty_params_scope,
+                    &mut self.errors.borrow_mut(),
+                    fd.ty,
+                );
                 if let Some(first_span) = seen.get(&fd.name.name) {
                     self.emit_error(HirError::DuplicateField {
                         adt: adt_name.clone(),

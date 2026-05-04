@@ -66,6 +66,13 @@ pub enum HirError {
     /// contradictory `is_extern && !generic_params.is_empty()` state.
     /// See spec/16_GENERIC.md §HIR.
     GenericExternFn { name: String, span: Span },
+    /// `T<X>` in a type position where `T` is already bound as a
+    /// generic param. Type params have arity 0 in v0 (no HKT); applying
+    /// arguments to a param is meaningless. **Recovery**: the type
+    /// position becomes `HirTyKind::Error`; driver short-circuits on
+    /// any HirError. Same shape as `GenericExternFn`. See
+    /// spec/16_GENERIC.md §HIR (extension).
+    TypeParamWithArgs { name: String, span: Span },
 }
 
 impl HirError {
@@ -81,7 +88,8 @@ impl HirError {
             | Self::BodylessFnOutsideExtern { span, .. }
             | Self::ExternFnHasBody { span, .. }
             | Self::UnsupportedExternItem { span, .. }
-            | Self::GenericExternFn { span, .. } => span,
+            | Self::GenericExternFn { span, .. }
+            | Self::TypeParamWithArgs { span, .. } => span,
             Self::DuplicateFn { dup, .. }
             | Self::DuplicateAdt { dup, .. }
             | Self::DuplicateField { dup, .. }

@@ -1,0 +1,18 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `u8`, found `i32`
+   ╭─[ error_generic_fn_constraint_contradiction.ox:6:16 ]
+   │
+ 6 │     f(1 as u8, 2 as i32);
+   │                ────┬───  
+   │                    ╰───── type mismatch here
+───╯
+== types ==
+Fn[0] f<Param(0)>(x[Local(0)]: Param(0), y[Local(1)]: Param(0)) -> Param(0)
+  HExprId(0) : Param(0)
+Fn[1] main() -> ()
+  HExprId(1) : fn(Param(0), Param(0)) -> Param(0)
+  HExprId(2) : i32
+  HExprId(3) : u8
+  HExprId(4) : i32
+  HExprId(5) : i32
+  HExprId(6) : u8  call_type_args=[u8]

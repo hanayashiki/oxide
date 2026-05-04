@@ -1,0 +1,14 @@
+== diagnostics ==
+== types ==
+Fn[0] pair<Param(0)>(a[Local(0)]: Param(0), b[Local(1)]: Param(0)) -> Param(0)
+  HExprId(0) : Param(0)
+Fn[1] outer<Param(1)>(x[Local(2)]: Param(1), y[Local(3)]: Param(1)) -> Param(1)
+  HExprId(1) : fn(Param(0), Param(0)) -> Param(0)
+  HExprId(2) : Param(1)
+  HExprId(3) : Param(1)
+  HExprId(4) : Param(1)  call_type_args=[Param(1)]
+Fn[2] main() -> i32
+  HExprId(5) : fn(Param(1), Param(1)) -> Param(1)
+  HExprId(6) : i32
+  HExprId(7) : i32
+  HExprId(8) : i32  call_type_args=[i32]

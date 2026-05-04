@@ -77,7 +77,26 @@ where
     // an expr first, then a type". Bind to `_` to silence the warning.
     let _ = expr;
     recursive(|ty| {
-        let named = ident_parser().map_with(|name, e| e.push_type(TypeKind::Named(name)));
+        // `Name<T, U, ...>` — named type with optional type-arg list.
+        // Empty `<>` is accepted and produces `vec![]` (matches Rust),
+        // and the bracket list as a whole is `or_not`-ed so a bare
+        // `Name` collapses to the same `vec![]` shape downstream.
+        // See spec/16_GENERIC.md §Surface syntax (extension).
+        //
+        // No `::` required in type position — the type grammar has no
+        // `<` operator, so `Name<T>` is unambiguous (unlike expression
+        // position where `name<T>(args)` parses as a comparison).
+        let type_args = ty
+            .clone()
+            .separated_by(just(TokenKind::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(TokenKind::Lt), just(TokenKind::Gt))
+            .or_not()
+            .map(|opt| opt.unwrap_or_default());
+        let named = ident_parser()
+            .then(type_args)
+            .map_with(|(name, type_args), e| e.push_type(TypeKind::Named { name, type_args }));
 
         // `*const T` / `*mut T`. Right-recursive on `ty` for nesting.
         let mutability = choice((
@@ -371,6 +390,7 @@ where
     I: OValueInput<'a>,
     PE: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
 {
+    let ty = type_parser(expr.clone());
     let field = ident_parser()
         .then_ignore(just(TokenKind::Colon))
         .then(expr)
@@ -379,7 +399,24 @@ where
             value,
             span: e.lex_span(),
         });
+    // Turbofish type-args `::<T, U>`. Empty `::<>` is accepted and
+    // produces `vec![]` — matches Rust, equivalent to no turbofish.
+    // The `or_not().unwrap_or_default()` collapses three source forms
+    // (no turbofish, `::<>`, `::<T,...>`) into a single `Vec<TypeId>`.
+    // The `::` is mandatory (matches Rust); without it, `Name<T>{...}`
+    // parses as a comparison and fails on the trailing `{`.
+    // See spec/16_GENERIC.md §Surface syntax (extension).
+    let turbofish = just(TokenKind::ColonColon)
+        .ignore_then(
+            ty.separated_by(just(TokenKind::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(TokenKind::Lt), just(TokenKind::Gt)),
+        )
+        .or_not()
+        .map(|opt| opt.unwrap_or_default());
     ident_parser()
+        .then(turbofish)
         .then(
             field
                 .separated_by(just(TokenKind::Comma))
@@ -387,7 +424,13 @@ where
                 .collect::<Vec<_>>()
                 .delimited_by(just(TokenKind::LBrace), just(TokenKind::RBrace)),
         )
-        .map_with(|(name, fields), e| e.push_expr(ExprKind::StructLit { name, fields }))
+        .map_with(|((name, type_args), fields), e| {
+            e.push_expr(ExprKind::StructLit {
+                name,
+                type_args,
+                fields,
+            })
+        })
 }
 
 /// Array literals: `[a, b, c]` (Elems) or `[init; N]` (Repeat).
@@ -1049,8 +1092,21 @@ where
             span: e.lex_span(),
         });
 
+    // Generic parameter list `<T, U, ...>`. Same shape as
+    // `fn_decl_parser` — empty `<>` is accepted, missing brackets also
+    // collapse to `vec![]`. See spec/16_GENERIC.md §Surface syntax
+    // (extension).
+    let generic_params = ident_parser()
+        .separated_by(just(TokenKind::Comma))
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(TokenKind::Lt), just(TokenKind::Gt))
+        .or_not()
+        .map(|opt| opt.unwrap_or_default());
+
     just(TokenKind::KwStruct)
         .ignore_then(ident_parser())
+        .then(generic_params)
         .then(
             field_decl
                 .separated_by(just(TokenKind::Comma))
@@ -1058,9 +1114,14 @@ where
                 .collect::<Vec<_>>()
                 .delimited_by(just(TokenKind::LBrace), just(TokenKind::RBrace)),
         )
-        .map_with(|(name, fields), e| {
+        .map_with(|((name, generic_params), fields), e| {
             let span = e.lex_span();
-            e.push_item(ItemKind::Struct(StructDecl { name, fields, span }))
+            e.push_item(ItemKind::Struct(StructDecl {
+                name,
+                generic_params,
+                fields,
+                span,
+            }))
         })
         .labelled("struct declaration")
 }

@@ -23,11 +23,11 @@ use crate::hir::{
 };
 use crate::mono::{InstId, MonoResults};
 use crate::parser::ast::{AssignOp, BinOp, UnOp};
-use crate::typeck::{AdtId, ParamId, PrimTy, TyId, TyKind, TypeckResults};
+use crate::typeck::{AdtId, ParamId, PrimTy, TyId, TyKind, TypeckResults, subst_from};
 
 use super::ty::{
-    AdtLlTypes, as_prim, is_signed_prim, is_void_ret, lower_fn_type, lower_prim, lower_ty,
-    prepare_adt_types,
+    AdtLlTypes, as_prim, is_signed_prim, is_void_ret, lower_adt_type, lower_fn_type, lower_prim,
+    lower_ty,
 };
 
 /// Lower an entire `HirProgram` to an LLVM `Module`. Consumes mono's
@@ -66,9 +66,11 @@ pub fn codegen<'ctx>(
     let module = ctx.create_module(module_name);
     let builder = ctx.create_builder();
 
-    // Phase A — pre-allocate one LLVM struct type per ADT (opaque),
-    // then phase B set_body recursively. Mirrors typeck's phase 0/0.5.
-    let adt_ll = prepare_adt_types(ctx, typeck_results);
+    // ADT struct types are materialized **lazily** keyed on
+    // `(AdtId, Vec<TyId>)` — see spec/16_GENERIC.md §Codegen
+    // (extension). The cache starts empty; each `lower_ty(_, Adt(aid,
+    // args))` call interns the LLVM type on first encounter.
+    let mut adt_ll: AdtLlTypes<'ctx> = AdtLlTypes::new();
 
     // Phase 1 Pass A — extern fns. Declared with their verbatim source
     // names (the linker resolves these against external object files).
@@ -78,20 +80,26 @@ pub fn codegen<'ctx>(
     // creates their FunctionValue.
     let mut fn_decls: IndexVec<FnId, Option<FunctionValue<'ctx>>> =
         (0..hir.fns.len()).map(|_| None).collect();
-    for (fid, hir_fn) in hir.fns.iter_enumerated() {
-        if hir_fn.is_extern {
+    // Snapshot extern fn signatures into an owned `Vec` first: the
+    // emission loop calls `lower_fn_type(ctx, typeck_results, ...)`
+    // which needs `&mut typeck_results`, so it can't coexist with the
+    // `&FnSig` borrow that `typeck_results.fn_sig(fid)` would hand out
+    // inline. Same shape as the `typeck_args_opt` clone at the call-
+    // dispatch site below.
+    let extern_fns: Vec<(FnId, Vec<TyId>, TyId, bool)> = hir
+        .fns
+        .iter_enumerated()
+        .filter(|(_, h)| h.is_extern)
+        .map(|(fid, _)| {
             let sig = typeck_results.fn_sig(fid);
-            let fn_ty = lower_fn_type(
-                ctx,
-                typeck_results.tys(),
-                &adt_ll,
-                &sig.params,
-                sig.ret,
-                sig.c_variadic,
-            );
-            let fnv = module.add_function(&hir_fn.name, fn_ty, None);
-            fn_decls[fid] = Some(fnv);
-        }
+            (fid, sig.params.clone(), sig.ret, sig.c_variadic)
+        })
+        .collect();
+    for (fid, params, ret, c_variadic) in extern_fns {
+        let hir_fn = &hir.fns[fid];
+        let fn_ty = lower_fn_type(ctx, typeck_results, &mut adt_ll, &params, ret, c_variadic);
+        let fnv = module.add_function(&hir_fn.name, fn_ty, None);
+        fn_decls[fid] = Some(fnv);
     }
 
     // Phase 1 Pass B — instances. Each `Instance` from mono produces
@@ -108,8 +116,8 @@ pub fn codegen<'ctx>(
         let c_variadic = hir.fns[inst.fid].is_variadic;
         let fn_ty = lower_fn_type(
             ctx,
-            typeck_results.tys(),
-            &adt_ll,
+            typeck_results,
+            &mut adt_ll,
             &inst.params,
             inst.ret,
             c_variadic,
@@ -420,7 +428,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// is 1 — soundness-safe and lets LLVM choose the actual alignment via
     /// the operand types.
     fn emit_memcpy(&mut self, dst: PointerValue<'ctx>, src: PointerValue<'ctx>, ty: TyId) {
-        let ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, ty);
+        let ll = lower_ty(self.ctx, self.typeck_results, &mut self.adt_ll, ty);
         let size = ll.size_of().expect("type has size_of");
         self.builder
             .build_memcpy(dst, 1, src, 1, size)
@@ -458,7 +466,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         match op {
             Operand::Value(v) => v,
             Operand::Place(p) => {
-                let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, ty);
+                let llty = lower_ty(self.ctx, self.typeck_results, &mut self.adt_ll, ty);
                 self.builder.build_load(llty, p, name).unwrap()
             }
             Operand::Unit => self.ctx.struct_type(&[], false).get_undef().into(),
@@ -482,7 +490,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         ty: TyId,
         name: &str,
     ) -> PointerValue<'ctx> {
-        let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, ty);
+        let llty = lower_ty(self.ctx, self.typeck_results, &mut self.adt_ll, ty);
         let slot = self.alloca_in_entry(fx, llty, name);
         self.store_into(slot, op, ty);
         slot
@@ -543,17 +551,13 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         let fid = self.mono.instances[inst_id].fid;
         let fnv = self.inst_decls[inst_id];
 
-        // Build per-body subst. Borrow-zip — no clone of type_args.
-        // self.typeck_results.fn_sig and self.mono.instances are
-        // disjoint sub-objects of self, so the two `&` reads coexist.
-        let subst: HashMap<ParamId, TyId> = self
-            .typeck_results
-            .fn_sig(fid)
-            .generic_params
-            .iter()
-            .copied()
-            .zip(self.mono.instances[inst_id].type_args.iter().copied())
-            .collect();
+        // Build per-body subst. self.typeck_results.fn_sig and
+        // self.mono.instances are disjoint sub-objects of self, so the
+        // two `&` reads coexist.
+        let subst = subst_from(
+            &self.typeck_results.fn_sig(fid).generic_params,
+            &self.mono.instances[inst_id].type_args,
+        );
 
         // Two blocks at start: `allocas:` (the entry block) holds only
         // alloca instructions and falls through to `body:` via an
@@ -586,7 +590,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 fx.locals.insert(lid, arg.into_pointer_value());
                 continue;
             }
-            let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, pty);
+            let llty = lower_ty(self.ctx, self.typeck_results, &mut self.adt_ll, pty);
             let slot = self.alloca_in_entry(
                 &fx,
                 llty,
@@ -623,7 +627,11 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
     // ---------- blocks ----------
 
-    fn emit_block(&mut self, fx: &mut FnCodegenContext<'ctx>, bid: HBlockId) -> Option<Operand<'ctx>> {
+    fn emit_block(
+        &mut self,
+        fx: &mut FnCodegenContext<'ctx>,
+        bid: HBlockId,
+    ) -> Option<Operand<'ctx>> {
         // Clone the items vec so we don't borrow self.hir while emitting.
         let block = self.hir.blocks[bid].clone();
         let last_idx = block.items.len().checked_sub(1);
@@ -658,7 +666,11 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// guarantees the operand cannot be `!`-typed at this site. See
     /// spec/BACKLOG/B005_VOID_TYPES_CODEGEN_MODEL.md (Q3) for the
     /// motivation.
-    fn emit_expr(&mut self, fx: &mut FnCodegenContext<'ctx>, eid: HExprId) -> Option<Operand<'ctx>> {
+    fn emit_expr(
+        &mut self,
+        fx: &mut FnCodegenContext<'ctx>,
+        eid: HExprId,
+    ) -> Option<Operand<'ctx>> {
         if self.is_terminated() {
             return None;
         }
@@ -689,7 +701,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     TyKind::Unit => Operand::Unit,
                     _ => {
                         let slot = fx.locals[&lid];
-                        let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, ty);
+                        let llty = lower_ty(self.ctx, self.typeck_results, &mut self.adt_ll, ty);
                         Operand::Value(self.builder.build_load(llty, slot, "load").unwrap())
                     }
                 })
@@ -713,9 +725,11 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             // resolve the callee instance for generic calls. Non-generic
             // and extern calls fall through to fn_decls[fid]. See
             // spec/16_GENERIC.md §Codegen.
-            HirExprKind::Call { callee, args, type_args: _ } => {
-                self.emit_call(fx, eid, callee, &args)
-            }
+            HirExprKind::Call {
+                callee,
+                args,
+                type_args: _,
+            } => self.emit_call(fx, eid, callee, &args),
             HirExprKind::Cast { expr, ty: _ } => self.emit_cast(fx, eid, expr),
             HirExprKind::If {
                 cond,
@@ -745,7 +759,11 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 self.emit_array_lit(fx, lit, ty)
             }
             HirExprKind::Field { base, name } => self.emit_field(fx, base, &name),
-            HirExprKind::StructLit { adt, fields } => self.emit_struct_lit(fx, adt, &fields),
+            HirExprKind::StructLit {
+                adt,
+                type_args: _,
+                fields,
+            } => self.emit_struct_lit(fx, eid, adt, &fields),
             // `&place` / `&mut place` — the slot pointer that `lvalue`
             // already produces for assignment targets *is* the value we
             // want here. LLVM `ptr` is mutability-agnostic; the
@@ -844,13 +862,24 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 let bt = self.ty_of(fx, base);
                 let (base_ptr, base_ty) = self.peel_ptrs(lv, bt);
                 let aid = match self.typeck_results.tys().kind(base_ty) {
-                    TyKind::Adt(aid) => *aid,
+                    // `_args` are intentionally dropped here: `field_gep`
+                    // calls `lower_ty(base_ty)` which re-derives the LLVM
+                    // struct type via `lower_adt_type(aid, args)` from
+                    // `base_ty` itself, so the args plumb through without
+                    // the lvalue path having to substitute manually.
+                    // Asymmetric with the rvalue Field arm below, which
+                    // does substitute (it needs the field's *typeck*
+                    // type, not just its LLVM offset).
+                    TyKind::Adt(aid, _args) => *aid,
                     other => panic!("Field base lvalue: non-Adt type after peel {:?}", other),
                 };
                 let fidx = self.field_index(aid, &name);
                 self.field_gep(base_ptr, base_ty, fidx)
             }
-            HirExprKind::Unary { op: UnOp::Deref, expr } => self
+            HirExprKind::Unary {
+                op: UnOp::Deref,
+                expr,
+            } => self
                 .emit_deref_ptr(fx, expr)
                 .expect("lvalue-position Deref operand cannot diverge"),
             other => panic!("v0 codegen: non-lvalue assignment target {:?}", other),
@@ -914,7 +943,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         base_ty: TyId,
         field_idx: u32,
     ) -> PointerValue<'ctx> {
-        let base_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, base_ty);
+        let base_ll = lower_ty(self.ctx, self.typeck_results, &mut self.adt_ll, base_ty);
         self.builder
             .build_struct_gep(base_ll, base_ptr, field_idx, "fld.gep")
             .unwrap()
@@ -934,16 +963,25 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         // on non-Ptr types.
         let bt = self.ty_of(fx, base);
         let base_ty = self.peel_ptrs_ty(bt);
-        let aid = match self.typeck_results.tys().kind(base_ty) {
-            TyKind::Adt(aid) => *aid,
+        let (aid, base_args): (AdtId, Vec<TyId>) = match self.typeck_results.tys().kind(base_ty) {
+            TyKind::Adt(aid, args) => (*aid, args.clone()),
             other => panic!("Field rvalue: non-Adt base type after peel {:?}", other),
         };
         let field_idx = self.field_index(aid, name);
-        let field_ty = {
+        // Look up the field's *declared* type (which may contain
+        // `Param(_)` for a generic ADT) and substitute via the
+        // `(adt.generic_params, base_args)` map. For non-generic ADTs
+        // `base_args` is empty and `substitute_ty` is identity.
+        // See spec/16_GENERIC.md §Codegen (extension).
+        let (field_decl_ty, subst) = {
             let adt = self.typeck_results.adt_def(aid);
-            adt.variants[VariantIdx::from_raw(0)].fields[FieldIdx::from_raw(field_idx)].ty
+            let decl_ty =
+                adt.variants[VariantIdx::from_raw(0)].fields[FieldIdx::from_raw(field_idx)].ty;
+            let subst = subst_from(&adt.generic_params, &base_args);
+            (decl_ty, subst)
         };
-        let field_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, field_ty);
+        let field_ty = self.typeck_results.substitute_ty(field_decl_ty, &subst);
+        let field_ll = lower_ty(self.ctx, self.typeck_results, &mut self.adt_ll, field_ty);
 
         if base_expr.is_place {
             // Place path — single-field load via `getelementptr`, no whole-struct copy.
@@ -1002,11 +1040,20 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     fn emit_struct_lit(
         &mut self,
         fx: &mut FnCodegenContext<'ctx>,
+        lit_eid: HExprId,
         adt: crate::hir::HAdtId,
         fields: &[crate::hir::HirStructLitField],
     ) -> Option<Operand<'ctx>> {
         let aid = AdtId::from_raw(adt.raw());
-        let llty = self.adt_ll[aid];
+        // Read the lit's resolved Adt type to extract the type-args.
+        // Post-finalize+mono these are concrete (no `Param`/`Infer`).
+        // For non-generic ADTs `args` is empty.
+        let lit_ty = self.ty_of(fx, lit_eid);
+        let args: Vec<TyId> = match self.typeck_results.tys().kind(lit_ty) {
+            TyKind::Adt(_, args) => args.clone(),
+            other => panic!("emit_struct_lit: lit type is not Adt: {:?}", other),
+        };
+        let llty = lower_adt_type(self.ctx, self.typeck_results, &mut self.adt_ll, aid, &args);
         let mut agg = llty.get_undef();
 
         // Snapshot the declared field names by value so the loop body
@@ -1048,7 +1095,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         lit: HirArrayLit,
         array_ty: TyId,
     ) -> Option<Operand<'ctx>> {
-        let arr_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, array_ty);
+        let arr_ll = lower_ty(self.ctx, self.typeck_results, &mut self.adt_ll, array_ty);
         let slot = self.alloca_in_entry(fx, arr_ll, "lit.slot");
         let i64_ty = self.ctx.i64_type();
         let zero = i64_ty.const_zero();
@@ -1106,7 +1153,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         idx_eid: HExprId,
     ) -> Option<Operand<'ctx>> {
         let (elt_ptr, elem_ty) = self.emit_index_place(fx, base_eid, idx_eid)?;
-        let elem_ll = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, elem_ty);
+        let elem_ll = lower_ty(self.ctx, self.typeck_results, &mut self.adt_ll, elem_ty);
         Some(Operand::Value(
             self.builder
                 .build_load(elem_ll, elt_ptr, "idx.load")
@@ -1174,8 +1221,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         match self.typeck_results.tys().kind(cur_ty).clone() {
             TyKind::Array(elem, Some(n)) => {
                 self.emit_bounds_check(fx, idx_v, n);
-                let arr_ll =
-                    lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, cur_ty);
+                let arr_ll = lower_ty(self.ctx, self.typeck_results, &mut self.adt_ll, cur_ty);
                 let elt_ptr = unsafe {
                     self.builder
                         .build_in_bounds_gep(arr_ll, cur_ptr, &[zero, idx_v], "idx.gep")
@@ -1184,8 +1230,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 Some((elt_ptr, elem))
             }
             TyKind::Array(elem, None) => {
-                let elem_ll =
-                    lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, elem);
+                let elem_ll = lower_ty(self.ctx, self.typeck_results, &mut self.adt_ll, elem);
                 let elt_ptr = unsafe {
                     self.builder
                         .build_in_bounds_gep(elem_ll, cur_ptr, &[idx_v], "idx.gep")
@@ -1460,7 +1505,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         // int-only by language design.
         let slot = self.lvalue(fx, target);
         let r = self.load_value(rhs_op, target_ty, "load").into_int_value();
-        let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, target_ty);
+        let llty = lower_ty(self.ctx, self.typeck_results, &mut self.adt_ll, target_ty);
         let cur = self
             .builder
             .build_load(llty, slot, "asgn.cur")
@@ -1500,7 +1545,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     fn emit_call(
         &mut self,
         fx: &mut FnCodegenContext<'ctx>,
-        parent_eid: HExprId,            // the call expression's eid
+        parent_eid: HExprId, // the call expression's eid
         callee_eid: HExprId,
         args: &[HExprId],
     ) -> Option<Operand<'ctx>> {
@@ -1524,11 +1569,8 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         // Clone the typeck-recorded args first so the `&mut typeck`
         // borrow taken by substitute_ty doesn't fight with the
         // `&Vec<TyId>` borrow into `call_type_args`.
-        let typeck_args_opt: Option<Vec<TyId>> = self
-            .typeck_results
-            .call_type_args
-            .get(&parent_eid)
-            .cloned();
+        let typeck_args_opt: Option<Vec<TyId>> =
+            self.typeck_results.call_type_args.get(&parent_eid).cloned();
         let (fnv, n_fixed, ret_ty, c_variadic, param_src) =
             if let Some(typeck_args) = typeck_args_opt {
                 let resolved_args: Vec<TyId> = typeck_args
@@ -1604,7 +1646,10 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     arg_vals.push(self.load_value(op, arg_ty, "load").into());
                 }
             } else {
-                debug_assert!(c_variadic, "extra args past n_fixed only on c_variadic call");
+                debug_assert!(
+                    c_variadic,
+                    "extra args past n_fixed only on c_variadic call"
+                );
                 arg_vals.push(self.promote_for_variadic(op, arg_ty).into());
             }
         }
@@ -1768,7 +1813,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         // though the {} alloca would be harmless.
         let if_ty = self.ty_of(fx, eid);
         let result_slot = if !is_void_ret(self.typeck_results.tys(), if_ty) {
-            let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, if_ty);
+            let llty = lower_ty(self.ctx, self.typeck_results, &mut self.adt_ll, if_ty);
             Some(self.alloca_in_entry(fx, llty, "if.slot"))
         } else {
             None
@@ -1806,7 +1851,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
         match result_slot {
             Some(slot) => {
-                let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, if_ty);
+                let llty = lower_ty(self.ctx, self.typeck_results, &mut self.adt_ll, if_ty);
                 Some(Operand::Value(
                     self.builder.build_load(llty, slot, "if.val").unwrap(),
                 ))
@@ -1865,7 +1910,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         // `cond.is_none() && has_break` with at least one valued break.
         let loop_ty = self.ty_of(fx, eid);
         let result_slot = if !is_void_ret(self.typeck_results.tys(), loop_ty) {
-            let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, loop_ty);
+            let llty = lower_ty(self.ctx, self.typeck_results, &mut self.adt_ll, loop_ty);
             Some(self.alloca_in_entry(fx, llty, "loop.slot"))
         } else {
             None
@@ -1941,7 +1986,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         }
         match result_slot {
             Some(slot) => {
-                let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, loop_ty);
+                let llty = lower_ty(self.ctx, self.typeck_results, &mut self.adt_ll, loop_ty);
                 Some(Operand::Value(
                     self.builder.build_load(llty, slot, "loop.val").unwrap(),
                 ))
@@ -2055,7 +2100,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
         // `()`-typed locals lower to `{}` (zero-sized empty struct).
         // The alloca is dead and gets DCE'd in any opt level.
-        let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, ty);
+        let llty = lower_ty(self.ctx, self.typeck_results, &mut self.adt_ll, ty);
         let slot = self.alloca_in_entry(fx, llty, &format!("{}.{}.slot", local.name, lid.raw()));
         fx.locals.insert(lid, slot);
         if let Some(init_eid) = init {
