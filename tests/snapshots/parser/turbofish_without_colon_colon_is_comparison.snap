@@ -1,0 +1,4 @@
+Module
+  Fn main()
+    Block
+      ExprStmt Binary(Gt, Binary(Lt, Ident("id"), Ident("i32")), (Int(7)))

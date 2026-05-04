@@ -1,0 +1,4 @@
+Module
+  Fn id<T>(x: T) -> T
+    Block
+      tail: Ident("x")

@@ -1,0 +1,4 @@
+Module
+  Fn main()
+    Block
+      ExprStmt Ident("weird")()

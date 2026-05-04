@@ -335,7 +335,15 @@ impl<'a> BodyCtx<'a> {
                 }
                 HirExprKind::Assign { op, target, rhs }
             }
-            ast::ExprKind::Call { callee, args } => {
+            ast::ExprKind::Call {
+                callee,
+                args,
+                // Phase A: AST carries turbofish type-args, but HIR has no
+                // slot for them yet (Phase B will add `HirExprKind::Call.type_args`).
+                // Drop them here for now — typeck doesn't need them until
+                // generics resolution lands. See spec/16_GENERIC.md §HIR.
+                type_args: _,
+            } => {
                 let callee = self.lower_expr(callee);
                 let args: Vec<_> = args.into_iter().map(|a| self.lower_expr(a)).collect();
                 HirExprKind::Call { callee, args }

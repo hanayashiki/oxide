@@ -131,6 +131,20 @@ impl<'a> Printer<'a> {
         self.begin_line();
         self.write("Fn ");
         self.write(&f.name.name);
+        // Generic-param list. Empty → don't emit anything (matches the
+        // `fn name(...)` form for both source `fn name()` and `fn name<>()`,
+        // since both produce `generic_params: vec![]`). Non-empty →
+        // `<T, U>`. See spec/16_GENERIC.md §Surface syntax.
+        if !f.generic_params.is_empty() {
+            self.write("<");
+            for (i, tp) in f.generic_params.iter().enumerate() {
+                if i > 0 {
+                    self.write(", ");
+                }
+                self.write(&tp.name);
+            }
+            self.write(">");
+        }
         self.write("(");
         for (i, p) in f.params.iter().enumerate() {
             if i > 0 {
@@ -351,8 +365,26 @@ impl<'a> Printer<'a> {
                 self.append_expr(*rhs);
                 self.write(")");
             }
-            ExprKind::Call { callee, args } => {
+            ExprKind::Call {
+                callee,
+                args,
+                type_args,
+            } => {
                 self.append_expr(*callee);
+                // Turbofish type-args. Empty → don't emit (matches both
+                // `name(args)` and `name::<>(args)`, both producing
+                // `type_args: vec![]`). Non-empty → `::<T, U>`.
+                // See spec/16_GENERIC.md §Surface syntax.
+                if !type_args.is_empty() {
+                    self.write("::<");
+                    for (i, ta) in type_args.iter().enumerate() {
+                        if i > 0 {
+                            self.write(", ");
+                        }
+                        self.write_type(*ta);
+                    }
+                    self.write(">");
+                }
                 self.write("(");
                 for (i, a) in args.iter().enumerate() {
                     if i > 0 {

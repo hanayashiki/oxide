@@ -166,13 +166,15 @@ where
             ident_expr_parser(),
         ));
 
-        // Postfix tower: call, index, field — left-folded onto `atom`.
-        let with_postfix = postfix_parser(atom, expr.clone());
-
-        // Cast slot needs a type parser; build one from the recursive
-        // expr handle so array-length slots inside cast types (e.g.
-        // `x as [T; 3]`) can recurse through expr correctly.
+        // Cast slot and turbofish call sites need a type parser; build
+        // one from the recursive expr handle so array-length slots
+        // inside cast/turbofish types (e.g. `x as [T; 3]`,
+        // `f::<[T; 3]>(...)`) can recurse through expr correctly.
         let ty_in_expr = type_parser(expr.clone());
+
+        // Postfix tower: call (with optional turbofish), index, field —
+        // left-folded onto `atom`. See spec/16_GENERIC.md §Surface syntax.
+        let with_postfix = postfix_parser(atom, expr.clone(), ty_in_expr.clone());
 
         let pratt_expr = with_postfix.pratt((
             prefix_level!(13,
@@ -447,22 +449,45 @@ where
     choice((nonempty, empty))
 }
 
-/// Postfix tower: `f(args)`, `e[i]`, `e.field`, left-folded onto an atom.
-fn postfix_parser<'a, I, PA, PE>(
+/// Postfix tower: `f(args)`, `f::<T, U>(args)`, `e[i]`, `e.field`,
+/// left-folded onto an atom. Turbofish `::<...>` is gated by `::` —
+/// without it, `name<T>(args)` parses as the comparison `(name < T) > (args)`.
+/// This matches Rust and is the load-bearing disambiguation for spec/16
+/// §Surface syntax.
+fn postfix_parser<'a, I, PA, PE, PT>(
     atom: PA,
     expr: PE,
+    ty: PT,
 ) -> impl Parser<'a, I, ExprId, Extra<'a>> + Clone
 where
     I: OValueInput<'a>,
     PA: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
     PE: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
+    PT: Parser<'a, I, TypeId, Extra<'a>> + Clone + 'a,
 {
+    // Turbofish type-args `::<T, U>`. Empty `::<>` is accepted and
+    // produces `vec![]` — matches Rust, equivalent to no turbofish.
+    // The `or_not().unwrap_or_default()` collapses three source forms
+    // (no turbofish, `::<>`, `::<T,...>`) into a single `Vec<TypeId>`.
+    // See spec/16_GENERIC.md §Surface syntax.
+    let turbofish = just(TokenKind::ColonColon)
+        .ignore_then(
+            ty.clone()
+                .separated_by(just(TokenKind::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(TokenKind::Lt), just(TokenKind::Gt)),
+        )
+        .or_not()
+        .map(|opt| opt.unwrap_or_default());
+
     let call_args = expr
         .clone()
         .separated_by(just(TokenKind::Comma))
         .allow_trailing()
         .collect::<Vec<_>>()
         .delimited_by(just(TokenKind::LParen), just(TokenKind::RParen));
+    let call = turbofish.then(call_args);
     let index = expr
         .clone()
         .delimited_by(just(TokenKind::LBracket), just(TokenKind::RBracket));
@@ -470,18 +495,25 @@ where
 
     #[derive(Clone)]
     enum Postfix {
-        Call(Vec<ExprId>),
+        Call {
+            type_args: Vec<TypeId>,
+            args: Vec<ExprId>,
+        },
         Index(ExprId),
         Field(Ident),
     }
-    let op = call_args
-        .map(Postfix::Call)
+    let op = call
+        .map(|(type_args, args)| Postfix::Call { type_args, args })
         .or(index.map(Postfix::Index))
         .or(field.map(Postfix::Field));
 
     atom.foldl_with(op.repeated(), |callee, op, e| {
         let kind = match op {
-            Postfix::Call(args) => ExprKind::Call { callee, args },
+            Postfix::Call { type_args, args } => ExprKind::Call {
+                callee,
+                args,
+                type_args,
+            },
             Postfix::Index(idx) => ExprKind::Index {
                 base: callee,
                 index: idx,
@@ -859,7 +891,9 @@ where
 /// Parse a fn signature plus either `{ block }` or `;`. The grammar is
 /// the same in both top-level and `extern "C"`-block positions; HIR
 /// lowering validates the body's presence/absence against the surrounding
-/// item context (`BodylessFnOutsideExtern` / `ExternFnHasBody`).
+/// item context (`BodylessFnOutsideExtern` / `ExternFnHasBody`) and
+/// rejects `extern "C"` fns that carry generic params (`GenericExternFn`).
+/// See spec/16_GENERIC.md §HIR.
 fn fn_decl_parser<'a, I>() -> impl Parser<'a, I, FnDecl, Extra<'a>> + Clone
 where
     I: OValueInput<'a>,
@@ -869,8 +903,23 @@ where
     let block = block_parser_inner(expr.clone());
     let body = choice((block.map(Some), just(TokenKind::Semi).to(None)));
 
+    // Generic parameter list `<T, U, ...>`. Empty `<>` is accepted and
+    // produces `vec![]` — matches Rust, where `fn f<>()` is well-formed
+    // and equivalent to `fn f()`. Absence of brackets entirely also
+    // produces `vec![]` (via `or_not().unwrap_or_default()`), so
+    // downstream layers see one shape regardless of source form.
+    // See spec/16_GENERIC.md §Surface syntax.
+    let generic_params = ident_parser()
+        .separated_by(just(TokenKind::Comma))
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(TokenKind::Lt), just(TokenKind::Gt))
+        .or_not()
+        .map(|opt| opt.unwrap_or_default());
+
     just(TokenKind::KwFn)
         .ignore_then(ident_parser())
+        .then(generic_params)
         .then(params_parser(ty.clone()))
         .then(ret_ty_parser(ty))
         .then(body)
@@ -880,33 +929,36 @@ where
         // known. `validate` emits the diagnostic without failing the
         // parse — the caller still gets back a usable `FnDecl` (with
         // `is_variadic` cleared) so downstream layers compile cleanly.
-        .validate(|(((name, parsed), ret_ty), body), _e, emitter| {
-            let ParsedParams { params, variadic } = parsed;
-            let mut is_variadic = variadic.is_some();
-            if let Some(dots_span) = variadic {
-                if body.is_some() {
-                    // E0271 — `...` only allowed in `extern "C"`
-                    // declarations. Reported via the existing parse
-                    // error pathway (Rich::custom → ParseError::Custom).
-                    // See spec/15_VARIADIC.md.
-                    emitter.emit(Rich::custom(
-                        dots_span,
-                        "E0271: `...` only allowed in `extern \"C\"` declarations; \
-                         help: variadic Oxide functions are not supported; \
-                         use `extern \"C\"` to call a C variadic"
-                            .to_string(),
-                    ));
-                    is_variadic = false;
+        .validate(
+            |((((name, generic_params), parsed), ret_ty), body), _e, emitter| {
+                let ParsedParams { params, variadic } = parsed;
+                let mut is_variadic = variadic.is_some();
+                if let Some(dots_span) = variadic {
+                    if body.is_some() {
+                        // E0271 — `...` only allowed in `extern "C"`
+                        // declarations. Reported via the existing parse
+                        // error pathway (Rich::custom → ParseError::Custom).
+                        // See spec/15_VARIADIC.md.
+                        emitter.emit(Rich::custom(
+                            dots_span,
+                            "E0271: `...` only allowed in `extern \"C\"` declarations; \
+                             help: variadic Oxide functions are not supported; \
+                             use `extern \"C\"` to call a C variadic"
+                                .to_string(),
+                        ));
+                        is_variadic = false;
+                    }
                 }
-            }
-            FnDecl {
-                name,
-                params,
-                is_variadic,
-                ret_ty,
-                body,
-            }
-        })
+                FnDecl {
+                    name,
+                    generic_params,
+                    params,
+                    is_variadic,
+                    ret_ty,
+                    body,
+                }
+            },
+        )
 }
 
 fn fn_item_parser<'a, I>() -> impl Parser<'a, I, ItemId, Extra<'a>> + Clone

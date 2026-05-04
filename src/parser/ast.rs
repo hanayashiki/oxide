@@ -89,6 +89,13 @@ pub struct FieldDecl {
 #[derive(Clone, Debug)]
 pub struct FnDecl {
     pub name: Ident,
+    /// Type parameters in declaration order. Empty for non-generic fns
+    /// *and* for fns declared with an empty bracket list `fn f<>()` —
+    /// matches Rust, where `<>` is accepted and equivalent to no
+    /// brackets at all. Stored as `Ident` (with span) so HIR lowering
+    /// can produce span-bearing diagnostics on lookup failure /
+    /// extern-with-generics rejection. See spec/16_GENERIC.md §HIR.
+    pub generic_params: Vec<Ident>,
     pub params: Vec<Param>,
     /// Trailing C-style `...` after the last fixed param. Only legal in
     /// `extern "C"` declarations; the parser rejects `is_variadic &&
@@ -175,6 +182,12 @@ pub enum ExprKind {
     Call {
         callee: ExprId,
         args: Vec<ExprId>,
+        /// Turbofish type arguments (`name::<T, U>(args)`). Empty for the
+        /// common `name(args)` case *and* for the empty turbofish form
+        /// `name::<>(args)` (accepted, matches Rust). Resolution
+        /// (turbofish vs. inferred) happens at typeck. See
+        /// spec/16_GENERIC.md §Typeck rules.
+        type_args: Vec<TypeId>,
     },
     Index {
         base: ExprId,

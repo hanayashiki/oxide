@@ -59,7 +59,7 @@ The mono pass reads `HirProgram` + `TypeckResults`, walks reachable instances st
 
 ## Surface syntax
 
-- **Declaration**: `fn name<T, U, ...>(params) -> ret { body }`. Type params come between the fn name and the param list. Empty list `<>` is rejected.
+- **Declaration**: `fn name<T, U, ...>(params) -> ret { body }`. Type params come between the fn name and the param list. Empty list `<>` is accepted (matches Rust) and is semantically equivalent to a non-generic fn — `fn name<>() {}` parses and behaves identically to `fn name() {}`. Same for turbofish: `name::<>(args)` is accepted and behaves identically to `name(args)`.
 - **Turbofish**: `name::<T, U>(args)` at call sites. The `::` is mandatory (matches Rust); `name<T, U>(args)` is parsed as a comparison expression.
 - **Type-param uses**: inside the body's type positions only, by name. No nested generic scopes.
 
