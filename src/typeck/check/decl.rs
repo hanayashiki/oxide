@@ -75,7 +75,7 @@ fn resolve_adt_fields(cx: &mut Checker<'_>) {
                 // Clone the field's HirTy so we don't keep a borrow on
                 // cx.hir while we call resolve_ty (which takes
                 // &mut cx.tys / &mut cx.errors).
-                let ty = Checker::resolve_ty(&mut cx.tys, &mut cx.errors, &field.ty);
+                let ty = Checker::resolve_ty(&cx.tys, &mut cx.errors, &field.ty);
                 // Field types are concrete; push the Sized obligation
                 // with the resolved TyId. Discharged at `finish()`. See
                 // spec/09_ARRAY.md "E0261".
@@ -185,7 +185,7 @@ fn resolve_fn_sigs(cx: &mut Checker<'_>) {
         for &lid in &hir_fn.params {
             let local = &cx.hir.locals[lid];
             let ty = Checker::resolve_annotation(
-                &mut cx.tys,
+                &cx.tys,
                 &mut cx.errors,
                 local.ty.as_ref(),
                 &local.span,
@@ -216,7 +216,7 @@ fn resolve_fn_sigs(cx: &mut Checker<'_>) {
         let ret = match &hir_fn.ret_ty {
             Some(t) => {
                 let span = t.span.clone();
-                let ty = Checker::resolve_ty(&mut cx.tys, &mut cx.errors, t);
+                let ty = Checker::resolve_ty(&cx.tys, &mut cx.errors, t);
                 cx.decl_obligations.push(Obligation::Sized {
                     ty,
                     pos: SizedPos::Return,

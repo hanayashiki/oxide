@@ -3,7 +3,25 @@
 //! Equal types share a `TyId` because every construction goes through
 //! `TyArena::intern`. Codegen and typeck can compare types via
 //! `id == id` instead of walking structures.
+//!
+//! `TyArena` uses interior mutability: `intern(&self, ...)` so callers
+//! (typeck inferer, mono cascade, codegen lazy substitution) don't have
+//! to thread `&mut TyArena` through their call chains. Storage is
+//! `RefCell<IndexVec<TyId, &'static TyKind>>` — the elements are
+//! leaked at insertion time, giving `kind(&self, id) -> &TyKind` a
+//! stable address with a lifetime tied to `&self` (no `Ref` guard
+//! scoping problems for recursive-walk callers like `substitute_ty`).
+//!
+//! The leak per fresh kind is bounded by the program's unique-type
+//! count (interner deduplicates; cache hits don't leak); for a v0
+//! compile, ~few hundred KB of leaked TyKind objects, reclaimed by
+//! the OS at process exit. The forward path (when long-running
+//! embeddings like LSP/REPL become real) is to parameterize TyArena
+//! with an explicit `'arena` lifetime backed by `bumpalo::Bump` —
+//! the API surface (`intern(&self, ...)` / `kind(&self, ...) -> &TyKind`)
+//! is forward-compatible.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use index_vec::IndexVec;
@@ -165,10 +183,26 @@ pub struct FieldDef {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+/// Hash-cons interner with interior-mutable storage.
+///
+/// Not `Clone` — `RefCell` doesn't deep-clone, and a clone-snapshot of
+/// the type universe at a point in time isn't meaningful (the leaked
+/// TyKinds keep their `'static` references regardless). Wrap in
+/// `Rc`/`Arc` if shared-ownership ever becomes a need; v0 has exactly
+/// one TyArena per compilation, owned by `TypeckResults`.
+#[derive(Debug)]
 pub struct TyArena {
-    arena: IndexVec<TyId, TyKind>,
-    interner: HashMap<TyKind, TyId>,
+    /// Append-only storage of leaked TyKinds. Indexed by `TyId`. The
+    /// element type is `&'static TyKind` because each push goes through
+    /// `Box::leak` — this gives stable addresses without coupling the
+    /// returned `&TyKind` to any `Ref<'_, ...>` guard scope.
+    arena: RefCell<IndexVec<TyId, &'static TyKind>>,
+    /// Hash-cons map: dedups interned TyKinds. Mutation is short-lived
+    /// (one `borrow_mut` per fresh insert) so re-entrant `intern` calls
+    /// from inside the same arena would runtime-panic — but the only
+    /// callers either dedupe immediately or recurse through TyArena
+    /// methods that release the borrow before re-entering.
+    interner: RefCell<HashMap<TyKind, TyId>>,
     pub i8: TyId,
     pub i16: TyId,
     pub i32: TyId,
@@ -193,34 +227,50 @@ impl Default for TyArena {
 
 impl TyArena {
     pub fn new() -> Self {
-        let mut arena = IndexVec::<TyId, TyKind>::new();
-        let mut interner = HashMap::new();
-        let mut intern = |kind: TyKind| -> TyId {
-            if let Some(&id) = interner.get(&kind) {
-                return id;
-            }
-            let id = arena.push(kind.clone());
-            interner.insert(kind, id);
-            id
+        // Build an empty arena, then prime the primitive shortcuts via
+        // the interior-mut `intern`. The `&self` API works the moment
+        // the struct is constructed — we just need temporary `TyId`s
+        // for the field initializers, which we obtain by populating
+        // primitives first.
+        let arena = Self {
+            arena: RefCell::new(IndexVec::new()),
+            interner: RefCell::new(HashMap::new()),
+            // Sentinels overwritten immediately after construction.
+            // `from_raw(0)` is a placeholder — none of these reads
+            // observe the sentinel because the Self return below
+            // uses the interned ids from the local bindings.
+            i8: TyId::from_raw(0),
+            i16: TyId::from_raw(0),
+            i32: TyId::from_raw(0),
+            i64: TyId::from_raw(0),
+            u8: TyId::from_raw(0),
+            u16: TyId::from_raw(0),
+            u32: TyId::from_raw(0),
+            u64: TyId::from_raw(0),
+            bool: TyId::from_raw(0),
+            usize: TyId::from_raw(0),
+            isize: TyId::from_raw(0),
+            unit: TyId::from_raw(0),
+            never: TyId::from_raw(0),
+            error: TyId::from_raw(0),
         };
-        let i8 = intern(TyKind::Prim(PrimTy::I8));
-        let i16 = intern(TyKind::Prim(PrimTy::I16));
-        let i32 = intern(TyKind::Prim(PrimTy::I32));
-        let i64 = intern(TyKind::Prim(PrimTy::I64));
-        let u8 = intern(TyKind::Prim(PrimTy::U8));
-        let u16 = intern(TyKind::Prim(PrimTy::U16));
-        let u32 = intern(TyKind::Prim(PrimTy::U32));
-        let u64 = intern(TyKind::Prim(PrimTy::U64));
-        let bool = intern(TyKind::Prim(PrimTy::Bool));
-        let usize = intern(TyKind::Prim(PrimTy::Usize));
-        let isize = intern(TyKind::Prim(PrimTy::Isize));
-        let unit = intern(TyKind::Unit);
-        let never = intern(TyKind::Never);
-        let error = intern(TyKind::Error);
-        drop(intern);
+        let i8 = arena.intern(TyKind::Prim(PrimTy::I8));
+        let i16 = arena.intern(TyKind::Prim(PrimTy::I16));
+        let i32 = arena.intern(TyKind::Prim(PrimTy::I32));
+        let i64 = arena.intern(TyKind::Prim(PrimTy::I64));
+        let u8 = arena.intern(TyKind::Prim(PrimTy::U8));
+        let u16 = arena.intern(TyKind::Prim(PrimTy::U16));
+        let u32 = arena.intern(TyKind::Prim(PrimTy::U32));
+        let u64 = arena.intern(TyKind::Prim(PrimTy::U64));
+        let bool = arena.intern(TyKind::Prim(PrimTy::Bool));
+        let usize = arena.intern(TyKind::Prim(PrimTy::Usize));
+        let isize = arena.intern(TyKind::Prim(PrimTy::Isize));
+        let unit = arena.intern(TyKind::Unit);
+        let never = arena.intern(TyKind::Never);
+        let error = arena.intern(TyKind::Error);
         Self {
-            arena,
-            interner,
+            arena: arena.arena,
+            interner: arena.interner,
             i8,
             i16,
             i32,
@@ -238,17 +288,39 @@ impl TyArena {
         }
     }
 
-    pub fn intern(&mut self, kind: TyKind) -> TyId {
-        if let Some(&id) = self.interner.get(&kind) {
+    /// Intern a `TyKind`, returning its `TyId`. Cache-deduped by the
+    /// hash-cons interner so equal kinds share an id. Fresh kinds are
+    /// `Box::leak`ed to give the underlying `&TyKind` a stable address
+    /// (Vec growth on the spine doesn't move boxed contents); the leak
+    /// is bounded by the program's unique-type count.
+    pub fn intern(&self, kind: TyKind) -> TyId {
+        // Fast path: cache hit — no allocation, no leak, no spine push.
+        if let Some(&id) = self.interner.borrow().get(&kind) {
             return id;
         }
-        let id = self.arena.push(kind.clone());
-        self.interner.insert(kind, id);
+        // Slow path: not interned yet. Leak a Box<TyKind> for stable
+        // address, then push the &'static reference into the arena and
+        // record the kind→id mapping in the interner.
+        let leaked: &'static TyKind = Box::leak(Box::new(kind.clone()));
+        let id = self.arena.borrow_mut().push(leaked);
+        self.interner.borrow_mut().insert(kind, id);
         id
     }
 
+    /// Look up the `TyKind` for a given `TyId`. Returns a `&TyKind` whose
+    /// lifetime is tied to `&self`; the underlying memory is leaked
+    /// `'static` so the caller can hold the reference across subsequent
+    /// `intern()` calls (which is what `substitute_ty`'s recursive match
+    /// arms need — `tys.kind(ty)` borrowed across `tys.intern(...)`).
     pub fn kind(&self, id: TyId) -> &TyKind {
-        &self.arena[id]
+        // The element is `&'static TyKind` (Copy reference). Pulling it
+        // out from under the `Ref` guard with `*` copies the static ref
+        // into a temporary that outlives the guard.
+        *self
+            .arena
+            .borrow()
+            .get(id)
+            .expect("TyId out of range for TyArena")
     }
 
     /// Look up a primitive type by its source-level name. `None` if the

@@ -1,0 +1,58 @@
+; ModuleID = 'test'
+source_filename = "test"
+
+define i32 @main() {
+allocas:
+  br label %body
+
+body:                                             ; preds = %allocas
+  %call = call i32 @"outer__$i32"(i32 1)
+  %call1 = call i64 @"outer__$i64"(i64 2)
+  ret i32 0
+}
+
+define i32 @"outer__$i32"(i32 %x) {
+allocas:
+  %x.0.slot = alloca i32, align 4
+  br label %body
+
+body:                                             ; preds = %allocas
+  store i32 %x, ptr %x.0.slot, align 4
+  %load = load i32, ptr %x.0.slot, align 4
+  %call = call i32 @"inner__$i32"(i32 %load)
+  ret i32 %call
+}
+
+define i64 @"outer__$i64"(i64 %x) {
+allocas:
+  %x.0.slot = alloca i64, align 8
+  br label %body
+
+body:                                             ; preds = %allocas
+  store i64 %x, ptr %x.0.slot, align 4
+  %load = load i64, ptr %x.0.slot, align 4
+  %call = call i64 @"inner__$i64"(i64 %load)
+  ret i64 %call
+}
+
+define i32 @"inner__$i32"(i32 %x) {
+allocas:
+  %x.1.slot = alloca i32, align 4
+  br label %body
+
+body:                                             ; preds = %allocas
+  store i32 %x, ptr %x.1.slot, align 4
+  %load = load i32, ptr %x.1.slot, align 4
+  ret i32 %load
+}
+
+define i64 @"inner__$i64"(i64 %x) {
+allocas:
+  %x.1.slot = alloca i64, align 8
+  br label %body
+
+body:                                             ; preds = %allocas
+  store i64 %x, ptr %x.1.slot, align 4
+  %load = load i64, ptr %x.1.slot, align 4
+  ret i64 %load
+}

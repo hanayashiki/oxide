@@ -9,5 +9,5 @@ mod ty;
 pub use check::{TypeckResults, check};
 pub use error::{MutateOp, ParamOrReturn, SizedPos, TypeError};
 pub use ty::{
-    AdtDef, AdtId, FieldDef, FnSig, InferId, PrimTy, TyArena, TyId, TyKind, VariantDef,
+    AdtDef, AdtId, FieldDef, FnSig, InferId, ParamId, PrimTy, TyArena, TyId, TyKind, VariantDef,
 };

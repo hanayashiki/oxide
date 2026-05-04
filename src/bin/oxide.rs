@@ -27,11 +27,12 @@ use oxide::hir::lower_program;
 use oxide::hir::pretty::pretty_print as hir_pretty;
 use oxide::lexer::lex;
 use oxide::loader::{BuilderHost, VfsHost, load_program};
+use oxide::mono::monomorphize;
 use oxide::parser::parse;
 use oxide::parser::pretty::pretty_print as ast_pretty;
 use oxide::reporter::{
-    SourceMap, emit, from_hir_error, from_lex_error, from_load_error, from_parse_error,
-    from_typeck_error,
+    SourceMap, emit, from_hir_error, from_lex_error, from_load_error, from_mono_error,
+    from_parse_error, from_typeck_error,
 };
 use oxide::session::Session;
 use oxide::typeck::check;
@@ -250,6 +251,20 @@ fn run_pipeline(
         return ExitCode::SUCCESS;
     }
 
+    // Monomorphization. Walks HIR per-instance to discover the full
+    // instantiation graph from non-generic entry points, substitutes
+    // signatures, populates `instance_map` for codegen's emit_call to
+    // resolve generic-call sites against. See spec/16_GENERIC.md.
+    let (mono, mono_errs) = monomorphize(&hir, &results);
+    if !mono_errs.is_empty() {
+        let mut out = std::io::stderr().lock();
+        for err in &mono_errs {
+            let diag = from_mono_error(err, root, &hir, &results.tys);
+            emit(&diag, &map, &mut out, color).expect("write stderr");
+        }
+        return ExitCode::from(1);
+    }
+
     // Codegen / builder.
     let module_name = args
         .path
@@ -296,7 +311,7 @@ fn run_pipeline(
         extra_link_args: Vec::new(),
     };
 
-    let artifact = match build(&sess, &hir, &results, &opts) {
+    let artifact = match build(&sess, &hir, &results, &mono, &opts) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("oxide: build failed: {e}");

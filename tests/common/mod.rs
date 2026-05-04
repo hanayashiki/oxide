@@ -29,14 +29,16 @@ use inkwell::context::Context;
 use inkwell::execution_engine::JitFunction;
 
 use oxide::codegen::codegen;
-use oxide::hir::{lower, lower_program};
 use oxide::hir::pretty::pretty_print as hir_pretty_print;
+use oxide::hir::{lower, lower_program};
 use oxide::lexer::lex;
 use oxide::loader::{BuilderHost, LoadedFile};
+use oxide::mono::{monomorphize, monomorphize_with_limit};
 use oxide::parser::pretty::pretty_print as parser_pretty_print;
 use oxide::parser::{ItemKind, parse};
 use oxide::reporter::{
-    Diagnostic, FileId, SourceMap, emit, from_hir_error, from_parse_error, from_typeck_error,
+    Diagnostic, FileId, SourceMap, emit, from_hir_error, from_mono_error, from_parse_error,
+    from_typeck_error,
 };
 use oxide::typeck::check;
 
@@ -192,11 +194,7 @@ pub fn render_hir(file_name: &str, src: &str) -> String {
 fn lower_fixture(
     file_name: &str,
     src: &str,
-) -> (
-    SourceMap,
-    oxide::hir::HirProgram,
-    Vec<oxide::hir::HirError>,
-) {
+) -> (SourceMap, oxide::hir::HirProgram, Vec<oxide::hir::HirError>) {
     let segments = split_fixture(src, Path::new(file_name)).expect("split fixture");
     let host = build_vfs(segments.clone());
 
@@ -267,8 +265,11 @@ pub unsafe fn jit_run_with_ir<R: Copy + 'static>(src: &str, entry: &str) -> (Str
     let (results, type_errs) = check(&hir);
     assert!(type_errs.is_empty(), "type errors: {type_errs:#?}");
 
+    let (mono, mono_errs) = monomorphize(&hir, &results);
+    assert!(mono_errs.is_empty(), "mono errors: {mono_errs:#?}");
+
     let ctx = Context::create();
-    let module = codegen(&ctx, &hir, &results, "jit");
+    let module = codegen(&ctx, &hir, &results, &mono, "jit");
 
     // Capture IR text before handing the module to the execution engine
     // (which takes ownership). The string ends with a trailing newline.
@@ -317,9 +318,95 @@ pub fn render_codegen(file_name: &str, src: &str) -> String {
         "type errors in {file_name}: {type_errs:#?}"
     );
 
+    let (mono, mono_errs) = monomorphize(&hir, &results);
+    assert!(
+        mono_errs.is_empty(),
+        "mono errors in {file_name}: {mono_errs:#?}"
+    );
+
     let ctx = Context::create();
-    let module = codegen(&ctx, &hir, &results, "test");
+    let module = codegen(&ctx, &hir, &results, &mono, "test");
     module.print_to_string().to_string()
+}
+
+/// Render the result of monomorphization for snapshot tests.
+///
+/// Output sections:
+///   `== diagnostics ==` — mono errors via `from_mono_error`. Empty
+///     section header is always emitted so error vs no-error is
+///     visible at a glance.
+///   `== instances ==` — one line per `InstId`:
+///     `Inst[N] mangled=<m> depth=<d> origin=<EntryPoint|Inst[parent]>`
+///     The origin chain captures cascade structure (which parent
+///     instantiated which child); no separate per-call-site dump.
+///   `== sig ==` — per instance: `params=[<ty>...] ret=<ty>` from
+///     `inst.params` / `inst.ret` (the substituted shape).
+pub fn render_mono(file_name: &str, src: &str) -> String {
+    let (map, file) = make_map(file_name, src);
+    let tokens = lex(src, file);
+    let (ast, parse_errs) = parse(&tokens, file);
+    assert!(
+        parse_errs.is_empty(),
+        "parse errors in {file_name}: {parse_errs:#?}"
+    );
+    let (hir, hir_errs) = lower(&ast);
+    assert!(
+        hir_errs.is_empty(),
+        "hir errors in {file_name}: {hir_errs:#?}"
+    );
+    let (results, type_errs) = check(&hir);
+    assert!(
+        type_errs.is_empty(),
+        "type errors in {file_name}: {type_errs:#?}"
+    );
+
+    // Tests use a small depth_limit to keep the output manageable
+    let (mono, mono_errs) = monomorphize_with_limit(&hir, &results, 8);
+
+    let mut out = String::new();
+
+    out.push_str("== diagnostics ==\n");
+    if !mono_errs.is_empty() {
+        let diags: Vec<_> = mono_errs
+            .iter()
+            .map(|e| from_mono_error(e, file, &hir, &results.tys))
+            .collect();
+        out.push_str(&render_diagnostics(&diags, &map));
+    }
+
+    out.push_str("== instances ==\n");
+    for (iid, inst) in mono.instances.iter_enumerated() {
+        let origin = match &inst.origin {
+            oxide::mono::InstanceOrigin::EntryPoint => "EntryPoint".to_string(),
+            oxide::mono::InstanceOrigin::InstantiatedAt { parent, .. } => {
+                format!("Inst[{}]", parent.raw())
+            }
+        };
+        writeln!(
+            out,
+            "Inst[{}] mangled={} depth={} origin={}",
+            iid.raw(),
+            inst.mangled,
+            inst.depth,
+            origin,
+        )
+        .unwrap();
+    }
+
+    out.push_str("== sig ==\n");
+    for (iid, inst) in mono.instances.iter_enumerated() {
+        let params: Vec<String> = inst.params.iter().map(|&t| results.tys.render(t)).collect();
+        writeln!(
+            out,
+            "Inst[{}] params=[{}] ret={}",
+            iid.raw(),
+            params.join(", "),
+            results.tys.render(inst.ret),
+        )
+        .unwrap();
+    }
+
+    out
 }
 
 pub fn render_typeck(file_name: &str, src: &str) -> String {

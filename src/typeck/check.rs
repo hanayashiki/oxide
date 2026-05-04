@@ -41,7 +41,11 @@ use self::unify::MismatchCtx;
 use super::error::{MutateOp, SizedPos, TypeError};
 use super::ty::{AdtDef, AdtId, FnSig, InferId, ParamId, PrimTy, TyArena, TyId, TyKind};
 
-#[derive(Clone, Debug)]
+/// Not `Clone` — `TyArena` has interior-mutable storage (`RefCell`) that
+/// doesn't deep-clone meaningfully, and `TypeckResults` has exactly one
+/// owner per compilation. If shared ownership is ever needed, wrap in
+/// `Rc<TypeckResults>` rather than cloning.
+#[derive(Debug)]
 pub struct TypeckResults {
     pub tys: TyArena,
     pub adts: IndexVec<AdtId, AdtDef>,
@@ -79,6 +83,20 @@ impl TypeckResults {
     }
     pub fn tys(&self) -> &TyArena {
         &self.tys
+    }
+
+    /// Substitute `Param(_)` leaves in `ty` through the `subst` map,
+    /// re-interning structural arms (`Fn`/`Ptr`/`Array`) into `self.tys`.
+    /// Wraps the module-private `substitute_ty_impl` so callers don't
+    /// have to reach into `self.tys` directly.
+    ///
+    /// Used by mono (`instantiate` substituting fn signatures) and
+    /// codegen (`ty_of`/`local_ty` substituting body-internal expr/local
+    /// types lazily). Empty `subst` is identity through interning —
+    /// non-generic instances take this path uniformly. See
+    /// spec/16_GENERIC.md §Monomorphization.
+    pub fn substitute_ty(&self, ty: TyId, subst: &HashMap<ParamId, TyId>) -> TyId {
+        substitute_ty_impl(&self.tys, ty, subst)
     }
 }
 
@@ -480,7 +498,9 @@ impl<'hir> Checker<'hir> {
     /// arena and error sink explicitly so the same routine can serve
     /// both phases — sig phase points `errors` at `Checker.errors`,
     /// body phase points it at the active `Inferer.errors`.
-    fn resolve_ty(tys: &mut TyArena, errors: &mut Vec<TypeError>, ty: &HirTy) -> TyId {
+    ///
+    /// `tys: &TyArena` — interior-mutable intern, no `&mut` needed.
+    fn resolve_ty(tys: &TyArena, errors: &mut Vec<TypeError>, ty: &HirTy) -> TyId {
         match &ty.kind {
             HirTyKind::Named(name) => match tys.from_prim_name(name) {
                 Some(id) => id,
@@ -536,7 +556,7 @@ impl<'hir> Checker<'hir> {
     /// Currently this is just a `Some` shortcut; let-binding `None`s are
     /// handled in `infer_let` (Phase 2) where fresh Infer vars are allowed.
     fn resolve_annotation(
-        tys: &mut TyArena,
+        tys: &TyArena,
         errors: &mut Vec<TypeError>,
         ty: Option<&HirTy>,
         _span: &Span,
@@ -648,19 +668,30 @@ impl<'hir> Checker<'hir> {
 /// Walk a type tree and substitute `TyKind::Param(pid)` leaves via the
 /// `subst` map, preserving the structural arms (`Fn` / `Ptr` / `Array`
 /// recurse and re-intern). Mirrors the recursion shape of
-/// `resolve_fully` (line 607–628) — the difference is the leaf case:
+/// `resolve_fully` — the difference is the leaf case:
 /// `resolve_fully` chases Infer chains through bindings, this walks
 /// the type tree replacing Param leaves through a HashMap.
+///
+/// `tys: &TyArena` — interior-mutable interner. `kind(ty)` returns a
+/// stable `&TyKind` whose lifetime survives the recursive `intern`
+/// calls below, so the borrow checker is content with the recursive
+/// shape (no `RefCell` guard scoping issues).
+///
+/// Module-private; callers go through [`TypeckResults::substitute_ty`].
 ///
 /// Caller's contract: `subst` must be keyed by every Param that can
 /// appear in `ty`. By spec/16 §HIR, `HirTyKind::Param(htypid)` is only
 /// produced when the source name is in the enclosing fn's
 /// `generic_params` scope, so any Param in `sig.params` / `sig.ret`
-/// belongs to that fn's `generic_params`. `infer_call`'s caller builds
-/// `subst = zip(sig.generic_params, fresh).collect()` — complete by
-/// construction. A missing key is a broken internal invariant; we
+/// belongs to that fn's `generic_params`. Mono builds
+/// `subst = zip(sig.generic_params, type_args).collect()` — complete
+/// by construction. A missing key is a broken internal invariant; we
 /// panic loudly rather than silently passing through.
-pub(super) fn substitute_ty(tys: &mut TyArena, ty: TyId, subst: &HashMap<ParamId, TyId>) -> TyId {
+fn substitute_ty_impl(tys: &TyArena, ty: TyId, subst: &HashMap<ParamId, TyId>) -> TyId {
+    // Clone the kind to release the &TyArena borrow before recursing —
+    // not strictly required (interior-mut intern doesn't conflict with
+    // a live &TyKind from kind()), but cheap and matches resolve_fully's
+    // shape. TyKind is small.
     match tys.kind(ty).clone() {
         TyKind::Param(pid) => *subst.get(&pid).unwrap_or_else(|| {
             panic!(
@@ -674,17 +705,17 @@ pub(super) fn substitute_ty(tys: &mut TyArena, ty: TyId, subst: &HashMap<ParamId
         TyKind::Fn(params, ret, c_variadic) => {
             let params: Vec<_> = params
                 .iter()
-                .map(|&p| substitute_ty(tys, p, subst))
+                .map(|&p| substitute_ty_impl(tys, p, subst))
                 .collect();
-            let ret = substitute_ty(tys, ret, subst);
+            let ret = substitute_ty_impl(tys, ret, subst);
             tys.intern(TyKind::Fn(params, ret, c_variadic))
         }
         TyKind::Ptr(inner, m) => {
-            let inner = substitute_ty(tys, inner, subst);
+            let inner = substitute_ty_impl(tys, inner, subst);
             tys.intern(TyKind::Ptr(inner, m))
         }
         TyKind::Array(elem, len) => {
-            let elem = substitute_ty(tys, elem, subst);
+            let elem = substitute_ty_impl(tys, elem, subst);
             tys.intern(TyKind::Array(elem, len))
         }
 
@@ -858,7 +889,7 @@ impl<'hir> Checker<'hir> {
             }
             HirExprKind::Cast { expr: inner, ty } => {
                 let _ = self.infer_expr(inf, inner);
-                Self::resolve_ty(&mut self.tys, &mut inf.errors, &ty)
+                Self::resolve_ty(&self.tys, &mut inf.errors, &ty)
             }
             HirExprKind::AddrOf {
                 mutability,
@@ -1348,7 +1379,7 @@ impl<'hir> Checker<'hir> {
                 .collect();
             // (b) optional turbofish equate (skipped iff type_args empty)
             for (i, hty) in type_args.iter().enumerate() {
-                let user_ty = Self::resolve_ty(&mut self.tys, &mut inf.errors, hty);
+                let user_ty = Self::resolve_ty(&self.tys, &mut inf.errors, hty);
                 let hty_span = hty.span.clone();
                 unify::equate(self, inf, fresh[i], user_ty, hty_span);
             }
@@ -1364,9 +1395,8 @@ impl<'hir> Checker<'hir> {
                 });
             }
             // (d) Build subst map and (e) substitute callee signature.
-            // Snapshot sig fields first to release the immutable borrow
-            // on `self.fn_sigs` before substitute_ty mutably borrows
-            // `self.tys`.
+            // Interior-mut TyArena: substitute_ty_impl is &TyArena, so
+            // the &self.fn_sigs and &self.tys borrows coexist naturally.
 
             let sig = &self.fn_sigs[fid];
 
@@ -1379,9 +1409,9 @@ impl<'hir> Checker<'hir> {
             let sub_params: Vec<TyId> = sig
                 .params
                 .iter()
-                .map(|&p| substitute_ty(&mut self.tys, p, &subst))
+                .map(|&p| substitute_ty_impl(&self.tys, p, &subst))
                 .collect();
-            let sub_ret = substitute_ty(&mut self.tys, sig.ret, &subst);
+            let sub_ret = substitute_ty_impl(&self.tys, sig.ret, &subst);
 
             // (f) Value-arg arity check + unification on substituted
             // params. Generic externs are forbidden by HIR (E0212),

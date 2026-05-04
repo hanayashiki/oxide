@@ -21,20 +21,46 @@ use crate::hir::{
     FieldIdx, FnId, HBlockId, HElseArm, HExprId, HirArrayLit, HirConst, HirExprKind, HirProgram,
     LocalId, VariantIdx,
 };
+use crate::mono::{InstId, MonoResults};
 use crate::parser::ast::{AssignOp, BinOp, UnOp};
-use crate::typeck::{AdtId, PrimTy, TyId, TyKind, TypeckResults};
+use crate::typeck::{AdtId, ParamId, PrimTy, TyId, TyKind, TypeckResults};
 
 use super::ty::{
     AdtLlTypes, as_prim, is_signed_prim, is_void_ret, lower_fn_type, lower_prim, lower_ty,
     prepare_adt_types,
 };
 
-/// Lower an entire `HirProgram` to an LLVM `Module`. Verifies before
-/// returning; verifier failures panic.
+/// Lower an entire `HirProgram` to an LLVM `Module`. Consumes mono's
+/// `MonoResults` to drive instance-keyed declarations and per-instance
+/// body emission. Verifies before returning; verifier failures panic.
+///
+/// Phase 1 (declare) runs two lookup tables side by side:
+///   - `fn_decls: IndexVec<FnId, Option<FunctionValue>>` — the
+///     FnId-keyed table consulted by `emit_call`'s non-generic /
+///     extern dispatch path. Populated for extern fns (Pass A) and
+///     for non-generic non-extern fns (the same FunctionValue created
+///     in Pass B is also stored here under the FnId).
+///   - `inst_decls: IndexVec<InstId, FunctionValue>` — the InstId-
+///     keyed table consulted by `emit_call`'s generic dispatch path.
+///     Populated for every `Instance` mono produced (Pass B).
+///
+/// Pass A walks `hir.fns` for `is_extern` fns and adds one declaration
+/// per extern (verbatim source name).
+///
+/// Pass B walks `mono.instances` and adds one declaration per instance
+/// (mangled name). When the instance is non-generic non-extern, the
+/// same `FunctionValue` is also stored in `fn_decls[inst.fid]` so
+/// `emit_call` can resolve `Fn(fid)`-callees that have no
+/// `typeck.call_type_args` entry.
+///
+/// After Phase 1, every reachable LLVM symbol exists. Phase 2 emits
+/// each instance's body — including self-recursive ones — without
+/// ordering concerns.
 pub fn codegen<'ctx>(
     ctx: &'ctx Context,
     hir: &HirProgram,
     typeck_results: &TypeckResults,
+    mono: &MonoResults,
     module_name: &str,
 ) -> Module<'ctx> {
     let module = ctx.create_module(module_name);
@@ -44,19 +70,63 @@ pub fn codegen<'ctx>(
     // then phase B set_body recursively. Mirrors typeck's phase 0/0.5.
     let adt_ll = prepare_adt_types(ctx, typeck_results);
 
-    // Phase 1 — declare functions. `Module::add_function` uses interior
-    // mutability, so fn_decls is filled before constructing Codegen and
-    // Codegen never needs &mut.
-    let mut fn_decls: IndexVec<FnId, FunctionValue<'ctx>> = IndexVec::with_capacity(hir.fns.len());
-    for (_fid, hir_fn) in hir.fns.iter_enumerated() {
-        let sig = typeck_results.fn_sig(_fid);
-        let fn_ty = lower_fn_type(ctx, typeck_results.tys(), &adt_ll, sig);
-        let fnv = module.add_function(&hir_fn.name, fn_ty, None);
+    // Phase 1 Pass A — extern fns. Declared with their verbatim source
+    // names (the linker resolves these against external object files).
+    // `fn_decls` uses `Option` because generic fns produce no FnId-keyed
+    // entry — they're keyed by instance via `inst_decls` instead.
+    // Pass B fills in `fn_decls` for non-generic non-extern fns when it
+    // creates their FunctionValue.
+    let mut fn_decls: IndexVec<FnId, Option<FunctionValue<'ctx>>> =
+        (0..hir.fns.len()).map(|_| None).collect();
+    for (fid, hir_fn) in hir.fns.iter_enumerated() {
+        if hir_fn.is_extern {
+            let sig = typeck_results.fn_sig(fid);
+            let fn_ty = lower_fn_type(
+                ctx,
+                typeck_results.tys(),
+                &adt_ll,
+                &sig.params,
+                sig.ret,
+                sig.c_variadic,
+            );
+            let fnv = module.add_function(&hir_fn.name, fn_ty, None);
+            fn_decls[fid] = Some(fnv);
+        }
+    }
+
+    // Phase 1 Pass B — instances. Each `Instance` from mono produces
+    // one declaration with its mangled name and substituted signature.
+    // The FunctionValue lands in `inst_decls[inst_id]` for the generic
+    // dispatch path. For a non-generic non-extern instance (the
+    // dominant case in v0 programs that don't use generics), the same
+    // FunctionValue is also recorded under `fn_decls[inst.fid]` so
+    // `emit_call`'s non-generic dispatch path can resolve it by FnId
+    // without consulting the instance map.
+    let mut inst_decls: IndexVec<InstId, FunctionValue<'ctx>> =
+        IndexVec::with_capacity(mono.instances.len());
+    for (_inst_id, inst) in mono.instances.iter_enumerated() {
+        let c_variadic = hir.fns[inst.fid].is_variadic;
+        let fn_ty = lower_fn_type(
+            ctx,
+            typeck_results.tys(),
+            &adt_ll,
+            &inst.params,
+            inst.ret,
+            c_variadic,
+        );
+        let fnv = module.add_function(&inst.mangled, fn_ty, None);
+        // Attach LLVM param names (debug-friendly).
         for (i, pv) in fnv.get_param_iter().enumerate() {
-            let lid = hir_fn.params[i];
+            let lid = hir.fns[inst.fid].params[i];
             pv.set_name(&hir.locals[lid].name);
         }
-        fn_decls.push(fnv);
+        inst_decls.push(fnv);
+        // Non-generic non-extern instance: also publish the
+        // FunctionValue in `fn_decls[inst.fid]` so `emit_call`'s
+        // FnId-keyed fallback path resolves it.
+        if inst.type_args.is_empty() && !hir.fns[inst.fid].is_extern {
+            fn_decls[inst.fid] = Some(fnv);
+        }
     }
 
     let cg = Codegen {
@@ -65,19 +135,23 @@ pub fn codegen<'ctx>(
         builder,
         hir,
         typeck_results,
+        mono,
         fn_decls,
+        inst_decls,
         adt_ll,
         str_counter: Cell::new(0),
         llvm_trap: Cell::new(None),
     };
 
-    // Pass 2 — define. Each fn body gets a fresh FnCodegenContext on
-    // the stack inside `lower_fn`. Foreign fns (`body == None`) skip this
-    // pass entirely; the FunctionValue from pass 1 stays as a `declare`
-    // line in the IR with no basic blocks.
-    for (fid, hir_fn) in cg.hir.fns.iter_enumerated() {
-        if hir_fn.body.is_some() {
-            cg.lower_fn(fid);
+    // Pass 2 — define. Iterate mono.instances rather than hir.fns:
+    // generic fns produce multiple instances, each with its own body
+    // emission under a distinct subst; non-generic fns produce exactly
+    // one instance. Foreign fns are never instantiated (mono skips
+    // them in seed_entry_points), so `lower_fn` only sees body-having
+    // bodies.
+    for (inst_id, inst) in cg.mono.instances.iter_enumerated() {
+        if cg.hir.fns[inst.fid].body.is_some() {
+            cg.lower_fn(inst_id);
         }
     }
 
@@ -96,7 +170,28 @@ struct Codegen<'a, 'ctx> {
     builder: Builder<'ctx>,
     hir: &'a HirProgram,
     typeck_results: &'a TypeckResults,
-    fn_decls: IndexVec<FnId, FunctionValue<'ctx>>,
+    /// Mono's instance graph. Codegen reads `mono.instances[inst_id]` for
+    /// per-instance signatures (substituted params/ret) and consults
+    /// `mono.instance_map[(fid, resolved_args)]` at every generic call
+    /// site to dispatch to the correct instance.
+    mono: &'a MonoResults,
+    /// FnId-keyed LLVM declarations. `Some` for fns that have a single
+    /// well-defined FunctionValue under their FnId — namely:
+    /// (1) extern fns (Pass A creates the declaration with the verbatim
+    /// source name); and (2) non-generic non-extern fns (Pass B creates
+    /// the FunctionValue under the mangled name in `inst_decls`, then
+    /// also stores it here under the FnId). `None` for generic fns,
+    /// which produce one FunctionValue per instantiation — those live
+    /// only in `inst_decls`, keyed by InstId. `emit_call`'s non-generic
+    /// dispatch path reads here whenever the call has no
+    /// `typeck.call_type_args` entry; in that case the unwrap is sound.
+    fn_decls: IndexVec<FnId, Option<FunctionValue<'ctx>>>,
+    /// Per-instance LLVM declarations. Phase 1 Pass B populates from
+    /// `mono.instances`; Phase 2 reads to find the FunctionValue being
+    /// defined. `emit_call`'s generic-call path resolves
+    /// `mono.instance_map[(fid, resolved_args)] → InstId` and then
+    /// `inst_decls[inst_id]` to the FunctionValue.
+    inst_decls: IndexVec<InstId, FunctionValue<'ctx>>,
     /// LLVM struct type per `AdtId`, populated up front by
     /// `prepare_adt_types`. All later `lower_ty` / `lower_fn_type` calls
     /// thread this in.
@@ -111,11 +206,21 @@ struct Codegen<'a, 'ctx> {
     llvm_trap: Cell<Option<FunctionValue<'ctx>>>,
 }
 
-/// Per-fn transient state. Lives on the stack for the duration of one fn
-/// body — created in `lower_fn` and threaded as a `&mut` parameter through
-/// the emit methods. Plain data; no methods of its own.
+/// Per-fn transient state. Lives on the stack for the duration of one
+/// instance's body — created in `lower_fn` and threaded as a `&mut`
+/// parameter through the emit methods. Plain data; no methods of its
+/// own.
 struct FnCodegenContext<'ctx> {
-    fn_id: FnId,
+    /// Pointer back to this body's `Instance`. The instance carries
+    /// fid, type_args, params, ret. `fn_id` is recoverable as
+    /// `mono.instances[inst_id].fid` so it's not stored separately.
+    inst_id: InstId,
+    /// Per-body type-parameter substitution. Built once at body-entry
+    /// from `sig.generic_params` zipped with `inst.type_args`. Empty
+    /// for non-generic instances (in which case `substitute_ty` is
+    /// identity through interning, so the same code path works
+    /// uniformly).
+    subst: HashMap<ParamId, TyId>,
     fn_value: FunctionValue<'ctx>,
     /// Dedicated alloca block for this fn. `allocas:` is the entry block
     /// (first appended) and is terminated by `br label %body`. All allocas
@@ -148,6 +253,18 @@ struct LoopTargets<'ctx> {
     end_bb: BasicBlock<'ctx>,
     continue_target_bb: BasicBlock<'ctx>,
     result_slot: Option<PointerValue<'ctx>>,
+}
+
+/// Discriminator on `emit_call`'s callee dispatch: where to look up the
+/// callee's parameter types. `Inst` for generic calls (resolved via
+/// `mono.instance_map`); `Fn` for non-generic and extern calls (resolved
+/// via `fn_decls`). Both arms carry a `Copy` id; per-param lookups
+/// happen at use site through a closure that reads through the right
+/// table.
+#[derive(Copy, Clone)]
+enum ParamSource {
+    Inst(InstId),
+    Fn(FnId),
 }
 
 /// The form a value-producing expression takes after lowering. This is the
@@ -230,12 +347,20 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         slot
     }
 
-    fn ty_of(&self, eid: HExprId) -> TyId {
-        self.typeck_results.type_of_expr(eid)
+    /// Body-internal expr type. Substitutes `typeck.expr_tys[eid]`
+    /// through the per-body `fx.subst` so generic-fn bodies see ground
+    /// types at codegen. Empty subst → identity through interning, so
+    /// non-generic instances take the same code path. `&self` because
+    /// `TyArena::intern` is interior-mut (Pre-Phase 0).
+    fn ty_of(&self, fx: &FnCodegenContext<'ctx>, eid: HExprId) -> TyId {
+        self.typeck_results
+            .substitute_ty(self.typeck_results.type_of_expr(eid), &fx.subst)
     }
 
-    fn local_ty(&self, lid: LocalId) -> TyId {
-        self.typeck_results.type_of_local(lid)
+    /// Body-internal local type. Same substitution shape as `ty_of`.
+    fn local_ty(&self, fx: &FnCodegenContext<'ctx>, lid: LocalId) -> TyId {
+        self.typeck_results
+            .substitute_ty(self.typeck_results.type_of_local(lid), &fx.subst)
     }
 
     /// `true` iff the resolved typeck kind is `Array(_, Some(_))`.
@@ -414,8 +539,21 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
     // ---------- per-fn entry ----------
 
-    fn lower_fn(&self, fid: FnId) {
-        let fnv = self.fn_decls[fid];
+    fn lower_fn(&self, inst_id: InstId) {
+        let fid = self.mono.instances[inst_id].fid;
+        let fnv = self.inst_decls[inst_id];
+
+        // Build per-body subst. Borrow-zip — no clone of type_args.
+        // self.typeck_results.fn_sig and self.mono.instances are
+        // disjoint sub-objects of self, so the two `&` reads coexist.
+        let subst: HashMap<ParamId, TyId> = self
+            .typeck_results
+            .fn_sig(fid)
+            .generic_params
+            .iter()
+            .copied()
+            .zip(self.mono.instances[inst_id].type_args.iter().copied())
+            .collect();
 
         // Two blocks at start: `allocas:` (the entry block) holds only
         // alloca instructions and falls through to `body:` via an
@@ -427,7 +565,8 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         self.builder.position_at_end(body_bb);
 
         let mut fx = FnCodegenContext {
-            fn_id: fid,
+            inst_id,
+            subst,
             fn_value: fnv,
             allocas_bb,
             locals: HashMap::new(),
@@ -441,7 +580,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         // before passing. The incoming `ptr` IS the local's storage.
         let hir_fn = &self.hir.fns[fid];
         for (i, &lid) in hir_fn.params.iter().enumerate() {
-            let pty = self.local_ty(lid);
+            let pty = self.local_ty(&fx, lid);
             let arg = fnv.get_nth_param(i as u32).expect("param exists");
             if self.is_sized_array(pty) {
                 fx.locals.insert(lid, arg.into_pointer_value());
@@ -464,8 +603,11 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         let body_val = self.emit_block(&mut fx, body_id);
 
         if !self.is_terminated() {
-            let sig = self.typeck_results.fn_sig(fid);
-            if is_void_ret(self.typeck_results.tys(), sig.ret) {
+            // Use the instance's already-substituted ret type, not the
+            // raw FnSig's (which may contain Param leaves for generic
+            // fns). For non-generic instances, inst.ret == sig.ret.
+            let ret_ty = self.mono.instances[inst_id].ret;
+            if is_void_ret(self.typeck_results.tys(), ret_ty) {
                 self.builder.build_return(None).unwrap();
             } else {
                 // Array-typed return — Path A: body produced a place ptr;
@@ -473,7 +615,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 // so LLVM's calling convention does the sret/register-return
                 // rewrite. Non-array returns: load_value passes through.
                 let op = body_val.expect("non-void fn body produced no value");
-                let v = self.load_value(op, sig.ret, "ret.load");
+                let v = self.load_value(op, ret_ty, "ret.load");
                 self.builder.build_return(Some(&v)).unwrap();
             }
         }
@@ -522,7 +664,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         }
         let kind = self.hir.exprs[eid].kind.clone();
         match kind {
-            HirExprKind::IntLit(n) => Some(self.emit_int_lit(eid, n)),
+            HirExprKind::IntLit(n) => Some(self.emit_int_lit(fx, eid, n)),
             HirExprKind::BoolLit(b) => Some(Operand::Value(
                 self.ctx.bool_type().const_int(b as u64, false).into(),
             )),
@@ -540,7 +682,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 // loaded aggregate). `()`-typed locals materialize as
                 // Unit. Everything else loads to Value. See
                 // spec/09_ARRAY.md "arrays-as-places everywhere".
-                let ty = self.local_ty(lid);
+                let ty = self.local_ty(fx, lid);
                 let kind = self.typeck_results.tys().kind(ty);
                 Some(match kind {
                     TyKind::Array(_, Some(_)) => Operand::Place(fx.locals[&lid]),
@@ -566,11 +708,13 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     Some(Operand::Unit)
                 }
             }
-            // Phase B added `type_args` to HIR's Call; codegen
-            // doesn't consume it until Phase E (mono-driven instance
-            // emission). See spec/16_GENERIC.md §Codegen.
+            // Codegen consults `typeck.call_type_args[eid]` (sparse —
+            // only for generic call sites) plus mono.instance_map to
+            // resolve the callee instance for generic calls. Non-generic
+            // and extern calls fall through to fn_decls[fid]. See
+            // spec/16_GENERIC.md §Codegen.
             HirExprKind::Call { callee, args, type_args: _ } => {
-                self.emit_call(fx, callee, &args)
+                self.emit_call(fx, eid, callee, &args)
             }
             HirExprKind::Cast { expr, ty: _ } => self.emit_cast(fx, eid, expr),
             HirExprKind::If {
@@ -596,7 +740,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             }
             HirExprKind::StrLit(s) => Some(self.emit_str_lit(&s)),
             HirExprKind::Index { base, index } => self.emit_index_rvalue(fx, base, index),
-            HirExprKind::ArrayLit(lit) => self.emit_array_lit(fx, lit, self.ty_of(eid)),
+            HirExprKind::ArrayLit(lit) => self.emit_array_lit(fx, lit, self.ty_of(fx, eid)),
             HirExprKind::Field { base, name } => self.emit_field(fx, base, &name),
             HirExprKind::StructLit { adt, fields } => self.emit_struct_lit(fx, adt, &fields),
             // `&place` / `&mut place` — the slot pointer that `lvalue`
@@ -616,7 +760,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             }
             // `has_break` and `source` are read by typeck for the value
             // type and by HIR pretty-print respectively; codegen reads
-            // `self.ty_of(eid)` directly to decide whether to allocate
+            // `self.ty_of(fx, eid)` directly to decide whether to allocate
             // a result slot, so it ignores them here.
             HirExprKind::Loop {
                 init,
@@ -666,8 +810,8 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         Operand::Value(global.as_pointer_value().into())
     }
 
-    fn emit_int_lit(&self, eid: HExprId, n: u64) -> Operand<'ctx> {
-        let ty = self.ty_of(eid);
+    fn emit_int_lit(&self, fx: &FnCodegenContext<'ctx>, eid: HExprId, n: u64) -> Operand<'ctx> {
+        let ty = self.ty_of(fx, eid);
         match self.typeck_results.tys().kind(ty) {
             TyKind::Prim(p) => Operand::Value(lower_prim(self.ctx, *p).const_int(n, false).into()),
             other => panic!("int lit had non-prim type {:?}", other),
@@ -694,7 +838,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 // typeck's `auto_deref_ptr` already accepted the syntax,
                 // codegen just lowers it.
                 let (base_ptr, base_ty) =
-                    self.peel_ptrs(self.lvalue(fx, base), self.ty_of(base));
+                    self.peel_ptrs(self.lvalue(fx, base), self.ty_of(fx, base));
                 let aid = match self.typeck_results.tys().kind(base_ty) {
                     TyKind::Adt(aid) => *aid,
                     other => panic!("Field base lvalue: non-Adt type after peel {:?}", other),
@@ -783,7 +927,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         // aggregate (Ptr-typed exprs are place-form via Local/Field/Deref),
         // so peeling unconditionally is safe — `peel_ptrs_ty` is a no-op
         // on non-Ptr types.
-        let base_ty = self.peel_ptrs_ty(self.ty_of(base));
+        let base_ty = self.peel_ptrs_ty(self.ty_of(fx, base));
         let aid = match self.typeck_results.tys().kind(base_ty) {
             TyKind::Adt(aid) => *aid,
             other => panic!("Field rvalue: non-Adt base type after peel {:?}", other),
@@ -798,7 +942,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         if base_expr.is_place {
             // Place path — single-field load via `getelementptr`, no whole-struct copy.
             // Peel base_ptr in lockstep with base_ty (loading at each Ptr layer).
-            let (base_ptr, _) = self.peel_ptrs(self.lvalue(fx, base), self.ty_of(base));
+            let (base_ptr, _) = self.peel_ptrs(self.lvalue(fx, base), self.ty_of(fx, base));
             let gep = self.field_gep(base_ptr, base_ty, field_idx);
             // Array-typed fields stay in place form: hand back the GEP'd
             // pointer instead of loading the aggregate. Mirrors the
@@ -867,7 +1011,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 .iter()
                 .find(|p| p.name == declared.name)
                 .expect("typeck guaranteed all fields are provided");
-            let provided_ty = self.ty_of(provided.value);
+            let provided_ty = self.ty_of(fx, provided.value);
             let provided_op = self.emit_expr(fx, provided.value)?;
             let value = self.load_value(provided_op, provided_ty, "load");
             let new_agg = self
@@ -899,7 +1043,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         match lit {
             HirArrayLit::Elems(es) => {
                 for (i, eid) in es.into_iter().enumerate() {
-                    let elem_ty = self.ty_of(eid);
+                    let elem_ty = self.ty_of(fx, eid);
                     let elem_op = self.emit_expr(fx, eid)?;
                     let v = self.load_value(elem_op, elem_ty, "load");
                     let idx_v = i64_ty.const_int(i as u64, false);
@@ -915,7 +1059,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 init,
                 len: HirConst::Lit(n),
             } => {
-                let init_ty = self.ty_of(init);
+                let init_ty = self.ty_of(fx, init);
                 let init_op = self.emit_expr(fx, init)?;
                 let init_v = self.load_value(init_op, init_ty, "load");
                 self.emit_repeat_loop(fx, slot, arr_ll, init_v, n);
@@ -976,7 +1120,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         base_eid: HExprId,
         idx_eid: HExprId,
     ) -> Option<(PointerValue<'ctx>, TyId)> {
-        let base_ty = self.ty_of(base_eid);
+        let base_ty = self.ty_of(fx, base_eid);
         let i64_ty = self.ctx.i64_type();
         let zero = i64_ty.const_zero();
         let tcx = self.typeck_results.tys();
@@ -1013,7 +1157,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             cur_ty = next;
         }
 
-        let idx_ty = self.ty_of(idx_eid);
+        let idx_ty = self.ty_of(fx, idx_eid);
         let idx_op = self.emit_expr(fx, idx_eid)?;
         let idx_v = self.load_value(idx_op, idx_ty, "load").into_int_value();
 
@@ -1059,7 +1203,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             let ptr = self.emit_deref_ptr(fx, expr)?;
             return Some(Operand::Place(ptr));
         }
-        let inner_ty = self.ty_of(expr);
+        let inner_ty = self.ty_of(fx, expr);
         let inner_op = self.emit_expr(fx, expr)?;
         let v = self.load_value(inner_op, inner_ty, "load").into_int_value();
         let ty = v.get_type();
@@ -1086,7 +1230,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         fx: &mut FnCodegenContext<'ctx>,
         expr: HExprId,
     ) -> Option<PointerValue<'ctx>> {
-        let inner_ty = self.ty_of(expr);
+        let inner_ty = self.ty_of(fx, expr);
         let inner_op = self.emit_expr(fx, expr)?;
         Some(
             self.load_value(inner_op, inner_ty, "deref")
@@ -1107,8 +1251,8 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             return self.emit_short_circuit(fx, op, lhs, rhs);
         }
 
-        let lt = self.ty_of(lhs);
-        let rt = self.ty_of(rhs);
+        let lt = self.ty_of(fx, lhs);
+        let rt = self.ty_of(fx, rhs);
         let l_op = self.emit_expr(fx, lhs)?;
         let r_op = self.emit_expr(fx, rhs)?;
         let l = self.load_value(l_op, lt, "load").into_int_value();
@@ -1225,7 +1369,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         lhs: HExprId,
         rhs: HExprId,
     ) -> Option<Operand<'ctx>> {
-        let lt = self.ty_of(lhs);
+        let lt = self.ty_of(fx, lhs);
         let l_op = self.emit_expr(fx, lhs)?;
         let l = self.load_value(l_op, lt, "load").into_int_value();
         let lhs_end_bb = self.builder.get_insert_block().unwrap();
@@ -1248,7 +1392,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         }
 
         self.builder.position_at_end(rhs_bb);
-        let rt = self.ty_of(rhs);
+        let rt = self.ty_of(fx, rhs);
         let r_op = self.emit_expr(fx, rhs);
         // rhs may diverge (`a && return`); short-circuit still has the
         // lhs-false predecessor edge into end_bb, so the phi is well-formed
@@ -1290,7 +1434,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         target: HExprId,
         rhs: HExprId,
     ) {
-        let target_ty = self.ty_of(target);
+        let target_ty = self.ty_of(fx, target);
         // Rust evaluates rhs first; if rhs diverges (`b = return;`), the
         // BB is already terminated and lvalue computation is unreachable.
         let Some(rhs_op) = self.emit_expr(fx, rhs) else {
@@ -1347,13 +1491,72 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     fn emit_call(
         &self,
         fx: &mut FnCodegenContext<'ctx>,
+        parent_eid: HExprId,            // the call expression's eid
         callee_eid: HExprId,
         args: &[HExprId],
     ) -> Option<Operand<'ctx>> {
         let HirExprKind::Fn(fid) = self.hir.exprs[callee_eid].kind.clone() else {
             panic!("v0 codegen: callee must be a direct fn reference")
         };
-        let fnv = self.fn_decls[fid];
+
+        // Discriminator: typeck.call_type_args has an entry for *this*
+        // eid iff the callee is generic. Missing → non-generic or extern
+        // callee, dispatch via fn_decls. Present → resolve through
+        // mono.instance_map to find the right Instance.
+        //
+        // For generic calls: the typeck-recorded type-args may contain
+        // `Param(_)` of the *caller's* generic_params. We substitute
+        // through `fx.subst` to ground them, then look up
+        // `mono.instance_map[(fid, resolved_args)]`. The same syntactic
+        // call site can resolve to different instances under different
+        // parents (`outer<i32>` vs `outer<i64>` body), which is the
+        // whole reason this lookup lives at codegen time and not in a
+        // per-eid mono cache.
+        let (fnv, n_fixed, ret_ty, c_variadic, param_src) =
+            if let Some(typeck_args) = self.typeck_results.call_type_args.get(&parent_eid) {
+                let resolved_args: Vec<TyId> = typeck_args
+                    .iter()
+                    .map(|&t| self.typeck_results.substitute_ty(t, &fx.subst))
+                    .collect();
+                let inst_id = *self
+                    .mono
+                    .instance_map
+                    .get(&(fid, resolved_args))
+                    .expect("mono should have instantiated every reachable generic call");
+                let inst = &self.mono.instances[inst_id];
+                (
+                    self.inst_decls[inst_id],
+                    inst.params.len(),
+                    inst.ret,
+                    self.hir.fns[inst.fid].is_variadic,
+                    ParamSource::Inst(inst_id),
+                )
+            } else {
+                let sig = self.typeck_results.fn_sig(fid);
+                let fnv = self.fn_decls[fid].expect(
+                    "non-generic / extern callee should have a fn_decls entry: \
+                     extern fns are declared in Pass A, non-generic non-extern \
+                     fns are published into fn_decls during Pass B",
+                );
+                (
+                    fnv,
+                    sig.params.len(),
+                    sig.ret,
+                    sig.c_variadic,
+                    ParamSource::Fn(fid),
+                )
+            };
+
+        // Per-param type lookup. Reads from the appropriate side
+        // (mono.instances[inst].params for generic, fn_sig.params for
+        // non-generic) at use site — no Vec<TyId> clone out of the
+        // dispatch match above. TyId is Copy.
+        let param_ty = |i: usize| -> TyId {
+            match param_src {
+                ParamSource::Inst(inst_id) => self.mono.instances[inst_id].params[i],
+                ParamSource::Fn(fid) => self.typeck_results.fn_sig(fid).params[i],
+            }
+        };
 
         // Args. For each `Array(_, Some(_))`-typed arg: byval ABI per
         // spec/09_ARRAY.md — caller owns a fresh slot, memcpys from the
@@ -1367,26 +1570,30 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         // the C default argument promotions to trailing variadic args
         // (C11 §6.5.2.2 ¶7) — the front-end's responsibility, not
         // LLVM's. See `promote_for_variadic` doc-comment for why.
-        let n_fixed = self.typeck_results.fn_sig(fid).params.len();
         let mut arg_vals: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(args.len());
         for (i, &a) in args.iter().enumerate() {
-            let arg_ty = self.ty_of(a);
+            let arg_ty = self.ty_of(fx, a);
             let op = self.emit_expr(fx, a)?;
             if i < n_fixed {
-                if self.is_sized_array(arg_ty) {
+                // Decide byval-spill on the *param* type (the callee's
+                // ABI), not the arg type — for generic instances these
+                // differ from the raw FnSig because the param type was
+                // substituted.
+                let pty = param_ty(i);
+                if self.is_sized_array(pty) {
                     let fresh = self.spill_to_place_fresh(fx, op, arg_ty, "call.arg.slot");
                     arg_vals.push(fresh.into());
                 } else {
                     arg_vals.push(self.load_value(op, arg_ty, "load").into());
                 }
             } else {
+                debug_assert!(c_variadic, "extra args past n_fixed only on c_variadic call");
                 arg_vals.push(self.promote_for_variadic(op, arg_ty).into());
             }
         }
 
         let call = self.builder.build_call(fnv, &arg_vals, "call").unwrap();
 
-        let ret_ty = self.typeck_results.fn_sig(fid).ret;
         if is_void_ret(self.typeck_results.tys(), ret_ty) {
             // Void / Never return: the call expression types as `()`
             // (or `!`, but B005 collapses both at the operand level).
@@ -1463,8 +1670,8 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         eid: HExprId,
         inner: HExprId,
     ) -> Option<Operand<'ctx>> {
-        let dst_ty = self.ty_of(eid);
-        let src_ty = self.ty_of(inner);
+        let dst_ty = self.ty_of(fx, eid);
+        let src_ty = self.ty_of(fx, inner);
         let inner_op = self.emit_expr(fx, inner)?;
         let v = self.load_value(inner_op, src_ty, "load").into_int_value();
         let dst_prim = as_prim(self.typeck_results.tys(), dst_ty)
@@ -1527,7 +1734,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 .unwrap();
         }
 
-        let cond_ty = self.ty_of(cond);
+        let cond_ty = self.ty_of(fx, cond);
         let cond_op = self.emit_expr(fx, cond)?;
         let cond_v = self.load_value(cond_op, cond_ty, "load").into_int_value();
         let parent = fx.fn_value;
@@ -1542,7 +1749,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         // Materialize a result slot iff the if expression has a real
         // value type. For unit / never ifs we skip — keeps IR clean even
         // though the {} alloca would be harmless.
-        let if_ty = self.ty_of(eid);
+        let if_ty = self.ty_of(fx, eid);
         let result_slot = if !is_void_ret(self.typeck_results.tys(), if_ty) {
             let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, if_ty);
             Some(self.alloca_in_entry(fx, llty, "if.slot"))
@@ -1639,7 +1846,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         // Result slot: allocate iff the loop's typeck'd type is a value
         // type (non-`()`, non-`!`). Concretely fires only for
         // `cond.is_none() && has_break` with at least one valued break.
-        let loop_ty = self.ty_of(eid);
+        let loop_ty = self.ty_of(fx, eid);
         let result_slot = if !is_void_ret(self.typeck_results.tys(), loop_ty) {
             let llty = lower_ty(self.ctx, self.typeck_results.tys(), &self.adt_ll, loop_ty);
             Some(self.alloca_in_entry(fx, llty, "loop.slot"))
@@ -1665,7 +1872,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         // cond: %c = <cond>; br i1 %c, body, end
         if let (Some(cbb), Some(cond_eid)) = (cond_bb, cond) {
             self.builder.position_at_end(cbb);
-            let cond_ty = self.ty_of(cond_eid);
+            let cond_ty = self.ty_of(fx, cond_eid);
             if let Some(cond_op) = self.emit_expr(fx, cond_eid) {
                 let cond_v = self.load_value(cond_op, cond_ty, "load").into_int_value();
                 if !self.is_terminated() {
@@ -1737,7 +1944,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
             .last()
             .expect("HIR ensured break is inside a loop");
         if let Some(eid) = expr {
-            let ty = self.ty_of(eid);
+            let ty = self.ty_of(fx, eid);
             let op = self.emit_expr(fx, eid);
             if self.is_terminated() {
                 return;
@@ -1772,8 +1979,10 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     // ---------- return ----------
 
     fn emit_return(&self, fx: &mut FnCodegenContext<'ctx>, val: Option<HExprId>) {
-        let sig = self.typeck_results.fn_sig(fx.fn_id).clone();
-        let ret_ty = sig.ret;
+        // Use the instance's substituted ret type, not the raw FnSig's
+        // (which carries Param leaves for generic fns). For non-generic
+        // instances, inst.ret == sig.ret.
+        let ret_ty = self.mono.instances[fx.inst_id].ret;
         if is_void_ret(self.typeck_results.tys(), ret_ty) {
             // Either `return;` or `return e` where e itself is divergent.
             if let Some(v_eid) = val {
@@ -1791,7 +2000,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 // Array return: Path A — load the place into an SSA aggregate
                 // before returning by value. load_value handles this uniformly
                 // (Place → load, Value → passthrough).
-                let v = self.load_value(op, self.ty_of(eid), "ret.load");
+                let v = self.load_value(op, self.ty_of(fx, eid), "ret.load");
                 self.builder.build_return(Some(&v)).unwrap();
             }
             None => {
@@ -1808,7 +2017,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     // ---------- let ----------
 
     fn emit_let(&self, fx: &mut FnCodegenContext<'ctx>, lid: LocalId, init: Option<HExprId>) {
-        let ty = self.local_ty(lid);
+        let ty = self.local_ty(fx, lid);
         let local = &self.hir.locals[lid];
 
         // `Never`-typed locals (`let a = loop {};`, `let a = return;`)

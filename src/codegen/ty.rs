@@ -11,7 +11,7 @@ use inkwell::context::Context;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType};
 
 use crate::hir::VariantIdx;
-use crate::typeck::{AdtId, FnSig, PrimTy, TyArena, TyId, TyKind, TypeckResults};
+use crate::typeck::{AdtId, PrimTy, TyArena, TyId, TyKind, TypeckResults};
 
 /// Per-`AdtId` cache of the LLVM struct types. Indexed by `AdtId`; entry
 /// `aid` is the type used for any `TyKind::Adt(aid)` lowering.
@@ -105,8 +105,15 @@ pub fn lower_prim<'ctx>(ctx: &'ctx Context, p: PrimTy) -> inkwell::types::IntTyp
     }
 }
 
-/// Build a `FunctionType` from a typecheck `FnSig`. Unit/Never returns
-/// become LLVM `void`.
+/// Build a `FunctionType` from raw param types, return type, and
+/// c_variadic flag. Unit/Never returns become LLVM `void`.
+///
+/// Takes `(params, ret, c_variadic)` as plain arguments rather than a
+/// `&FnSig` so callers can pass `(&inst.params, inst.ret,
+/// hir.fns[fid].is_variadic)` from a mono `Instance` without
+/// synthesizing a pseudo `FnSig` (which would force a `Vec<TyId>` clone
+/// of the params). Existing callers pass `(&sig.params, sig.ret,
+/// sig.c_variadic)`.
 ///
 /// Array params lower to LLVM `ptr` (manual byval ABI per
 /// spec/09_ARRAY.md): the caller copies into a fresh slot and passes
@@ -118,10 +125,11 @@ pub fn lower_fn_type<'ctx>(
     ctx: &'ctx Context,
     tcx: &TyArena,
     adt_ll: &AdtLlTypes<'ctx>,
-    sig: &FnSig,
+    params: &[TyId],
+    ret: TyId,
+    c_variadic: bool,
 ) -> FunctionType<'ctx> {
-    let params: Vec<BasicMetadataTypeEnum<'ctx>> = sig
-        .params
+    let params: Vec<BasicMetadataTypeEnum<'ctx>> = params
         .iter()
         .map(|&p| {
             if let TyKind::Array(_, Some(_)) = tcx.kind(p) {
@@ -131,10 +139,10 @@ pub fn lower_fn_type<'ctx>(
             }
         })
         .collect();
-    if is_void_ret(tcx, sig.ret) {
-        ctx.void_type().fn_type(&params, sig.c_variadic)
+    if is_void_ret(tcx, ret) {
+        ctx.void_type().fn_type(&params, c_variadic)
     } else {
-        lower_ty(ctx, tcx, adt_ll, sig.ret).fn_type(&params, sig.c_variadic)
+        lower_ty(ctx, tcx, adt_ll, ret).fn_type(&params, c_variadic)
     }
 }
 

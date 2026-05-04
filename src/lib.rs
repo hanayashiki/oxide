@@ -4,6 +4,7 @@ pub mod config;
 pub mod hir;
 pub mod lexer;
 pub mod loader;
+pub mod mono;
 pub mod parser;
 pub mod reporter;
 pub mod session;

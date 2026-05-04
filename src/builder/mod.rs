@@ -24,8 +24,10 @@ use std::process::ExitStatus;
 
 use inkwell::context::Context;
 
+use crate::codegen;
 use crate::config::OptLevel;
 use crate::hir::HirProgram;
+use crate::mono::MonoResults;
 use crate::session::Session;
 use crate::typeck::TypeckResults;
 
@@ -35,12 +37,13 @@ pub fn build(
     sess: &Session,
     hir: &HirProgram,
     typeck: &TypeckResults,
+    mono: &MonoResults,
     opts: &BuildOptions,
 ) -> Result<BuildArtifact, BuildError> {
     let machine = target::resolve(&sess.config)?;
 
     let ctx = Context::create();
-    let module = crate::codegen::codegen(&ctx, hir, typeck, &opts.module_name);
+    let module = codegen::codegen(&ctx, hir, typeck, mono, &opts.module_name);
     target::stamp_module(&module, &machine);
 
     if sess.config.opt_level != OptLevel::None {
@@ -82,11 +85,9 @@ pub fn build(
         }
         EmitKind::Exe => {
             let exe_vfs = resolve_output_path(host, opts, exe_extension())?;
-            let obj_vfs = host.workdir().join(format!(
-                "{}-{}.o",
-                opts.module_name,
-                std::process::id()
-            ));
+            let obj_vfs =
+                host.workdir()
+                    .join(format!("{}-{}.o", opts.module_name, std::process::id()));
             let obj_real = emit::write_obj(host, &machine, &module, &obj_vfs)?;
             let exe_real = link::link_executable(
                 host,
@@ -222,7 +223,10 @@ pub enum BuildError {
     /// Failure writing IR / bitcode / object to disk via inkwell.
     Emit { path: PathBuf, msg: String },
     /// Filesystem-level error (mkdir, materialize) outside inkwell.
-    Io { path: PathBuf, source: std::io::Error },
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     /// Linker binary not on `PATH` (or absolute path doesn't exist).
     LinkerNotFound { tried: Vec<String> },
     /// Linker spawned but exited non-zero.
@@ -247,7 +251,11 @@ impl std::fmt::Display for BuildError {
             Self::LinkerNotFound { tried } => {
                 write!(f, "linker not found (tried: {})", tried.join(", "))
             }
-            Self::LinkerFailed { linker, status, stderr } => {
+            Self::LinkerFailed {
+                linker,
+                status,
+                stderr,
+            } => {
                 write!(
                     f,
                     "linker `{linker}` exited with status {status}\nstderr:\n{stderr}"

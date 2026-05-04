@@ -201,7 +201,14 @@ struct LinkedList<T> {
     next: *mut LinkedList<T>,
 }
 
+// ✅ explicitly typed
 let mut linked_list = LinkedList::<i32> {
+    value: 0,
+    next: null,
+};
+
+// ✅ inferred
+let mut linked_list = LinkedList {
     value: 0,
     next: null,
 };
