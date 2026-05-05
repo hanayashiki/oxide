@@ -67,10 +67,14 @@ fn mangle_ty(out: &mut String, tys: &TyArena, ty: TyId) {
             }
             mangle_ty(out, tys, *inner);
         }
-        TyKind::Array(elem, Some(n)) => {
+        TyKind::Array(elem, len) => {
             out.push_str("$array_");
             mangle_ty(out, tys, *elem);
-            let _ = write!(out, "_$n{n}");
+            if let Some(n) = len {
+                out.push_str(&format!("_$n{n}"));
+            } else {
+                out.push_str("_$unsized");
+            }
         }
         TyKind::Adt(aid, args) => {
             // Identity form — unique per compilation. AdtId raw is
@@ -80,12 +84,12 @@ fn mangle_ty(out: &mut String, tys: &TyArena, ty: TyId) {
             // omitted; for generic ADTs each arg encoding starts with
             // `$`, self-delimiting. See spec/16_GENERIC.md §Mangling
             // (extension).
-            let _ = write!(out, "$adt{}", aid.raw());
+            out.push_str(&format!("$adt{}", aid.raw()));
             for &arg in args {
                 mangle_ty(out, tys, arg);
             }
         }
-        TyKind::Param(_) | TyKind::Infer(_) | TyKind::Fn(_, _, _) | TyKind::Array(_, None) => {
+        TyKind::Param(_) | TyKind::Infer(_) | TyKind::Fn(_, _, _) => {
             unreachable!(
                 "mangle_inst::mangle_ty unreachable variant: {}",
                 tys.render(ty)

@@ -1,0 +1,5 @@
+== diagnostics ==
+== instances ==
+Inst[0] mangled=eat__$constptr_$array_$i32_$unsized depth=1 parent=Fn(1)
+== sig ==
+Inst[0] params=[*const [i32]] ret=()
