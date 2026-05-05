@@ -94,6 +94,24 @@ if x > 0 {
 Conditions must be `bool` — no implicit int-to-bool coercion. Write
 `x != 0` if you mean it.
 
+### Consts
+
+Consts are compile-time constant values. They must be declared at top-level, explicitly typed, and given literal values.
+
+```rust
+import "stdio.ox";
+
+const DEV: bool = true;
+const SIZE: i32 = 10;
+const NAME: *const [u8] = "Jimmy";
+
+fn main() {
+    if DEV {
+        printf("Hello, %s\n", NAME);
+    }
+}
+```
+
 ### Loops
 
 ```rust

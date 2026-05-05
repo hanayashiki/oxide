@@ -27,7 +27,7 @@ use crate::reporter::Span;
 
 use super::super::error::{ParamOrReturn, SizedPos, TypeError};
 use super::super::ty::{
-    AdtDef, AdtId, FieldDef, FnSig, ParamId, PrimTy, TyId, TyKind, VariantDef, subst_from,
+    AdtDef, AdtId, FieldDef, FnSig, ParamId, TyId, TyKind, VariantDef, subst_from,
 };
 use super::Checker;
 use super::obligation::Obligation;
