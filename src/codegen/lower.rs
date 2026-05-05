@@ -1286,6 +1286,15 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         idx_eid: HExprId,
     ) -> Option<Operand<'ctx>> {
         let (elt_ptr, elem_ty) = self.emit_index_place(fx, base_eid, idx_eid)?;
+        // Array-typed elements stay in place form (slot ptr, not loaded
+        // aggregate). Mirrors `Local` of array type and `emit_field`'s
+        // Place path. Without this, nested indexing like `g[i][j]` would
+        // load the inner `[N x T]` as an SSA aggregate and the outer
+        // `emit_index_place` would try to `into_pointer_value()` it. See
+        // spec/09_ARRAY.md "arrays-as-places everywhere".
+        if self.is_sized_array(elem_ty) {
+            return Some(Operand::Place(elt_ptr));
+        }
         let elem_ll = lower_ty(self.ctx, self.typeck_results, &mut self.adt_ll, elem_ty);
         Some(Operand::Value(
             self.builder

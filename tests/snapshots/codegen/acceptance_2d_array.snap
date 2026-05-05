@@ -1,0 +1,33 @@
+; ModuleID = 'test'
+source_filename = "test"
+
+define void @main() {
+allocas:
+  %g.0.slot = alloca [3 x [4 x i1]], align 1
+  br label %body
+
+body:                                             ; preds = %allocas
+  br i1 false, label %bounds.trap, label %bounds.ok
+
+bounds.trap:                                      ; preds = %body
+  call void @llvm.trap()
+  unreachable
+
+bounds.ok:                                        ; preds = %body
+  %idx.gep = getelementptr inbounds [3 x [4 x i1]], ptr %g.0.slot, i64 0, i64 0
+  br i1 false, label %bounds.trap1, label %bounds.ok2
+
+bounds.trap1:                                     ; preds = %bounds.ok
+  call void @llvm.trap()
+  unreachable
+
+bounds.ok2:                                       ; preds = %bounds.ok
+  %idx.gep3 = getelementptr inbounds [4 x i1], ptr %idx.gep, i64 0, i64 0
+  store i1 true, ptr %idx.gep3, align 1
+  ret void
+}
+
+; Function Attrs: cold noreturn nounwind memory(inaccessiblemem: write)
+declare void @llvm.trap() #0
+
+attributes #0 = { cold noreturn nounwind memory(inaccessiblemem: write) }
