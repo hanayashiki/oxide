@@ -1,0 +1,15 @@
+== diagnostics ==
+[E0279] Error: cannot order raw pointers
+   ╭─[ error_pointer_lt.ox:2:5 ]
+   │
+ 2 │     p < q
+   │     ──┬──  
+   │       ╰──── pointer comparison
+   │ 
+   │ Help: pointer ordering is undefined in v0; use `ox_ptr_eq` for equality
+───╯
+== types ==
+Fn[0] f(p[Local(0)]: *const u8, q[Local(1)]: *const u8) -> bool
+  HExprId(0) : *const u8
+  HExprId(1) : *const u8
+  HExprId(2) : bool

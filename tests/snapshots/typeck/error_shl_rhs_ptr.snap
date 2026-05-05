@@ -1,0 +1,19 @@
+== diagnostics ==
+[E0280] Error: expected an integer operand, found `*const u8`
+   ╭─[ error_shl_rhs_ptr.ox:4:10 ]
+   │
+ 4 │     x << p
+   │          ┬  
+   │          ╰── expected integer here
+   │ 
+   │ Help: pointer arithmetic / unary / compound assignment is not supported in v0; the method form (`ptr.add`, etc.) is deferred per spec/07_POINTER.md
+───╯
+== types ==
+Fn[0] f() -> u32
+  HExprId(0) : u32
+  HExprId(1) : ()
+  HExprId(2) : *mut u8
+  HExprId(3) : ()
+  HExprId(4) : u32
+  HExprId(5) : *const u8
+  HExprId(6) : u32

@@ -1,0 +1,19 @@
+== diagnostics ==
+[E0280] Error: expected an integer operand, found `bool`
+   ╭─[ error_compound_shl_lhs_bool.ox:4:5 ]
+   │
+ 4 │     b <<= n;
+   │     ┬  
+   │     ╰── expected integer here
+   │ 
+   │ Help: compound assignment is integer-only; booleans use `&&`, `||`, `!`
+───╯
+== types ==
+Fn[0] f() -> ()
+  HExprId(0) : bool
+  HExprId(1) : ()
+  HExprId(2) : u8
+  HExprId(3) : ()
+  HExprId(4) : bool
+  HExprId(5) : u8
+  HExprId(6) : ()

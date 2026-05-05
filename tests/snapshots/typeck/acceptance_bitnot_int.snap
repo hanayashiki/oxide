@@ -1,0 +1,7 @@
+== diagnostics ==
+== types ==
+Fn[0] f() -> u8
+  HExprId(0) : u8
+  HExprId(1) : ()
+  HExprId(2) : u8
+  HExprId(3) : u8

@@ -1,0 +1,14 @@
+== diagnostics ==
+[E0280] Error: expected an integer operand, found `bool`
+   ╭─[ error_bitnot_bool.ox:2:7 ]
+   │
+ 2 │     ~(true)
+   │       ──┬─  
+   │         ╰─── expected integer here
+   │ 
+   │ Help: bitwise NOT is integer-only; logical NOT is `!`
+───╯
+== types ==
+Fn[0] f() -> bool
+  HExprId(0) : bool
+  HExprId(1) : bool

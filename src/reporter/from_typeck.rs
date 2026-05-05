@@ -1,6 +1,9 @@
 use super::diagnostic::{Diagnostic, Label};
 use super::source_map::FileId;
-use crate::typeck::{MutateOp, ParamOrReturn, SizedPos, TyArena, TypeError};
+use crate::parser::ast::{BinOp, Mutability, UnOp};
+use crate::typeck::{
+    IntegerSite, MutateOp, ParamOrReturn, PrimTy, SizedPos, TyArena, TyId, TyKind, TypeError,
+};
 
 /// Map a typeck error to a structured diagnostic. Needs the `TyArena` to
 /// render type names (`expected: i32, found: bool`).
@@ -323,5 +326,114 @@ pub fn from_typeck_error(err: &TypeError, file: FileId, tys: &TyArena) -> Diagno
             "the callee's `<T, U, ...>` list determines the type-argument arity; \
              non-generic fns expect zero.",
         ),
+
+        TypeError::InvalidCast { src, dst, span } => Diagnostic::error(
+            "E0274",
+            format!(
+                "cannot cast `{}` as `{}`",
+                tys.render(*src),
+                tys.render(*dst)
+            ),
+        )
+        .with_label(Label::primary(file, span.clone(), "invalid cast"))
+        .with_help(invalid_cast_help(tys, *src, *dst)),
+
+        TypeError::PointerComparison { op, span } => {
+            let (msg, help) = match op {
+                BinOp::Eq | BinOp::Ne => (
+                    "cannot compare raw pointers with `==` / `!=`",
+                    "use `ox_ptr_eq` for pointer equality (see `stdlib/mem.ox`)",
+                ),
+                BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => (
+                    "cannot order raw pointers",
+                    "pointer ordering is undefined in v0; use `ox_ptr_eq` for equality",
+                ),
+                _ => unreachable!(
+                    "PointerComparison only fires for cmp ops; got {:?}",
+                    op
+                ),
+            };
+            Diagnostic::error("E0279", msg)
+                .with_label(Label::primary(file, span.clone(), "pointer comparison"))
+                .with_help(help)
+        }
+
+        TypeError::NonIntegerOperand { site, found, span } => {
+            let found_str = tys.render(*found);
+            let found_kind = tys.kind(*found);
+            let (label, help) = non_integer_help(*site, found_kind);
+            Diagnostic::error(
+                "E0280",
+                format!("expected an integer operand, found `{found_str}`"),
+            )
+            .with_label(Label::primary(file, span.clone(), label))
+            .with_help(help)
+        }
     }
+}
+
+/// Help text for E0274 `InvalidCast`. Per spec/12_AS.md §"Errors":
+/// case-specific suggestions for the four canonical rejection
+/// shapes (mut-launder, int↔bool, ADT cast, ptr reinterpret).
+fn invalid_cast_help(tys: &TyArena, src: TyId, dst: TyId) -> &'static str {
+    match (tys.kind(src), tys.kind(dst)) {
+        (TyKind::Ptr(_, Mutability::Const), TyKind::Ptr(_, Mutability::Mut)) => {
+            "raw `*const` → `*mut` is not allowed; declare the source as `*mut T` from the start, \
+             or pass through an `extern` signature that takes `*mut T`"
+        }
+        (TyKind::Ptr(_, _), TyKind::Ptr(_, _)) => {
+            "different pointee types are not interchangeable in v0; bind the pointer with the \
+             intended `*const U` / `*mut U` declaration directly"
+        }
+        (TyKind::Prim(_), TyKind::Prim(PrimTy::Bool)) => {
+            "compare against zero (e.g. `x != 0`) — booleans are not produced by `as`"
+        }
+        (TyKind::Adt(..), _) | (_, TyKind::Adt(..)) => {
+            "struct / enum values cannot be cast to other types; access a field or write a conversion fn"
+        }
+        _ => "this combination of source and destination types is not a permitted cast in v0",
+    }
+}
+
+/// Help text for E0280 `NonIntegerOperand`. Renders site- and
+/// kind-aware advice. See spec/05_TYPE_CHECKER.md §Obligations.
+fn non_integer_help(site: IntegerSite, found_kind: &TyKind) -> (&'static str, &'static str) {
+    let label = "expected integer here";
+    let help = match (site, found_kind) {
+        // Bool — recommend logical-op replacements per op family.
+        (IntegerSite::Bin(op), TyKind::Prim(PrimTy::Bool)) if is_cmp(op) => {
+            "compare booleans with `&&` / `||` / `!`, or convert via `b as i32`"
+        }
+        (IntegerSite::Bin(_), TyKind::Prim(PrimTy::Bool)) => {
+            "boolean arithmetic / bitwise / shift isn't defined; \
+             use `&&`, `||`, `!` for logical combinations"
+        }
+        (IntegerSite::Un(UnOp::Neg), TyKind::Prim(PrimTy::Bool)) => {
+            "negation is integer-only; flip booleans with `!`"
+        }
+        (IntegerSite::Un(UnOp::BitNot), TyKind::Prim(PrimTy::Bool)) => {
+            "bitwise NOT is integer-only; logical NOT is `!`"
+        }
+        (IntegerSite::Assign(_), TyKind::Prim(PrimTy::Bool)) => {
+            "compound assignment is integer-only; booleans use `&&`, `||`, `!`"
+        }
+
+        // Pointer — uniform "deferred" help (cmp on Ptr is split into E0279).
+        (_, TyKind::Ptr(..)) => {
+            "pointer arithmetic / unary / compound assignment is not supported in v0; \
+             the method form (`ptr.add`, etc.) is deferred per spec/07_POINTER.md"
+        }
+
+        // Adt / Fn / Array / Unit / Never / Param — generic.
+        _ => "this expression's operand types must be integer primitives \
+              (`i8`..`i64`, `u8`..`u64`, `usize`, `isize`)",
+    };
+    (label, help)
+}
+
+fn is_cmp(op: BinOp) -> bool {
+    matches!(
+        op,
+        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+    )
 }

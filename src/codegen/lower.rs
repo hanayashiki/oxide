@@ -1974,6 +1974,10 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
     // ---------- casts ----------
 
+    /// `expr as Ty` codegen. Per spec/12_AS.md §"Codegen": dispatch
+    /// on `(src_kind, dst_kind)` per the allowed-set table. Typeck's
+    /// `infer_cast` (E0274 `InvalidCast`) has already rejected
+    /// off-table pairs, so the catch-all arm is an invariant assertion.
     fn emit_cast(
         &mut self,
         fx: &mut FnCodegenContext<'ctx>,
@@ -1983,32 +1987,67 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         let dst_ty = self.ty_of(fx, eid);
         let src_ty = self.ty_of(fx, inner);
         let inner_op = self.emit_expr(fx, inner)?;
-        let v = self.load_value(inner_op, src_ty, "load").into_int_value();
-        let dst_prim = as_prim(self.typeck_results.tys(), dst_ty)
-            .expect("v0: cast target must be a primitive");
-        let dst_ll = lower_prim(self.ctx, dst_prim);
-        let src_w = v.get_type().get_bit_width();
-        let dst_w = dst_ll.get_bit_width();
-        if src_w == dst_w {
-            return Some(Operand::Value(v.into()));
+
+        let tys = self.typeck_results.tys();
+        let kind = crate::typeck::cast_kind(tys, src_ty, dst_ty);
+
+        match kind {
+            crate::typeck::CastKind::PtrToPtr | crate::typeck::CastKind::Identity
+                if matches!(tys.kind(src_ty), TyKind::Ptr(..)) =>
+            {
+                // LLVM `ptr` is opaque; mutability/pointee shape
+                // lives in the Oxide type system only. Thread the
+                // operand through unchanged.
+                Some(inner_op)
+            }
+            crate::typeck::CastKind::IntToInt
+            | crate::typeck::CastKind::BoolToInt
+            | crate::typeck::CastKind::Identity => {
+                // Both ends are primitives (or src == dst Prim);
+                // existing trunc / sext / zext logic handles all of
+                // them uniformly.
+                let v = self.load_value(inner_op, src_ty, "load").into_int_value();
+                let dst_prim = as_prim(self.typeck_results.tys(), dst_ty).expect(
+                    "emit_cast: typeck should have rejected non-prim destination \
+                     for IntToInt / BoolToInt",
+                );
+                let dst_ll = lower_prim(self.ctx, dst_prim);
+                let src_w = v.get_type().get_bit_width();
+                let dst_w = dst_ll.get_bit_width();
+                if src_w == dst_w {
+                    return Some(Operand::Value(v.into()));
+                }
+                if dst_w < src_w {
+                    return Some(Operand::Value(
+                        self.builder
+                            .build_int_truncate(v, dst_ll, "trunc")
+                            .unwrap()
+                            .into(),
+                    ));
+                }
+                let src_signed = as_prim(self.typeck_results.tys(), src_ty)
+                    .map(is_signed_prim)
+                    .unwrap_or(false);
+                let v = if src_signed {
+                    self.builder.build_int_s_extend(v, dst_ll, "sext").unwrap()
+                } else {
+                    self.builder.build_int_z_extend(v, dst_ll, "zext").unwrap()
+                };
+                Some(Operand::Value(v.into()))
+            }
+            crate::typeck::CastKind::PtrToPtr => {
+                // Reachable when src == dst was *not* the Identity
+                // short-circuit (impossible in practice — a same-TyId
+                // PtrToPtr is Identity), kept for completeness.
+                Some(inner_op)
+            }
+            crate::typeck::CastKind::Reject => unreachable!(
+                "emit_cast: typeck E0274 should have rejected this cast \
+                 ({} as {})",
+                self.typeck_results.tys().render(src_ty),
+                self.typeck_results.tys().render(dst_ty),
+            ),
         }
-        if dst_w < src_w {
-            return Some(Operand::Value(
-                self.builder
-                    .build_int_truncate(v, dst_ll, "trunc")
-                    .unwrap()
-                    .into(),
-            ));
-        }
-        let src_signed = as_prim(self.typeck_results.tys(), src_ty)
-            .map(is_signed_prim)
-            .unwrap_or(false);
-        let v = if src_signed {
-            self.builder.build_int_s_extend(v, dst_ll, "sext").unwrap()
-        } else {
-            self.builder.build_int_z_extend(v, dst_ll, "zext").unwrap()
-        };
-        Some(Operand::Value(v.into()))
     }
 
     // ---------- if / else ----------

@@ -1,0 +1,5 @@
+== diagnostics ==
+== types ==
+Fn[0] f(b[Local(0)]: bool) -> i32
+  HExprId(0) : bool
+  HExprId(1) : i32

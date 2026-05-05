@@ -1,0 +1,14 @@
+== diagnostics ==
+[E0274] Error: cannot cast `*const i32` as `*mut i32`
+   ╭─[ error_cast_const_to_mut.ox:2:5 ]
+   │
+ 2 │     p as *mut i32
+   │     ──────┬──────  
+   │           ╰──────── invalid cast
+   │ 
+   │ Help: raw `*const` → `*mut` is not allowed; declare the source as `*mut T` from the start, or pass through an `extern` signature that takes `*mut T`
+───╯
+== types ==
+Fn[0] f(p[Local(0)]: *const i32) -> *mut i32
+  HExprId(0) : *const i32
+  HExprId(1) : *mut i32

@@ -1,0 +1,33 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `*mut {error}`, found `*const u8`
+   ╭─[ error_pointer_eq_null.ox:3:5 ]
+   │
+ 3 │     p == null
+   │     ────┬────  
+   │         ╰────── type mismatch here
+───╯
+[E0256] Error: could not infer a type
+   ╭─[ error_pointer_eq_null.ox:3:10 ]
+   │
+ 3 │     p == null
+   │          ──┬─  
+   │            ╰─── ambiguous type
+   │ 
+   │ Help: add a type annotation to disambiguate
+───╯
+[E0279] Error: cannot compare raw pointers with `==` / `!=`
+   ╭─[ error_pointer_eq_null.ox:3:5 ]
+   │
+ 3 │     p == null
+   │     ────┬────  
+   │         ╰────── pointer comparison
+   │ 
+   │ Help: use `ox_ptr_eq` for pointer equality (see `stdlib/mem.ox`)
+───╯
+== types ==
+Fn[0] f() -> bool
+  HExprId(0) : *mut u8
+  HExprId(1) : ()
+  HExprId(2) : *const u8
+  HExprId(3) : *mut {error}
+  HExprId(4) : bool

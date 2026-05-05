@@ -1,0 +1,14 @@
+== diagnostics ==
+[E0274] Error: cannot cast `Adt(0)` as `u8`
+   ╭─[ error_cast_struct_to_int.ox:4:5 ]
+   │
+ 4 │     s as u8
+   │     ───┬───  
+   │        ╰───── invalid cast
+   │ 
+   │ Help: struct / enum values cannot be cast to other types; access a field or write a conversion fn
+───╯
+== types ==
+Fn[0] f(s[Local(0)]: Adt(0)) -> u8
+  HExprId(0) : Adt(0)
+  HExprId(1) : u8

@@ -1,6 +1,23 @@
+use crate::parser::ast::{AssignOp, BinOp, UnOp};
 use crate::reporter::Span;
 
 use super::ty::TyId;
+
+/// Discriminator on `Obligation::Integer` (and the `NonIntegerOperand`
+/// variant below) so the discharge / renderer can produce help text
+/// appropriate to the syntactic form that pushed the obligation. See
+/// spec/05_TYPE_CHECKER.md §Obligations.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum IntegerSite {
+    /// Binary op except `And`/`Or` (logical, covered by `equate(_, bool)`).
+    /// Includes arith, bitwise, cmp, and shift.
+    Bin(BinOp),
+    /// Unary `-x` or `~x`. (`!x` is bool and uses equate.)
+    Un(UnOp),
+    /// Compound assignment except plain `Eq`. Covers `+=`, `-=`,
+    /// `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`.
+    Assign(AssignOp),
+}
 
 #[derive(Clone, Debug)]
 pub enum TypeError {
@@ -173,6 +190,42 @@ pub enum TypeError {
         found: usize,
         span: Span,
     },
+
+    /// `expr as Ty` where the source-target pair isn't in the allowed
+    /// cast table per spec/12_AS.md. Replaces a previously
+    /// load-bearing codegen panic — typeck now rejects invalid casts
+    /// up front so downstream stages can assume `cast_kind != Reject`.
+    /// `src` and `dst` are fully resolved at emission time. See
+    /// spec/12_AS.md §"Errors". E0274.
+    InvalidCast {
+        src: TyId,
+        dst: TyId,
+        span: Span,
+    },
+
+    /// Binary comparison on pointer operands: `p == q`, `p != q`,
+    /// `p < q`, etc. The actionable replacement for equality is
+    /// `ox_ptr_eq` (in `stdlib/mem.ox`); ordering is undefined for v0
+    /// pointers and has no replacement. `op` discriminates the help
+    /// text the renderer produces. See spec/05_TYPE_CHECKER.md
+    /// §Obligations and spec/07_POINTER.md §Pointer equality. E0279.
+    PointerComparison { op: BinOp, span: Span },
+
+    /// Generic "expected an integer operand here" — fires for binary
+    /// ops (except `And`/`Or`), unary `Neg`/`BitNot`, and compound
+    /// assignments (everything except plain `Eq`). The `site`
+    /// discriminator records what syntactic form pushed the
+    /// obligation; the renderer turns `(site, found_kind)` into
+    /// op-aware help text. The cmp-on-Ptr case is split out into
+    /// `PointerComparison` (E0279) so its actionable
+    /// "use `ox_ptr_eq`" help is contiguous with the variant.
+    /// `found` is fully resolved at emission. See
+    /// spec/05_TYPE_CHECKER.md §Obligations. E0280.
+    NonIntegerOperand {
+        site: IntegerSite,
+        found: TyId,
+        span: Span,
+    },
 }
 
 /// Discriminator on `ArrayByValueAtExternC` so the diagnostic can
@@ -239,7 +292,10 @@ impl TypeError {
             | Self::DerefNonPointer { span, .. }
             | Self::VariadicArgUnsupported { span, .. }
             | Self::RecursiveAdt { span, .. }
-            | Self::GenericArityMismatch { span, .. } => span,
+            | Self::GenericArityMismatch { span, .. }
+            | Self::InvalidCast { span, .. }
+            | Self::PointerComparison { span, .. }
+            | Self::NonIntegerOperand { span, .. } => span,
             Self::StructLitMissingField { lit_span, .. } => lit_span,
             Self::StructLitDuplicateField { dup, .. } => dup,
         }

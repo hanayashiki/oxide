@@ -1,0 +1,15 @@
+== diagnostics ==
+[E0280] Error: expected an integer operand, found `Adt(0)`
+   ╭─[ error_cmp_struct.ox:4:5 ]
+   │
+ 4 │     s == t
+   │     ───┬──  
+   │        ╰──── expected integer here
+   │ 
+   │ Help: this expression's operand types must be integer primitives (`i8`..`i64`, `u8`..`u64`, `usize`, `isize`)
+───╯
+== types ==
+Fn[0] f(s[Local(0)]: Adt(0), t[Local(1)]: Adt(0)) -> bool
+  HExprId(0) : Adt(0)
+  HExprId(1) : Adt(0)
+  HExprId(2) : bool

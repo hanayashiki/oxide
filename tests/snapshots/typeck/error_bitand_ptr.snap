@@ -1,0 +1,20 @@
+== diagnostics ==
+[E0280] Error: expected an integer operand, found `*const u8`
+   ╭─[ error_bitand_ptr.ox:4:24 ]
+   │
+ 4 │     let _: *const u8 = p & q;
+   │                        ──┬──  
+   │                          ╰──── expected integer here
+   │ 
+   │ Help: pointer arithmetic / unary / compound assignment is not supported in v0; the method form (`ptr.add`, etc.) is deferred per spec/07_POINTER.md
+───╯
+== types ==
+Fn[0] f() -> ()
+  HExprId(0) : *mut u8
+  HExprId(1) : ()
+  HExprId(2) : *mut u8
+  HExprId(3) : ()
+  HExprId(4) : *const u8
+  HExprId(5) : *const u8
+  HExprId(6) : *const u8
+  HExprId(7) : ()

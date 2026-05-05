@@ -1,0 +1,23 @@
+== diagnostics ==
+[E0256] Error: could not infer a type
+   ╭─[ error_cast_null_unknown_pointee.ox:6:5 ]
+   │
+ 6 │     null as *const u8
+   │     ──┬─  
+   │       ╰─── ambiguous type
+   │ 
+   │ Help: add a type annotation to disambiguate
+───╯
+[E0274] Error: cannot cast `*mut {error}` as `*const u8`
+   ╭─[ error_cast_null_unknown_pointee.ox:6:5 ]
+   │
+ 6 │     null as *const u8
+   │     ────────┬────────  
+   │             ╰────────── invalid cast
+   │ 
+   │ Help: different pointee types are not interchangeable in v0; bind the pointer with the intended `*const U` / `*mut U` declaration directly
+───╯
+== types ==
+Fn[0] f() -> *const u8
+  HExprId(0) : *mut {error}
+  HExprId(1) : *const u8

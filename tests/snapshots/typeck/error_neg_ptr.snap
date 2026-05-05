@@ -1,0 +1,17 @@
+== diagnostics ==
+[E0280] Error: expected an integer operand, found `*const u8`
+   ╭─[ error_neg_ptr.ox:3:25 ]
+   │
+ 3 │     let _: *const u8 = -p;
+   │                         ┬  
+   │                         ╰── expected integer here
+   │ 
+   │ Help: pointer arithmetic / unary / compound assignment is not supported in v0; the method form (`ptr.add`, etc.) is deferred per spec/07_POINTER.md
+───╯
+== types ==
+Fn[0] f() -> ()
+  HExprId(0) : *mut u8
+  HExprId(1) : ()
+  HExprId(2) : *const u8
+  HExprId(3) : *const u8
+  HExprId(4) : ()

@@ -1,0 +1,25 @@
+== diagnostics ==
+[E0280] Error: expected an integer operand, found `[i32; 3]`
+   ╭─[ error_compound_add_array.ox:4:5 ]
+   │
+ 4 │     a += b;
+   │     ───┬──  
+   │        ╰──── expected integer here
+   │ 
+   │ Help: this expression's operand types must be integer primitives (`i8`..`i64`, `u8`..`u64`, `usize`, `isize`)
+───╯
+== types ==
+Fn[0] f() -> ()
+  HExprId(0) : i32
+  HExprId(1) : i32
+  HExprId(2) : i32
+  HExprId(3) : [i32; 3]
+  HExprId(4) : ()
+  HExprId(5) : i32
+  HExprId(6) : i32
+  HExprId(7) : i32
+  HExprId(8) : [i32; 3]
+  HExprId(9) : ()
+  HExprId(10) : [i32; 3]
+  HExprId(11) : [i32; 3]
+  HExprId(12) : ()

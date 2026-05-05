@@ -1,0 +1,19 @@
+== diagnostics ==
+[E0280] Error: expected an integer operand, found `*const i32`
+   ╭─[ error_compound_add_ptr.ox:4:5 ]
+   │
+ 4 │     p += q;
+   │     ───┬──  
+   │        ╰──── expected integer here
+   │ 
+   │ Help: pointer arithmetic / unary / compound assignment is not supported in v0; the method form (`ptr.add`, etc.) is deferred per spec/07_POINTER.md
+───╯
+== types ==
+Fn[0] f() -> ()
+  HExprId(0) : *mut i32
+  HExprId(1) : ()
+  HExprId(2) : *mut i32
+  HExprId(3) : ()
+  HExprId(4) : *const i32
+  HExprId(5) : *const i32
+  HExprId(6) : ()

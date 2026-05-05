@@ -432,11 +432,105 @@ let x: i32 = null;   // ERROR: cannot unify *mut α with i32
 
 - **Compile-time null check.** `*null = v` typechecks fine;
   runtime UB.
-- **Pointer equality** (`p == null`). No `==` on pointers in v0;
-  add later via a dedicated small spec.
+- **Pointer ordering** (`p < q`, `p <= q`, `p > q`, `p >= q`).
+  Undefined for v0 pointers (no provenance model). Reject in
+  typeck per spec/05 `Obligation::Integer` (cmp arm → E0279
+  `PointerComparison`). Pointer **equality** is supported via
+  `ox_ptr_eq` — see §"Pointer equality (`ox_ptr_eq`)" below.
 - **Optional / `Option<*const T>` modeling.** We use raw nullable
   pointers, not optional types; Rust's `Option<NonNull<T>>` niche
   optimization isn't applicable.
+
+## Pointer equality (`ox_ptr_eq`)
+
+Direct `==` / `!=` on pointer values is rejected in typeck (E0279
+`PointerComparison`, spec/05 `Obligation::Integer`). The replacement
+is `ox_ptr_eq`, modelled on Rust's `core::ptr::eq`. Making the call
+explicit signals intent (the alternative — letting `==` mean
+"address equality" implicitly — looks plausible but invites the
+"is this comparing values or addresses?" confusion that a separate
+intrinsic-shaped name avoids).
+
+### Signature
+
+```rust
+fn ox_ptr_eq<T>(a: *const T, b: *const T) -> bool;
+```
+
+Lives in `stdlib/mem.ox`. Imported via `import "mem.ox";`.
+
+### Semantics
+
+Returns `true` iff `a` and `b` hold the same address. `null` compares
+equal to `null`; otherwise the result is the bit-equality of the two
+pointer values. No deref, no provenance check (Oxide has no
+provenance model in v0).
+
+### Subset-of-Rust constraint
+
+`std::ptr::eq` is `pub fn eq<T: ?Sized>(a: *const T, b: *const T) ->
+bool`. We accept the same shape minus the `?Sized` bound (Oxide's
+generics are `Sized`-only in v0; see spec/16_GENERIC.md). Calls that
+work in Rust's safe code work here without modification.
+
+### Calling pattern
+
+```rust
+let f = fopen(path, "r");           // f: *mut u8
+if ox_ptr_eq(f, null) { ... }       // T = u8 inferred from f;
+                                    // null: *mut α, α pinned to u8;
+                                    // both args coerce to *const u8.
+```
+
+Mutability flexibility: callers can pass `*mut T` or `null` because
+each argument slot is `*const T` and the existing `*mut → *const`
+coerce rule (§3) fires.
+
+### Implementation — pure library, no compiler changes
+
+`ox_ptr_eq` is **not a compiler intrinsic.** It's an ordinary
+generic function in `stdlib/mem.ox`, defined entirely in Oxide
+source on top of `ox_transmute`:
+
+```rust
+fn ox_ptr_eq<T>(a: *const T, b: *const T) -> bool {
+    let ai: usize = ox_transmute(a);
+    let bi: usize = ox_transmute(b);
+    ai == bi
+}
+```
+
+Why this works:
+
+- `ox_transmute<*const T, usize>` is permitted: post-substitution,
+  `*const T` and `usize` are both pointer-width (8 bytes on
+  v0 targets), so the size-equality check at mono time passes.
+- The existing `emit_transmute` `(Ptr, Prim) ptr-width int` arm
+  lowers each call to a single `ptrtoint`. No new codegen path.
+- `ai == bi` is `usize == usize` — a plain integer comparison that
+  passes the new `Integer` obligation.
+- Each call to `ox_ptr_eq` cascades two `ox_transmute` instances
+  through the standard mono machinery; LLVM constant-folds the
+  round-trip after inlining.
+
+The `let ai: usize = ...` annotation pins each transmute's `Dst` so
+inference doesn't bind it to a fresh int-default Infer.
+
+### Position in the pipeline
+
+Nothing new. `ox_ptr_eq` is a generic Oxide function; the existing
+HIR / typeck / mono / codegen pipeline handles it identically to
+the other `mem.ox` wrappers (`ox_alloc`, `ox_dealloc`, `ox_realloc`).
+
+### Out of scope
+
+- `ox_ptr_lt` / `ox_ptr_cmp`. Pointer ordering is target-defined
+  and rarely correct without a provenance story. Add when a real
+  use case lands.
+- Generic over fat pointers / unsized `T`. Oxide has no fat
+  pointers; `<T>` is `Sized`-only.
+- Method form (`p.eq(&q)`). No struct-method pointer methods until
+  the spec/16 successor.
 
 ## Deref operator (`*p`)
 

@@ -1,0 +1,14 @@
+== diagnostics ==
+[E0274] Error: cannot cast `*const u8` as `*const i32`
+   ╭─[ error_cast_ptr_reinterpret.ox:2:5 ]
+   │
+ 2 │     p as *const i32
+   │     ───────┬───────  
+   │            ╰───────── invalid cast
+   │ 
+   │ Help: different pointee types are not interchangeable in v0; bind the pointer with the intended `*const U` / `*mut U` declaration directly
+───╯
+== types ==
+Fn[0] f(p[Local(0)]: *const u8) -> *const i32
+  HExprId(0) : *const u8
+  HExprId(1) : *const i32

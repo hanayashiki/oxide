@@ -1,0 +1,15 @@
+== diagnostics ==
+[E0280] Error: expected an integer operand, found `bool`
+   ╭─[ error_arith_bool.ox:2:5 ]
+   │
+ 2 │     true + false
+   │     ──────┬─────  
+   │           ╰─────── expected integer here
+   │ 
+   │ Help: boolean arithmetic / bitwise / shift isn't defined; use `&&`, `||`, `!` for logical combinations
+───╯
+== types ==
+Fn[0] f() -> bool
+  HExprId(0) : bool
+  HExprId(1) : bool
+  HExprId(2) : bool

@@ -24,7 +24,7 @@
 //! Both queues feed the same `Checker::discharge_obligation` handler;
 //! the Inferer is passed as `Option<&Inferer>`.
 //!
-//! Two obligation kinds today:
+//! Three obligation kinds today:
 //!
 //! - **`Coerce`** — the directional `*mut → *const` mut-compat check.
 //!   `unify` is permissive on outer Ptr mutability (discards mut bits
@@ -39,6 +39,14 @@
 //!   that resolves to an unsized array via inference (e.g. once deref
 //!   lands, `let b = *a` where `a: *const [T]` makes `b: [T]`), so
 //!   that case requires deferral against the Inferer.
+//! - **`Integer`** — every operand position the codegen assumes is
+//!   integer must resolve to an integer `Prim` here. Enqueued from
+//!   every arm of `infer_binary` *except* `And`/`Or` (logical), from
+//!   `infer_unary`'s `Neg`/`BitNot` arms, and from `infer_assign`'s
+//!   compound-op arms (every `AssignOp` except `Eq`). Discharge fires
+//!   `PointerComparison` (E0279) for the actionable cmp-on-Ptr case
+//!   and `NonIntegerOperand` (E0280) for everything else. See
+//!   spec/05_TYPE_CHECKER.md §Obligations.
 //!
 //! Future generics: `Sized` will be enqueued at instantiation sites
 //! once `<T>` lands. The check-only architecture extends without
@@ -46,7 +54,7 @@
 
 use crate::reporter::Span;
 
-use super::super::error::SizedPos;
+use super::super::error::{IntegerSite, SizedPos};
 use super::super::ty::TyId;
 
 #[derive(Clone, Debug)]
@@ -74,4 +82,26 @@ pub(super) enum Obligation {
     /// have a chance to default to `i32` before the check runs. See
     /// spec/15_VARIADIC.md.
     VariadicPromotable { ty: TyId, span: Span },
+    /// `ty` must resolve to an integer `Prim` (E0280
+    /// `NonIntegerOperand`). Cmp-on-Ptr is the actionable special
+    /// case — discharge emits E0279 `PointerComparison` instead, with
+    /// help pointing at `ox_ptr_eq`. See spec/05_TYPE_CHECKER.md
+    /// §Obligations and spec/07_POINTER.md §Pointer equality.
+    Integer {
+        site: IntegerSite,
+        ty: TyId,
+        span: Span,
+    },
+    /// `expr as Ty` — validate the cast per spec/12_AS.md
+    /// §"Allowed set" via `cast_kind`. Deferred so Infer-int sources
+    /// (typical of integer literals — `1 as u8`) have a chance to
+    /// default to `i32` before classification runs; without
+    /// deferral, `cast_kind(Infer, u8)` falls into the catch-all
+    /// `Reject` arm. Discharge emits `InvalidCast` (E0274) on
+    /// `Reject`. See spec/12_AS.md §"Typeck rules".
+    Cast {
+        src: TyId,
+        dst: TyId,
+        span: Span,
+    },
 }

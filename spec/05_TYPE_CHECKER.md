@@ -141,21 +141,23 @@ responsible for unifying with whatever they expected.
 | `Local(lid)` | `local_tys[lid]` (set in Phase 1 for params; in `infer_let` for bindings) |
 | `Fn(fid)` | intern `Fn(fn_sigs[fid].params, fn_sigs[fid].ret)` |
 | `Unresolved(_)` | `Error` (already errored at HIR) |
-| `Unary { Neg, e }` | type of `e` |
-| `Unary { Not, e }` | `equate(e, bool)`; result `bool` |
-| `Unary { BitNot, e }` | type of `e` |
-| `Binary { arith/bitwise, l, r }` | `equate(l, r)`; result = equated type |
-| `Binary { cmp, l, r }` where cmp ∈ {Eq, Ne, Lt, Le, Gt, Ge} | `equate(l, r)` for type structure; enqueue `Obligation::IntegerComparison { ty, span }` for the equated type. `ty` must resolve to an integer `Prim`; if a `Ptr` (pointer comparison), emit E0265 `PointerComparison` ("use `ox_ptr_eq` for pointer equality"; "pointer ordering undefined"); result = `bool` |
-| `Binary { logical, l, r }` | `equate` both with `bool`; result = `bool` |
-| `Binary { shift, l, r }` | result = `l`'s type |
-| `Assign { _, target, rhs }` | `subtype(rhs, target)` (directional — pointer-mut subtype applies); result = `Unit` |
+| `Unary { Neg, e }` | type of `e`; enqueue `Obligation::Integer { site: Un(Neg), ty, span }` for the operand type |
+| `Unary { Not, e }` | `equate(e, bool)`; result `bool`. **No Integer obligation** |
+| `Unary { BitNot, e }` | type of `e`; enqueue `Obligation::Integer { site: Un(BitNot), ty, span }` for the operand type |
+| `Binary { arith/bitwise, l, r }` where op ∈ {Add, Sub, Mul, Div, Rem, BitAnd, BitOr, BitXor} | `equate(l, r)`; enqueue `Obligation::Integer { site: Bin(op), ty, span }` for the equated type; result = equated type |
+| `Binary { cmp, l, r }` where op ∈ {Eq, Ne, Lt, Le, Gt, Ge} | `equate(l, r)`; enqueue `Obligation::Integer { site: Bin(op), ty, span }` for the equated type; result = `bool` |
+| `Binary { logical, l, r }` where op ∈ {And, Or} | `equate(l, bool)` + `equate(r, bool)`; result = `bool`. **No Integer obligation** — Bool is the required type here |
+| `Binary { shift, l, r }` where op ∈ {Shl, Shr} | **No `equate`** — shift amount may be a different integer width. Enqueue *two* `Obligation::Integer { site: Bin(op), .. }` entries (one per operand at its own span). Result = `lt` |
+| `Assign { Eq, target, rhs }` | `subtype(rhs, target)` (directional — pointer-mut subtype applies); mut check on target (E0263 if `Const`); result = `Unit`. **No Integer obligation** — plain `=` works for any type |
+| `Assign { compound arith/bitwise, target, rhs }` where op ∈ {Add, Sub, Mul, Div, Rem, BitAnd, BitOr, BitXor} | `subtype(rhs, target)`; mut check; enqueue `Obligation::Integer { site: Assign(op), ty: target_ty, span }`; result = `Unit` |
+| `Assign { compound shift, target, rhs }` where op ∈ {Shl, Shr} | **No subtype between sides** (Rust permits mixed widths); mut check on target; enqueue *two* `Obligation::Integer { site: Assign(op), .. }` entries (target_ty at target span, rhs_ty at rhs span); result = `Unit` |
 | `Call { callee, args }` | callee must be `Fn(...)`; arity + per-arg `subtype` check; result = sig ret |
 | `Field { base, name }` | recurse on `base`; if its type is `Adt(aid)`, look up `name` → field type. `Adt` with no such field → E0261 `NoFieldOnAdt`. Non-ADT base → E0262 `TypeNotFieldable`. See spec/08_ADT.md. |
 | `Index { base, index }` | `Error`; emit `UnsupportedFeature` (E0255). Real typing rule (auto-deref through `Ptr<Array>`) is deferred per spec/09_ARRAY.md "Phase A Step 4/5". |
 | `StructLit { adt, fields }` | resolve `aid` from the HIR-level `HAdtId`; walk each field's value expr; per-field validation against the declared field set: unknown → E0258, missing → E0259, duplicate → E0260; per-value `subtype` against declared field type; result = `Adt(aid)`. See spec/08_ADT.md. |
 | `AddrOf { mutability, expr }` | infer `expr` (type `T`); validate `expr` is a place (HIR already filed `AddrOfNonPlace` if not); for `&mut`, `place_mutability(expr)` must be `Mut` else E0263; result = `Ptr(T, mutability)`. See spec/10_ADDRESS_OF.md. |
 | `ArrayLit(_)` | walk sub-exprs for inner diagnostics; emit `UnsupportedFeature` (E0255). Real typing rule deferred per spec/09_ARRAY.md "Phase A Step 4/5". |
-| `Cast { expr, ty }` | result = resolved `ty` (no compat check in v0; `InvalidCast` E0264 lands per spec/12_AS.md) |
+| `Cast { expr, ty }` | infer the inner expression for cascade typing; resolve `ty`; classify the (src, dst) pair via `cast_kind` per spec/12_AS.md and emit `InvalidCast` (E0274) on `Reject`; result = resolved `ty` regardless |
 | `If { cond, then, else? }` | `equate(cond, bool)`; then/else go through `equate_arms` + `join_never` (or `subtype(then, Unit)` on then-arm if no else — a degenerate subtype) |
 | `Block(bid)` | recurse `infer_block` |
 | `Return(val)` | `subtype(val, cur_ret)` (or `subtype(Unit, cur_ret)` if no val); result = `Never` |
@@ -265,7 +267,7 @@ cannot be folded into HM unification (which is symmetric and
 shape-only) without breaking unification's algebraic properties. We
 defer these to a check-only post-pass via a queue of obligations.
 
-Two obligation kinds today:
+Three obligation kinds today:
 
 - **`Coerce { actual, expected, span }`** — pointer mut-compat at
   every level (outer `Mut ≤ Const`, inner strict equality), walked
@@ -283,12 +285,57 @@ Two obligation kinds today:
   Enqueued during HirTy resolution at decl phase
   (param/return/field) and at `infer_let` (let-binding) /
   `Unary { Deref, _ }` (deref).
-- **`IntegerComparison { ty, span }`** — comparison operators (Eq, Ne, 
-  Lt, Le, Gt, Ge) require integer operands. `ty` is the resolved type 
-  both operands equate to. Discharge checks that `ty` is `Prim(_)` with 
-  an integer kind; if `ty` is `Ptr(..)`, emit E0265 `PointerComparison`; 
-  other kinds (Adt, Fn, Array, Never) emit a generic type mismatch.
-  Enqueued from every binary comparison in `infer_binary`.
+- **`Integer { site: IntegerSite, ty: TyId, span }`** — every
+  operand position the codegen assumes is integer must resolve to
+  an integer `Prim` here. The `site` discriminator records what
+  kind of expression enqueued the obligation, so the discharge can
+  render help text appropriate to the syntactic form:
+
+  ```rust
+  pub(super) enum IntegerSite {
+      /// Binary op except `And`/`Or` (covered by `equate(_, bool)`).
+      Bin(BinOp),
+      /// Unary `-x` or `~x`. (`!x` is bool and uses equate.)
+      Un(UnOp),
+      /// Compound assignment except plain `Eq`.
+      Assign(AssignOp),
+  }
+  ```
+
+  Discharge dispatches on `resolved_kind(ty)`:
+  - `Prim(p)` with `p.is_integer()` (i.e. not Bool) → ok.
+  - `Prim(Bool)`, `Adt(_)`, `Fn(..)`, `Array(..)`, `Unit`, `Never`,
+    `Param(_)` → emit `NonIntegerOperand { site, found: ty, span }`
+    (E0280, new). The reporter renders site-aware help text — e.g.
+    cmp on Bool suggests `&&`/`||`/`!`; arith on Bool says
+    "boolean arithmetic isn't defined"; unary `-` on a struct says
+    "negation is integer-only".
+  - `Ptr(..)` →
+    - `site == Bin(cmp_op)` for `cmp_op ∈ {Eq, Ne, Lt, Le, Gt, Ge}`
+      → emit `PointerComparison { op: cmp_op, span }` (E0279) — the
+      actionable case. Help:
+      - Eq/Ne → "use `ox_ptr_eq` for pointer equality (see
+        `stdlib/mem.ox`)".
+      - Lt/Le/Gt/Ge → "pointer ordering is undefined; use
+        `ox_ptr_eq` for equality".
+    - any other site → emit `NonIntegerOperand { site, found, span }`
+      (E0280). Help: "pointer arithmetic is not supported in v0;
+      see spec/07 for the deferred method form".
+  - `Error` → discharge is a no-op (poison absorbs).
+  - Unresolved `Infer` after defaulting → discharge is a no-op;
+    the leftover-infer pass fires `CannotInfer` separately.
+
+  Body-phase obligation. Enqueue counts:
+  - Unary Neg / BitNot: 1.
+  - Binary arith/bitwise/cmp: 1 (one obligation on the equated
+    type covers both operands).
+  - Binary shift: 2 (sides aren't equated).
+  - Compound arith/bitwise assign: 1 (one obligation on target's
+    type; subtype ties rhs).
+  - Compound shift assign: 2 (sides aren't subtyped).
+
+  The `ox_ptr_eq` library function referenced by E0279 is specified
+  in spec/07_POINTER.md §"Pointer equality (`ox_ptr_eq`)".
 
 **Discharge is pure observation and recursive.** Each handler walks
 the resolved type structurally — `discharge_subtype` /
@@ -327,33 +374,45 @@ trait-ification".
 
 ```rust
 pub enum TypeError {
-    TypeMismatch              { expected: TyId, found: TyId, span: Span },        // E0250
-    UnknownType               { name: String, span: Span },                       // E0251
-    NotCallable               { found: TyId, span: Span },                        // E0252
-    WrongArgCount             { expected: usize, found: usize, span: Span },      // E0253
+    TypeMismatch              { expected: TyId, found: TyId, span: Span },                // E0250
+    UnknownType               { name: String, span: Span },                               // E0251
+    NotCallable               { found: TyId, span: Span },                                // E0252
+    WrongArgCount             { expected: usize, found: usize, at_least: bool, span },    // E0253
     // E0254 retired — string literals are typed `*const [u8; N]` (see StrLit row above)
-    UnsupportedFeature        { feature: &'static str, span: Span },              // E0255
-    CannotInfer               { span: Span },                                     // E0256
-    PointerMutabilityMismatch { expected: TyId, actual: TyId, span: Span },       // E0257
-    StructLitUnknownField     { field: String, adt: String, span: Span },         // E0258 — see spec/08_ADT.md
-    StructLitMissingField     { field: String, adt: String, lit_span: Span },     // E0259 — see spec/08_ADT.md
-    StructLitDuplicateField   { field: String, first: Span, dup: Span },          // E0260 — see spec/08_ADT.md
-    NoFieldOnAdt              { field: String, adt: String, span: Span },         // E0261 — see spec/08_ADT.md
-    TypeNotFieldable          { ty: TyId, span: Span },                           // E0262 — see spec/08_ADT.md
-    MutateImmutable           { op: MutateOp, span: Span },                       // E0263 — see spec/10_ADDRESS_OF.md, spec/11_MUTABILITY.md
-    UnsizedArrayAsValue       { pos: SizedPos, span: Span },                      // E0261 (collision — see note) — spec/09_ARRAY.md
-    // E0264 InvalidCast reserved per spec/12_AS.md
-    PointerComparison         { span: Span },                                      // E0265 — pointer ordering undefined; use ox_ptr_eq for equality
+    UnsupportedFeature        { feature: &'static str, span: Span },                      // E0255
+    CannotInfer               { span: Span },                                             // E0256
+    PointerMutabilityMismatch { expected: TyId, actual: TyId, span: Span },               // E0257
+    StructLitUnknownField     { field: String, adt: String, span: Span },                 // E0258
+    StructLitMissingField     { field: String, adt: String, lit_span: Span },             // E0259
+    StructLitDuplicateField   { field: String, first: Span, dup: Span },                  // E0260
+    NoFieldOnAdt              { field: String, adt: String, span: Span },                 // E0261
+    TypeNotFieldable          { ty: TyId, span: Span },                                   // E0262
+    MutateImmutable           { op: MutateOp, span: Span },                               // E0263
+    ArrayByValueAtExternC     { which: ParamOrReturn, ty: TyId, span: Span },             // E0264
+    ArrayLengthMismatch       { expected: TyId, found: TyId, span: Span },                // E0265
+    NotIndexable              { ty: TyId, span: Span },                                   // E0266
+    IndexNotUsize             { found: TyId, span: Span },                                // E0267
+    ArrayLitElementMismatch   { i: usize, expected: TyId, found: TyId, span: Span },      // E0268
+    UnsizedArrayAsValue       { pos: SizedPos, span: Span },                              // E0269
+    DerefNonPointer           { found: TyId, span: Span },                                // E0270
+    CyclicType                { span: Span },                                             // E0271
+    VariadicArgUnsupported    { found: TyId, span: Span },                                // E0272
+    RecursiveAdt              { adt: String, span: Span },                                // E0273
+    InvalidCast               { src: TyId, dst: TyId, span: Span },                       // E0274 — see spec/12_AS.md
+    GenericArityMismatch      { expected: usize, found: usize, span: Span },              // E0275
+    // E0276 — TransmuteSizeMismatch (mono; see spec/17_LAYOUT.md)
+    // E0277 — LayoutUnknown (deferred; see spec/17_LAYOUT.md)
+    // E0278 — DivergentMonomorphization (mono; see spec/16_GENERIC.md)
+    PointerComparison         { op: BinOp, span: Span },                                  // E0279 — use ox_ptr_eq
+    NonIntegerOperand         { site: IntegerSite, found: TyId, span: Span },             // E0280 — generic "expected integer" for binop/unary/compound-assign positions
 }
 ```
 
-Code namespace: typeck owns **E0250–E0299**.
-
-**E0261 collision (known, tracked):** the code currently uses E0261
-for both `NoFieldOnAdt` and `UnsizedArrayAsValue`. The rendered text
-is unambiguous, but the numeric code is double-booked. Renumbering
-is a separate code-and-snapshot task; the spec lists both at their
-intended-but-conflicting codes so the discrepancy is discoverable.
+Code namespace: typeck owns **E0250–E0299**. Mono carves out
+E0276 / E0277 / E0278 (declared inline above for cross-spec
+discoverability). `BinOp`, `UnOp`, `AssignOp`, and `IntegerSite`
+are re-exported from typeck for the error variants that carry
+them; `IntegerSite` lives in `check::obligation`.
 
 `from_typeck_error(err, file, &TyArena)` lives in
 `src/reporter/from_typeck.rs` and needs the arena to render type names

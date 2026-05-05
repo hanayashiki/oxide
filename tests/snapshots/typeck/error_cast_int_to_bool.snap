@@ -1,0 +1,14 @@
+== diagnostics ==
+[E0274] Error: cannot cast `i32` as `bool`
+   ╭─[ error_cast_int_to_bool.ox:2:5 ]
+   │
+ 2 │     x as bool
+   │     ────┬────  
+   │         ╰────── invalid cast
+   │ 
+   │ Help: compare against zero (e.g. `x != 0`) — booleans are not produced by `as`
+───╯
+== types ==
+Fn[0] f(x[Local(0)]: i32) -> bool
+  HExprId(0) : i32
+  HExprId(1) : bool

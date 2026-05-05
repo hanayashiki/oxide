@@ -1,0 +1,7 @@
+== diagnostics ==
+== types ==
+Fn[0] f() -> *const u8
+  HExprId(0) : *mut u8
+  HExprId(1) : ()
+  HExprId(2) : *const u8
+  HExprId(3) : *const u8

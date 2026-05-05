@@ -38,7 +38,7 @@ use crate::reporter::Span;
 
 use self::obligation::Obligation;
 use self::unify::MismatchCtx;
-use super::error::{MutateOp, SizedPos, TypeError};
+use super::error::{IntegerSite, MutateOp, SizedPos, TypeError};
 use super::ty::{
     AdtDef, AdtId, FnSig, InferId, ParamId, PrimTy, TyArena, TyId, TyKind, subst_from,
 };
@@ -109,6 +109,72 @@ pub fn check(hir: &HirProgram) -> (TypeckResults, Vec<TypeError>) {
         cx.discharge_obligation(obl, None);
     }
     cx.finish()
+}
+
+/// Classification of `expr as Ty` per spec/12_AS.md §"Typeck rules"
+/// allowed-set. Used by `Checker::infer_cast` (typeck-side validation
+/// → E0274 on `Reject`) and by `Codegen::emit_cast` (codegen-side
+/// dispatch). Both call sites compute the kind from the same
+/// `(src, dst)` resolved pair so they stay in lockstep.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CastKind {
+    /// Both operands are integer `Prim`s (any width, any signedness).
+    /// Codegen path: trunc / sext / zext per width compare.
+    IntToInt,
+    /// Source is `bool`, destination is an integer `Prim`. Codegen:
+    /// `zext i1 -> iN`.
+    BoolToInt,
+    /// Both `Ptr`, same pointee, dst-mut ≥ src-mut. Codegen: no-op
+    /// (LLVM `ptr` is opaque). The `Mut → Const` outer drop is the
+    /// one direction permitted; `Const → Mut` is `Reject`.
+    PtrToPtr,
+    /// `src == dst` after Infer-resolution. Trivial — no value
+    /// transformation needed; codegen falls through the existing arms.
+    Identity,
+    /// Off-table cast. `infer_cast` emits E0274. Codegen never sees
+    /// this kind (typeck rejected first).
+    Reject,
+}
+
+/// Validate per spec/12_AS.md §"Allowed set". `src` and `dst` must
+/// already be resolved through any Infer chain.
+pub fn cast_kind(tys: &TyArena, src: TyId, dst: TyId) -> CastKind {
+    // Identity short-circuit — covers `x as i32` where `x: i32`,
+    // and the `Error` poison cases (Error == Error after intern).
+    if src == dst {
+        return CastKind::Identity;
+    }
+    let s = tys.kind(src);
+    let d = tys.kind(dst);
+    // Poison absorbs.
+    if matches!(s, TyKind::Error) || matches!(d, TyKind::Error) {
+        return CastKind::Identity;
+    }
+    match (s, d) {
+        // Integer ↔ Integer (excludes Bool — Bool is its own arm).
+        (TyKind::Prim(sp), TyKind::Prim(dp)) if sp.is_integer() && dp.is_integer() => {
+            CastKind::IntToInt
+        }
+        // Bool → integer (zext i1).
+        (TyKind::Prim(PrimTy::Bool), TyKind::Prim(dp)) if dp.is_integer() => {
+            CastKind::BoolToInt
+        }
+        // Ptr ↔ Ptr: same pointee shape, mut_le on outer mutability.
+        // `mut_le(m1, m2)` iff NOT (m1 == Const && m2 == Mut).
+        (TyKind::Ptr(t1, m1), TyKind::Ptr(t2, m2)) if *t1 == *t2 => {
+            let mut_le =
+                !matches!((*m1, *m2), (Mutability::Const, Mutability::Mut));
+            if mut_le {
+                CastKind::PtrToPtr
+            } else {
+                CastKind::Reject
+            }
+        }
+        // Everything else (Prim ↔ Bool reverse, Prim ↔ Ptr, Adt
+        // anywhere, cross-pointee Ptr, Fn/Array/Unit/Never anywhere)
+        // is off-table → Reject.
+        _ => CastKind::Reject,
+    }
 }
 
 struct Checker<'hir> {
@@ -399,6 +465,78 @@ impl<'hir> Checker<'hir> {
                 };
                 self.check_variadic_promotable(t, span);
             }
+            Obligation::Integer { site, ty, span } => {
+                let t = match inf {
+                    Some(i) => self.resolve_fully(i, ty),
+                    None => ty,
+                };
+                self.discharge_integer(site, t, span);
+            }
+            Obligation::Cast { src, dst, span } => {
+                let s = match inf {
+                    Some(i) => self.resolve_fully(i, src),
+                    None => src,
+                };
+                let d = match inf {
+                    Some(i) => self.resolve_fully(i, dst),
+                    None => dst,
+                };
+                if let CastKind::Reject = cast_kind(&self.tys, s, d) {
+                    self.errors.push(TypeError::InvalidCast {
+                        src: s,
+                        dst: d,
+                        span,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Per spec/05_TYPE_CHECKER.md §Obligations: every operand position
+    /// the codegen assumes is integer must resolve to an integer
+    /// `Prim`. Pointer cmp is the actionable case (E0279
+    /// `PointerComparison` → `ox_ptr_eq`); everything else is the
+    /// generic E0280 `NonIntegerOperand`. Pure observation — never
+    /// binds, never unifies.
+    fn discharge_integer(&mut self, site: IntegerSite, ty: TyId, span: Span) {
+        match self.tys.kind(ty) {
+            TyKind::Prim(p) if p.is_integer() => {
+                // ok — the only success case.
+            }
+            TyKind::Error => {
+                // poison absorbs.
+            }
+            TyKind::Infer(_) => {
+                // post-defaulting any leftover Infer fires CannotInfer
+                // through the leftover-infer pass; emitting here would
+                // double-report.
+            }
+            TyKind::Ptr(..) => {
+                // Pointer cmp is the actionable special case.
+                if let IntegerSite::Bin(
+                    op @ (BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge),
+                ) = site
+                {
+                    self.errors
+                        .push(TypeError::PointerComparison { op, span });
+                } else {
+                    self.errors.push(TypeError::NonIntegerOperand {
+                        site,
+                        found: ty,
+                        span,
+                    });
+                }
+            }
+            // Bool, Adt, Fn, Array, Unit, Never, Param — all the
+            // "wrong shape" cases route through NonIntegerOperand
+            // with site-aware help in the renderer.
+            _ => {
+                self.errors.push(TypeError::NonIntegerOperand {
+                    site,
+                    found: ty,
+                    span,
+                });
+            }
         }
     }
 
@@ -449,6 +587,13 @@ impl<'hir> Checker<'hir> {
             TypeError::VariadicArgUnsupported { found, .. } => {
                 *found = self.resolve_fully(inf, *found);
             }
+            TypeError::InvalidCast { src, dst, .. } => {
+                *src = self.resolve_fully(inf, *src);
+                *dst = self.resolve_fully(inf, *dst);
+            }
+            TypeError::NonIntegerOperand { found, .. } => {
+                *found = self.resolve_fully(inf, *found);
+            }
             TypeError::UnknownType { .. }
             | TypeError::WrongArgCount { .. }
             | TypeError::UnsupportedFeature { .. }
@@ -461,7 +606,8 @@ impl<'hir> Checker<'hir> {
             | TypeError::MutateImmutable { .. }
             | TypeError::UnsizedArrayAsValue { .. }
             | TypeError::RecursiveAdt { .. }
-            | TypeError::GenericArityMismatch { .. } => {}
+            | TypeError::GenericArityMismatch { .. }
+            | TypeError::PointerComparison { .. } => {}
         }
     }
 
@@ -834,8 +980,7 @@ impl<'hir> Checker<'hir> {
                 self.infer_struct_lit(inf, aid, &type_args, &fields, &span)
             }
             HirExprKind::Cast { expr: inner, ty } => {
-                let _ = self.infer_expr(inf, inner);
-                Self::resolve_ty(&mut self.tys, &mut inf.errors, &ty)
+                self.infer_cast(inf, inner, &ty, &span)
             }
             HirExprKind::AddrOf {
                 mutability,
@@ -1140,7 +1285,20 @@ impl<'hir> Checker<'hir> {
     fn infer_unary(&mut self, inf: &mut Inferer, op: UnOp, inner: HExprId, _span: &Span) -> TyId {
         let t = self.infer_expr(inf, inner);
         match op {
-            UnOp::Neg | UnOp::BitNot => t, // numeric / integer (typeck v0 trusts; codegen checks)
+            // `-x` / `~x` require an integer operand. The eager rule
+            // returns `t` regardless so cascades stay typed; the
+            // `Integer` obligation runs at finalize against the
+            // resolved type and emits E0280 / E0279 as appropriate.
+            // See spec/05_TYPE_CHECKER.md §Obligations.
+            UnOp::Neg | UnOp::BitNot => {
+                let span = self.hir.exprs[inner].span.clone();
+                inf.obligations.push(Obligation::Integer {
+                    site: IntegerSite::Un(op),
+                    ty: t,
+                    span,
+                });
+                t
+            }
             UnOp::Not => {
                 let span = self.hir.exprs[inner].span.clone();
                 let bool_ty = self.tys.bool;
@@ -1190,6 +1348,34 @@ impl<'hir> Checker<'hir> {
         }
     }
 
+    /// `expr as Ty`. Per spec/12_AS.md §"Typeck rules":
+    /// validate via `cast_kind` and emit `InvalidCast` (E0274) on
+    /// `Reject`. Result is the resolved target type regardless so
+    /// cascades stay typed.
+    ///
+    /// The validation is deferred via `Obligation::Cast` so that
+    /// Infer-int sources (typical for integer literals: `1 as u8`)
+    /// have a chance to default to `i32` before classification.
+    /// Eager classification would mis-Reject `Infer as u8` because
+    /// `(Infer, Prim)` falls through `cast_kind`'s catch-all arm.
+    /// Codegen also runs `cast_kind` to pick its IR shape.
+    fn infer_cast(
+        &mut self,
+        inf: &mut Inferer,
+        inner: HExprId,
+        target_hir_ty: &HirTy,
+        span: &Span,
+    ) -> TyId {
+        let src_ty = self.infer_expr(inf, inner);
+        let dst_ty = Self::resolve_ty(&mut self.tys, &mut inf.errors, target_hir_ty);
+        inf.obligations.push(Obligation::Cast {
+            src: src_ty,
+            dst: dst_ty,
+            span: span.clone(),
+        });
+        dst_ty
+    }
+
     fn infer_binary(
         &mut self,
         inf: &mut Inferer,
@@ -1201,8 +1387,19 @@ impl<'hir> Checker<'hir> {
         let lt = self.infer_expr(inf, lhs);
         let rt = self.infer_expr(inf, rhs);
         let bool_ty = self.tys.bool;
+        let lhs_span = self.hir.exprs[lhs].span.clone();
+        let rhs_span = self.hir.exprs[rhs].span.clone();
         match op {
-            // Arithmetic + bitwise: same type both sides; result = that type.
+            // Logical: both sides bool; result = bool. NO Integer
+            // obligation — Bool is the required type here.
+            BinOp::And | BinOp::Or => {
+                unify::equate(self, inf, lt, bool_ty, lhs_span);
+                unify::equate(self, inf, rt, bool_ty, rhs_span);
+                bool_ty
+            }
+            // Arithmetic / bitwise: equate sides; one Integer
+            // obligation on the equated type covers both operands.
+            // Result = the equated type.
             BinOp::Add
             | BinOp::Sub
             | BinOp::Mul
@@ -1212,42 +1409,104 @@ impl<'hir> Checker<'hir> {
             | BinOp::BitOr
             | BinOp::BitXor => {
                 unify::equate(self, inf, lt, rt, span.clone());
+                inf.obligations.push(Obligation::Integer {
+                    site: IntegerSite::Bin(op),
+                    ty: lt,
+                    span: span.clone(),
+                });
                 lt
             }
-            // Comparisons: same type both sides; result = bool.
+            // Comparisons: equate sides; one Integer obligation on
+            // the equated type. Result = bool. Pointer comparison
+            // surfaces E0279 (use ox_ptr_eq) at discharge.
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 unify::equate(self, inf, lt, rt, span.clone());
+                inf.obligations.push(Obligation::Integer {
+                    site: IntegerSite::Bin(op),
+                    ty: lt,
+                    span: span.clone(),
+                });
                 bool_ty
             }
-            // Logical: both sides bool; result = bool.
-            BinOp::And | BinOp::Or => {
-                unify::equate(self, inf, lt, bool_ty, self.hir.exprs[lhs].span.clone());
-                unify::equate(self, inf, rt, bool_ty, self.hir.exprs[rhs].span.clone());
-                bool_ty
+            // Shifts: NO equate — Rust permits `1u32 << 2u8`, and
+            // codegen's `coerce_shift_amt` widens at emit time.
+            // Each side gets its own Integer obligation so the
+            // diagnostic points at the offending operand.
+            // Result = `lt`.
+            BinOp::Shl | BinOp::Shr => {
+                inf.obligations.push(Obligation::Integer {
+                    site: IntegerSite::Bin(op),
+                    ty: lt,
+                    span: lhs_span,
+                });
+                inf.obligations.push(Obligation::Integer {
+                    site: IntegerSite::Bin(op),
+                    ty: rt,
+                    span: rhs_span,
+                });
+                lt
             }
-            // Shifts: lhs's type is the result; rhs is any integer (loosely).
-            BinOp::Shl | BinOp::Shr => lt,
         }
     }
 
     fn infer_assign(
         &mut self,
         inf: &mut Inferer,
-        _op: AssignOp,
+        op: AssignOp,
         target: HExprId,
         rhs: HExprId,
         span: &Span,
     ) -> TyId {
         let t = self.infer_expr(inf, target);
         let r = self.infer_expr(inf, rhs);
-        // RHS coerces *to* the LHS slot — direction matters for pointer
-        // mutability (`*mut → *const` OK, reverse is not).
-        unify::subtype(self, inf, r, t, span.clone());
+        let target_span = self.hir.exprs[target].span.clone();
+        let rhs_span = self.hir.exprs[rhs].span.clone();
+
+        // Per spec/05_TYPE_CHECKER.md §"Per-expression rules":
+        //   - Plain `=`: subtype(rhs, target). No Integer obligation —
+        //     plain assignment works for any type.
+        //   - Compound arith/bitwise: subtype + one Integer obligation
+        //     on `t` (subtype ties rhs → no second obligation needed).
+        //   - Compound shift: NO subtype between sides (Rust permits
+        //     mixed widths; codegen's `coerce_shift_amt` handles
+        //     widening). Two Integer obligations, one per side.
+        match op {
+            AssignOp::Eq => {
+                unify::subtype(self, inf, r, t, span.clone());
+            }
+            AssignOp::Add
+            | AssignOp::Sub
+            | AssignOp::Mul
+            | AssignOp::Div
+            | AssignOp::Rem
+            | AssignOp::BitAnd
+            | AssignOp::BitOr
+            | AssignOp::BitXor => {
+                unify::subtype(self, inf, r, t, span.clone());
+                inf.obligations.push(Obligation::Integer {
+                    site: IntegerSite::Assign(op),
+                    ty: t,
+                    span: span.clone(),
+                });
+            }
+            AssignOp::Shl | AssignOp::Shr => {
+                inf.obligations.push(Obligation::Integer {
+                    site: IntegerSite::Assign(op),
+                    ty: t,
+                    span: target_span.clone(),
+                });
+                inf.obligations.push(Obligation::Integer {
+                    site: IntegerSite::Assign(op),
+                    ty: r,
+                    span: rhs_span,
+                });
+            }
+        }
+
         // Mutability of the target. `None` means "not a place" — HIR has
         // already filed `InvalidAssignTarget`, so we don't double-report.
         // See spec/10_ADDRESS_OF.md "Mutability check for `&mut`".
         if let Some(Mutability::Const) = self.place_mutability(inf, target) {
-            let target_span = self.hir.exprs[target].span.clone();
             inf.errors.push(TypeError::MutateImmutable {
                 op: MutateOp::Assign,
                 span: target_span,

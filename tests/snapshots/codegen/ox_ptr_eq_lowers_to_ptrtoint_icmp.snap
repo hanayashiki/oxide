@@ -1,0 +1,74 @@
+; ModuleID = 'test'
+source_filename = "test"
+
+define i1 @f(ptr %p, ptr %q) {
+allocas:
+  %p.0.slot = alloca ptr, align 8
+  %q.1.slot = alloca ptr, align 8
+  br label %body
+
+body:                                             ; preds = %allocas
+  store ptr %p, ptr %p.0.slot, align 8
+  store ptr %q, ptr %q.1.slot, align 8
+  %load = load ptr, ptr %p.0.slot, align 8
+  %load1 = load ptr, ptr %q.1.slot, align 8
+  %call = call i1 @"ox_ptr_eq__$u8"(ptr %load, ptr %load1)
+  ret i1 %call
+}
+
+declare ptr @malloc(i64)
+
+declare ptr @calloc(i64, i64)
+
+declare ptr @realloc(ptr, i64)
+
+declare void @free(ptr)
+
+declare ptr @aligned_alloc(i64, i64)
+
+declare void @exit(i32)
+
+declare void @_Exit(i32)
+
+declare void @quick_exit(i32)
+
+declare void @abort()
+
+declare i32 @atoi(ptr)
+
+declare i64 @atoll(ptr)
+
+declare i32 @abs(i32)
+
+declare i64 @llabs(i64)
+
+declare i32 @rand()
+
+declare void @srand(i32)
+
+declare ptr @getenv(ptr)
+
+declare i32 @system(ptr)
+
+define i1 @"ox_ptr_eq__$u8"(ptr %a, ptr %b) {
+allocas:
+  %a.5.slot = alloca ptr, align 8
+  %b.6.slot = alloca ptr, align 8
+  %ai.7.slot = alloca i64, align 8
+  %bi.8.slot = alloca i64, align 8
+  br label %body
+
+body:                                             ; preds = %allocas
+  store ptr %a, ptr %a.5.slot, align 8
+  store ptr %b, ptr %b.6.slot, align 8
+  %load = load ptr, ptr %a.5.slot, align 8
+  %transmute.p2i = ptrtoint ptr %load to i64
+  store i64 %transmute.p2i, ptr %ai.7.slot, align 4
+  %load1 = load ptr, ptr %b.6.slot, align 8
+  %transmute.p2i2 = ptrtoint ptr %load1 to i64
+  store i64 %transmute.p2i2, ptr %bi.8.slot, align 4
+  %load3 = load i64, ptr %ai.7.slot, align 4
+  %load4 = load i64, ptr %bi.8.slot, align 4
+  %eq = icmp eq i64 %load3, %load4
+  ret i1 %eq
+}
