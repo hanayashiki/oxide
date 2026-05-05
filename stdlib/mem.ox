@@ -57,3 +57,12 @@ fn ox_ptr_eq<T>(a: *const T, b: *const T) -> bool {
     let bi: usize = ox_transmute(b);
     ai == bi
 }
+
+// Pointer null check
+fn ox_is_null<T>(p: *const T) -> bool {
+    ox_ptr_eq(p, null)
+}
+
+fn ox_is_not_null<T>(p: *const T) -> bool {
+    !ox_is_null(p)
+}

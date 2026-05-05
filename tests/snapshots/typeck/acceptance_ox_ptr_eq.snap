@@ -6,14 +6,14 @@ Fn[0] f(p[Local(0)]: *const u8, q[Local(1)]: *const u8) -> bool
   HExprId(2) : *const u8
   HExprId(3) : bool  call_type_args=[u8]
 Fn[1] ox_alloc<Param(0)>() -> *mut Param(0)
-  HExprId(4) : fn(Param(5)) -> Param(6)
+  HExprId(4) : fn(Param(7)) -> Param(8)
   HExprId(5) : fn(usize) -> *mut u8
   HExprId(6) : fn() -> usize
   HExprId(7) : usize  call_type_args=[Param(0)]
   HExprId(8) : *mut u8
   HExprId(9) : *mut Param(0)  call_type_args=[*mut u8, *mut Param(0)]
 Fn[2] ox_alloc_zeroed<Param(1)>() -> *mut Param(1)
-  HExprId(10) : fn(Param(5)) -> Param(6)
+  HExprId(10) : fn(Param(7)) -> Param(8)
   HExprId(11) : fn(usize, usize) -> *mut u8
   HExprId(12) : usize
   HExprId(13) : fn() -> usize
@@ -22,14 +22,14 @@ Fn[2] ox_alloc_zeroed<Param(1)>() -> *mut Param(1)
   HExprId(16) : *mut Param(1)  call_type_args=[*mut u8, *mut Param(1)]
 Fn[3] ox_dealloc<Param(2)>(p[Local(2)]: *mut Param(2)) -> ()
   HExprId(17) : fn(*mut u8)
-  HExprId(18) : fn(Param(5)) -> Param(6)
+  HExprId(18) : fn(Param(7)) -> Param(8)
   HExprId(19) : *mut Param(2)
   HExprId(20) : *mut u8  call_type_args=[*mut Param(2), *mut u8]
   HExprId(21) : ()
 Fn[4] ox_realloc<Param(3)>(p[Local(3)]: *mut Param(3), n[Local(4)]: usize) -> *mut Param(3)
-  HExprId(22) : fn(Param(5)) -> Param(6)
+  HExprId(22) : fn(Param(7)) -> Param(8)
   HExprId(23) : fn(*mut u8, usize) -> *mut u8
-  HExprId(24) : fn(Param(5)) -> Param(6)
+  HExprId(24) : fn(Param(7)) -> Param(8)
   HExprId(25) : *mut Param(3)
   HExprId(26) : *mut u8  call_type_args=[*mut Param(3), *mut u8]
   HExprId(27) : usize
@@ -39,33 +39,43 @@ Fn[4] ox_realloc<Param(3)>(p[Local(3)]: *mut Param(3), n[Local(4)]: usize) -> *m
   HExprId(31) : *mut u8
   HExprId(32) : *mut Param(3)  call_type_args=[*mut u8, *mut Param(3)]
 Fn[5] ox_ptr_eq<Param(4)>(a[Local(5)]: *const Param(4), b[Local(6)]: *const Param(4)) -> bool
-  HExprId(33) : fn(Param(5)) -> Param(6)
+  HExprId(33) : fn(Param(7)) -> Param(8)
   HExprId(34) : *const Param(4)
   HExprId(35) : usize  call_type_args=[*const Param(4), usize]
   HExprId(36) : ()
-  HExprId(37) : fn(Param(5)) -> Param(6)
+  HExprId(37) : fn(Param(7)) -> Param(8)
   HExprId(38) : *const Param(4)
   HExprId(39) : usize  call_type_args=[*const Param(4), usize]
   HExprId(40) : ()
   HExprId(41) : usize
   HExprId(42) : usize
   HExprId(43) : bool
-Fn[6] ox_transmute<Param(5), Param(6)>(x[Local(9)]: Param(5)) -> Param(6)
-Fn[7] ox_size_of<Param(7)>() -> usize
-Fn[8] malloc(size[Local(10)]: usize) -> *mut u8
-Fn[9] calloc(count[Local(11)]: usize, size[Local(12)]: usize) -> *mut u8
-Fn[10] realloc(ptr[Local(13)]: *mut u8, size[Local(14)]: usize) -> *mut u8
-Fn[11] free(ptr[Local(15)]: *mut u8) -> ()
-Fn[12] aligned_alloc(alignment[Local(16)]: usize, size[Local(17)]: usize) -> *mut u8
-Fn[13] exit(status[Local(18)]: i32) -> ()
-Fn[14] _Exit(status[Local(19)]: i32) -> ()
-Fn[15] quick_exit(status[Local(20)]: i32) -> ()
-Fn[16] abort() -> ()
-Fn[17] atoi(s[Local(21)]: *const [u8]) -> i32
-Fn[18] atoll(s[Local(22)]: *const [u8]) -> i64
-Fn[19] abs(x[Local(23)]: i32) -> i32
-Fn[20] llabs(x[Local(24)]: i64) -> i64
-Fn[21] rand() -> i32
-Fn[22] srand(seed[Local(25)]: u32) -> ()
-Fn[23] getenv(name[Local(26)]: *const [u8]) -> *const [u8]
-Fn[24] system(cmd[Local(27)]: *const [u8]) -> i32
+Fn[6] ox_is_null<Param(5)>(p[Local(9)]: *const Param(5)) -> bool
+  HExprId(44) : fn(*const Param(4), *const Param(4)) -> bool
+  HExprId(45) : *const Param(5)
+  HExprId(46) : *mut Param(5)
+  HExprId(47) : bool  call_type_args=[Param(5)]
+Fn[7] ox_is_not_null<Param(6)>(p[Local(10)]: *const Param(6)) -> bool
+  HExprId(48) : fn(*const Param(5)) -> bool
+  HExprId(49) : *const Param(6)
+  HExprId(50) : bool  call_type_args=[Param(6)]
+  HExprId(51) : bool
+Fn[8] ox_transmute<Param(7), Param(8)>(x[Local(11)]: Param(7)) -> Param(8)
+Fn[9] ox_size_of<Param(9)>() -> usize
+Fn[10] malloc(size[Local(12)]: usize) -> *mut u8
+Fn[11] calloc(count[Local(13)]: usize, size[Local(14)]: usize) -> *mut u8
+Fn[12] realloc(ptr[Local(15)]: *mut u8, size[Local(16)]: usize) -> *mut u8
+Fn[13] free(ptr[Local(17)]: *mut u8) -> ()
+Fn[14] aligned_alloc(alignment[Local(18)]: usize, size[Local(19)]: usize) -> *mut u8
+Fn[15] exit(status[Local(20)]: i32) -> ()
+Fn[16] _Exit(status[Local(21)]: i32) -> ()
+Fn[17] quick_exit(status[Local(22)]: i32) -> ()
+Fn[18] abort() -> ()
+Fn[19] atoi(s[Local(23)]: *const [u8]) -> i32
+Fn[20] atoll(s[Local(24)]: *const [u8]) -> i64
+Fn[21] abs(x[Local(25)]: i32) -> i32
+Fn[22] llabs(x[Local(26)]: i64) -> i64
+Fn[23] rand() -> i32
+Fn[24] srand(seed[Local(27)]: u32) -> ()
+Fn[25] getenv(name[Local(28)]: *const [u8]) -> *const [u8]
+Fn[26] system(cmd[Local(29)]: *const [u8]) -> i32

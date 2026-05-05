@@ -19,7 +19,7 @@ use std::path::Path;
 fn jit_i32_snapshot() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots/jit/i32");
     common::assert_snapshots(&dir, |_file_name, src| {
-        let (ir, r): (String, i32) = unsafe { common::jit_run_with_ir(src, "main") };
+        let (ir, r): (String, i32) = unsafe { common::jit_run_with_ir("main", src) };
         // `ir` already ends with a trailing newline, so no separator
         // needed before `== result ==`.
         format!("== ir ==\n{ir}== result ==\n{r}\n")

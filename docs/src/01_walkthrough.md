@@ -286,27 +286,56 @@ oxide hello.ox -- --my-arg
 
 ## Memory management
 
-`mem.ox` ships typed wrappers around the C allocator: `ox_alloc<T>`,
-`ox_alloc_zeroed<T>`, `ox_dealloc<T>`, `ox_ptr_eq<T>`, and `ox_realloc<T>`. Import it
-like any other stdlib file.
+`mem.ox` contains general memory management tools.
+It ships:
+1. Typed wrappers around the C allocator.
+2. Pointer comparison utils. You must use them instead of `==` and `!=`.
 
 ```rust
+fn ox_alloc<T>() -> *mut T;
+fn ox_alloc_zeroed<T>() -> *mut T;
+fn ox_dealloc<T>(p: *mut T);
+fn ox_realloc<T>(p: *mut T, n: usize) -> *mut T;
+
+fn ox_ptr_eq<T>(a: *const T, b: *const T) -> bool;
+fn ox_is_null<T>(p: *const T) -> bool;
+fn ox_is_not_null<T>(p: *const T) -> bool;
+```
+
+Example:
+
+```rust
+// memory-management.ox
+
 import "stdio.ox";
 import "mem.ox";
 
 struct Point { x: i32, y: i32 }
 
 fn main() -> i32 {
-    let integer = ox_alloc::<i32>();           // uninitialized
+    let integer = ox_alloc::<i32>();             // uninitialized
     *integer = 42;
 
-    let point = ox_alloc_zeroed::<Point>();    // zero-initialized
-    printf("point.x = %d\n", point.x);         // → "point.x = 0"
+    let point = ox_alloc_zeroed::<Point>();      // zero-initialized
+    printf("point.x = %d\n", point.x);           // → "point.x = 0"
+
+    let null_ptr: *const i32 = null;
+    let is_null = ox_is_null(null_ptr);
+    printf(
+        "null_ptr is null? %s\n",
+        if is_null { "y" } else { "n" },         // → null_ptr is null? y
+    );
 
     ox_dealloc(integer);
     ox_dealloc(point);
     0
 }
+```
+
+```
+> oxide memory-management.ox
+point.x = 0
+null_ptr is null? y
 ```
 
 ## C standard library

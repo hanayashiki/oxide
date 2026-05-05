@@ -31,14 +31,14 @@ Fn[0] slurp(path[Local(0)]: *const [u8], buf[Local(1)]: *mut u8, cap[Local(2)]: 
   HExprId(27) : i32
   HExprId(28) : usize
 Fn[1] ox_alloc<Param(0)>() -> *mut Param(0)
-  HExprId(29) : fn(Param(5)) -> Param(6)
+  HExprId(29) : fn(Param(7)) -> Param(8)
   HExprId(30) : fn(usize) -> *mut u8
   HExprId(31) : fn() -> usize
   HExprId(32) : usize  call_type_args=[Param(0)]
   HExprId(33) : *mut u8
   HExprId(34) : *mut Param(0)  call_type_args=[*mut u8, *mut Param(0)]
 Fn[2] ox_alloc_zeroed<Param(1)>() -> *mut Param(1)
-  HExprId(35) : fn(Param(5)) -> Param(6)
+  HExprId(35) : fn(Param(7)) -> Param(8)
   HExprId(36) : fn(usize, usize) -> *mut u8
   HExprId(37) : usize
   HExprId(38) : fn() -> usize
@@ -47,14 +47,14 @@ Fn[2] ox_alloc_zeroed<Param(1)>() -> *mut Param(1)
   HExprId(41) : *mut Param(1)  call_type_args=[*mut u8, *mut Param(1)]
 Fn[3] ox_dealloc<Param(2)>(p[Local(6)]: *mut Param(2)) -> ()
   HExprId(42) : fn(*mut u8)
-  HExprId(43) : fn(Param(5)) -> Param(6)
+  HExprId(43) : fn(Param(7)) -> Param(8)
   HExprId(44) : *mut Param(2)
   HExprId(45) : *mut u8  call_type_args=[*mut Param(2), *mut u8]
   HExprId(46) : ()
 Fn[4] ox_realloc<Param(3)>(p[Local(7)]: *mut Param(3), n[Local(8)]: usize) -> *mut Param(3)
-  HExprId(47) : fn(Param(5)) -> Param(6)
+  HExprId(47) : fn(Param(7)) -> Param(8)
   HExprId(48) : fn(*mut u8, usize) -> *mut u8
-  HExprId(49) : fn(Param(5)) -> Param(6)
+  HExprId(49) : fn(Param(7)) -> Param(8)
   HExprId(50) : *mut Param(3)
   HExprId(51) : *mut u8  call_type_args=[*mut Param(3), *mut u8]
   HExprId(52) : usize
@@ -64,66 +64,76 @@ Fn[4] ox_realloc<Param(3)>(p[Local(7)]: *mut Param(3), n[Local(8)]: usize) -> *m
   HExprId(56) : *mut u8
   HExprId(57) : *mut Param(3)  call_type_args=[*mut u8, *mut Param(3)]
 Fn[5] ox_ptr_eq<Param(4)>(a[Local(9)]: *const Param(4), b[Local(10)]: *const Param(4)) -> bool
-  HExprId(58) : fn(Param(5)) -> Param(6)
+  HExprId(58) : fn(Param(7)) -> Param(8)
   HExprId(59) : *const Param(4)
   HExprId(60) : usize  call_type_args=[*const Param(4), usize]
   HExprId(61) : ()
-  HExprId(62) : fn(Param(5)) -> Param(6)
+  HExprId(62) : fn(Param(7)) -> Param(8)
   HExprId(63) : *const Param(4)
   HExprId(64) : usize  call_type_args=[*const Param(4), usize]
   HExprId(65) : ()
   HExprId(66) : usize
   HExprId(67) : usize
   HExprId(68) : bool
-Fn[6] ox_transmute<Param(5), Param(6)>(x[Local(13)]: Param(5)) -> Param(6)
-Fn[7] ox_size_of<Param(7)>() -> usize
-Fn[8] malloc(size[Local(14)]: usize) -> *mut u8
-Fn[9] calloc(count[Local(15)]: usize, size[Local(16)]: usize) -> *mut u8
-Fn[10] realloc(ptr[Local(17)]: *mut u8, size[Local(18)]: usize) -> *mut u8
-Fn[11] free(ptr[Local(19)]: *mut u8) -> ()
-Fn[12] aligned_alloc(alignment[Local(20)]: usize, size[Local(21)]: usize) -> *mut u8
-Fn[13] exit(status[Local(22)]: i32) -> ()
-Fn[14] _Exit(status[Local(23)]: i32) -> ()
-Fn[15] quick_exit(status[Local(24)]: i32) -> ()
-Fn[16] abort() -> ()
-Fn[17] atoi(s[Local(25)]: *const [u8]) -> i32
-Fn[18] atoll(s[Local(26)]: *const [u8]) -> i64
-Fn[19] abs(x[Local(27)]: i32) -> i32
-Fn[20] llabs(x[Local(28)]: i64) -> i64
-Fn[21] rand() -> i32
-Fn[22] srand(seed[Local(29)]: u32) -> ()
-Fn[23] getenv(name[Local(30)]: *const [u8]) -> *const [u8]
-Fn[24] system(cmd[Local(31)]: *const [u8]) -> i32
-Fn[25] puts(s[Local(32)]: *const [u8]) -> i32
-Fn[26] putchar(c[Local(33)]: i32) -> i32
-Fn[27] putc(c[Local(34)]: i32, stream[Local(35)]: *mut u8) -> i32
-Fn[28] fputs(s[Local(36)]: *const [u8], stream[Local(37)]: *mut u8) -> i32
-Fn[29] fputc(c[Local(38)]: i32, stream[Local(39)]: *mut u8) -> i32
-Fn[30] getchar() -> i32
-Fn[31] getc(stream[Local(40)]: *mut u8) -> i32
-Fn[32] fgetc(stream[Local(41)]: *mut u8) -> i32
-Fn[33] ungetc(c[Local(42)]: i32, stream[Local(43)]: *mut u8) -> i32
-Fn[34] fgets(buf[Local(44)]: *mut [u8], size[Local(45)]: i32, stream[Local(46)]: *mut u8) -> *mut [u8]
-Fn[35] fopen(path[Local(47)]: *const [u8], mode[Local(48)]: *const [u8]) -> *mut u8
-Fn[36] freopen(path[Local(49)]: *const [u8], mode[Local(50)]: *const [u8], stream[Local(51)]: *mut u8) -> *mut u8
-Fn[37] fclose(stream[Local(52)]: *mut u8) -> i32
-Fn[38] tmpfile() -> *mut u8
-Fn[39] remove(path[Local(53)]: *const [u8]) -> i32
-Fn[40] rename(old_path[Local(54)]: *const [u8], new_path[Local(55)]: *const [u8]) -> i32
-Fn[41] fread(buf[Local(56)]: *mut u8, size[Local(57)]: usize, count[Local(58)]: usize, stream[Local(59)]: *mut u8) -> usize
-Fn[42] fwrite(buf[Local(60)]: *const u8, size[Local(61)]: usize, count[Local(62)]: usize, stream[Local(63)]: *mut u8) -> usize
-Fn[43] fflush(stream[Local(64)]: *mut u8) -> i32
-Fn[44] feof(stream[Local(65)]: *mut u8) -> i32
-Fn[45] ferror(stream[Local(66)]: *mut u8) -> i32
-Fn[46] clearerr(stream[Local(67)]: *mut u8) -> ()
-Fn[47] rewind(stream[Local(68)]: *mut u8) -> ()
-Fn[48] setvbuf(stream[Local(69)]: *mut u8, buf[Local(70)]: *mut [u8], mode[Local(71)]: i32, size[Local(72)]: usize) -> i32
-Fn[49] setbuf(stream[Local(73)]: *mut u8, buf[Local(74)]: *mut [u8]) -> ()
-Fn[50] perror(s[Local(75)]: *const [u8]) -> ()
-Fn[51] printf(fmt[Local(76)]: *const [u8]) -> i32
-Fn[52] fprintf(stream[Local(77)]: *mut u8, fmt[Local(78)]: *const [u8]) -> i32
-Fn[53] sprintf(buf[Local(79)]: *mut [u8], fmt[Local(80)]: *const [u8]) -> i32
-Fn[54] snprintf(buf[Local(81)]: *mut [u8], size[Local(82)]: usize, fmt[Local(83)]: *const [u8]) -> i32
-Fn[55] scanf(fmt[Local(84)]: *const [u8]) -> i32
-Fn[56] fscanf(stream[Local(85)]: *mut u8, fmt[Local(86)]: *const [u8]) -> i32
-Fn[57] sscanf(s[Local(87)]: *const [u8], fmt[Local(88)]: *const [u8]) -> i32
+Fn[6] ox_is_null<Param(5)>(p[Local(13)]: *const Param(5)) -> bool
+  HExprId(69) : fn(*const Param(4), *const Param(4)) -> bool
+  HExprId(70) : *const Param(5)
+  HExprId(71) : *mut Param(5)
+  HExprId(72) : bool  call_type_args=[Param(5)]
+Fn[7] ox_is_not_null<Param(6)>(p[Local(14)]: *const Param(6)) -> bool
+  HExprId(73) : fn(*const Param(5)) -> bool
+  HExprId(74) : *const Param(6)
+  HExprId(75) : bool  call_type_args=[Param(6)]
+  HExprId(76) : bool
+Fn[8] ox_transmute<Param(7), Param(8)>(x[Local(15)]: Param(7)) -> Param(8)
+Fn[9] ox_size_of<Param(9)>() -> usize
+Fn[10] malloc(size[Local(16)]: usize) -> *mut u8
+Fn[11] calloc(count[Local(17)]: usize, size[Local(18)]: usize) -> *mut u8
+Fn[12] realloc(ptr[Local(19)]: *mut u8, size[Local(20)]: usize) -> *mut u8
+Fn[13] free(ptr[Local(21)]: *mut u8) -> ()
+Fn[14] aligned_alloc(alignment[Local(22)]: usize, size[Local(23)]: usize) -> *mut u8
+Fn[15] exit(status[Local(24)]: i32) -> ()
+Fn[16] _Exit(status[Local(25)]: i32) -> ()
+Fn[17] quick_exit(status[Local(26)]: i32) -> ()
+Fn[18] abort() -> ()
+Fn[19] atoi(s[Local(27)]: *const [u8]) -> i32
+Fn[20] atoll(s[Local(28)]: *const [u8]) -> i64
+Fn[21] abs(x[Local(29)]: i32) -> i32
+Fn[22] llabs(x[Local(30)]: i64) -> i64
+Fn[23] rand() -> i32
+Fn[24] srand(seed[Local(31)]: u32) -> ()
+Fn[25] getenv(name[Local(32)]: *const [u8]) -> *const [u8]
+Fn[26] system(cmd[Local(33)]: *const [u8]) -> i32
+Fn[27] puts(s[Local(34)]: *const [u8]) -> i32
+Fn[28] putchar(c[Local(35)]: i32) -> i32
+Fn[29] putc(c[Local(36)]: i32, stream[Local(37)]: *mut u8) -> i32
+Fn[30] fputs(s[Local(38)]: *const [u8], stream[Local(39)]: *mut u8) -> i32
+Fn[31] fputc(c[Local(40)]: i32, stream[Local(41)]: *mut u8) -> i32
+Fn[32] getchar() -> i32
+Fn[33] getc(stream[Local(42)]: *mut u8) -> i32
+Fn[34] fgetc(stream[Local(43)]: *mut u8) -> i32
+Fn[35] ungetc(c[Local(44)]: i32, stream[Local(45)]: *mut u8) -> i32
+Fn[36] fgets(buf[Local(46)]: *mut [u8], size[Local(47)]: i32, stream[Local(48)]: *mut u8) -> *mut [u8]
+Fn[37] fopen(path[Local(49)]: *const [u8], mode[Local(50)]: *const [u8]) -> *mut u8
+Fn[38] freopen(path[Local(51)]: *const [u8], mode[Local(52)]: *const [u8], stream[Local(53)]: *mut u8) -> *mut u8
+Fn[39] fclose(stream[Local(54)]: *mut u8) -> i32
+Fn[40] tmpfile() -> *mut u8
+Fn[41] remove(path[Local(55)]: *const [u8]) -> i32
+Fn[42] rename(old_path[Local(56)]: *const [u8], new_path[Local(57)]: *const [u8]) -> i32
+Fn[43] fread(buf[Local(58)]: *mut u8, size[Local(59)]: usize, count[Local(60)]: usize, stream[Local(61)]: *mut u8) -> usize
+Fn[44] fwrite(buf[Local(62)]: *const u8, size[Local(63)]: usize, count[Local(64)]: usize, stream[Local(65)]: *mut u8) -> usize
+Fn[45] fflush(stream[Local(66)]: *mut u8) -> i32
+Fn[46] feof(stream[Local(67)]: *mut u8) -> i32
+Fn[47] ferror(stream[Local(68)]: *mut u8) -> i32
+Fn[48] clearerr(stream[Local(69)]: *mut u8) -> ()
+Fn[49] rewind(stream[Local(70)]: *mut u8) -> ()
+Fn[50] setvbuf(stream[Local(71)]: *mut u8, buf[Local(72)]: *mut [u8], mode[Local(73)]: i32, size[Local(74)]: usize) -> i32
+Fn[51] setbuf(stream[Local(75)]: *mut u8, buf[Local(76)]: *mut [u8]) -> ()
+Fn[52] perror(s[Local(77)]: *const [u8]) -> ()
+Fn[53] printf(fmt[Local(78)]: *const [u8]) -> i32
+Fn[54] fprintf(stream[Local(79)]: *mut u8, fmt[Local(80)]: *const [u8]) -> i32
+Fn[55] sprintf(buf[Local(81)]: *mut [u8], fmt[Local(82)]: *const [u8]) -> i32
+Fn[56] snprintf(buf[Local(83)]: *mut [u8], size[Local(84)]: usize, fmt[Local(85)]: *const [u8]) -> i32
+Fn[57] scanf(fmt[Local(86)]: *const [u8]) -> i32
+Fn[58] fscanf(stream[Local(87)]: *mut u8, fmt[Local(88)]: *const [u8]) -> i32
+Fn[59] sscanf(s[Local(89)]: *const [u8], fmt[Local(90)]: *const [u8]) -> i32

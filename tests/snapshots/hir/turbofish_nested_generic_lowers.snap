@@ -13,39 +13,45 @@ HirProgram
   Module mem.ox
     Fn[2] ox_alloc<T[TyParam(2)]>() -> *mut Param(2)
       Block
-        tail: Call(Fn(7, "ox_transmute"), Call(Fn(9, "malloc"), Call(Fn(8, "ox_size_of"), ::<Param(2)>)))
+        tail: Call(Fn(9, "ox_transmute"), Call(Fn(11, "malloc"), Call(Fn(10, "ox_size_of"), ::<Param(2)>)))
     Fn[3] ox_alloc_zeroed<T[TyParam(3)]>() -> *mut Param(3)
       Block
-        tail: Call(Fn(7, "ox_transmute"), Call(Fn(10, "calloc"), Int(1), Call(Fn(8, "ox_size_of"), ::<Param(3)>)))
+        tail: Call(Fn(9, "ox_transmute"), Call(Fn(12, "calloc"), Int(1), Call(Fn(10, "ox_size_of"), ::<Param(3)>)))
     Fn[4] ox_dealloc<T[TyParam(4)]>(p[Local(1)]: *mut Param(4))
       Block
-        tail: Call(Fn(12, "free"), Call(Fn(7, "ox_transmute"), Local(1, "p", place)))
+        tail: Call(Fn(14, "free"), Call(Fn(9, "ox_transmute"), Local(1, "p", place)))
     Fn[5] ox_realloc<T[TyParam(5)]>(p[Local(2)]: *mut Param(5), n[Local(3)]: usize) -> *mut Param(5)
       Block
-        tail: Call(Fn(7, "ox_transmute"), Call(Fn(11, "realloc"), Call(Fn(7, "ox_transmute"), Local(2, "p", place)), Binary(Mul, Local(3, "n", place), Call(Fn(8, "ox_size_of"), ::<Param(5)>))))
+        tail: Call(Fn(9, "ox_transmute"), Call(Fn(13, "realloc"), Call(Fn(9, "ox_transmute"), Local(2, "p", place)), Binary(Mul, Local(3, "n", place), Call(Fn(10, "ox_size_of"), ::<Param(5)>))))
     Fn[6] ox_ptr_eq<T[TyParam(6)]>(a[Local(4)]: *const Param(6), b[Local(5)]: *const Param(6)) -> bool
       Block
-        Let(6, "ai", :usize, Call(Fn(7, "ox_transmute"), Local(4, "a", place)))
-        Let(7, "bi", :usize, Call(Fn(7, "ox_transmute"), Local(5, "b", place)))
+        Let(6, "ai", :usize, Call(Fn(9, "ox_transmute"), Local(4, "a", place)))
+        Let(7, "bi", :usize, Call(Fn(9, "ox_transmute"), Local(5, "b", place)))
         tail: Binary(Eq, Local(6, "ai", place), Local(7, "bi", place))
+    Fn[7] ox_is_null<T[TyParam(7)]>(p[Local(8)]: *const Param(7)) -> bool
+      Block
+        tail: Call(Fn(6, "ox_ptr_eq"), Local(8, "p", place), Null())
+    Fn[8] ox_is_not_null<T[TyParam(8)]>(p[Local(9)]: *const Param(8)) -> bool
+      Block
+        tail: Unary(Not, Call(Fn(7, "ox_is_null"), Local(9, "p", place)))
   Module intrinsics.ox
-    IntrinsicFn[7, Transmute] ox_transmute<Src[TyParam(7)], Dst[TyParam(8)]>(x[Local(8)]: Param(7)) -> Param(8)
-    IntrinsicFn[8, SizeOf] ox_size_of<T[TyParam(9)]>() -> usize
+    IntrinsicFn[9, Transmute] ox_transmute<Src[TyParam(9)], Dst[TyParam(10)]>(x[Local(10)]: Param(9)) -> Param(10)
+    IntrinsicFn[10, SizeOf] ox_size_of<T[TyParam(11)]>() -> usize
   Module stdlib.ox
-    ExternFn[9] malloc(size[Local(9)]: usize) -> *mut u8
-    ExternFn[10] calloc(count[Local(10)]: usize, size[Local(11)]: usize) -> *mut u8
-    ExternFn[11] realloc(ptr[Local(12)]: *mut u8, size[Local(13)]: usize) -> *mut u8
-    ExternFn[12] free(ptr[Local(14)]: *mut u8)
-    ExternFn[13] aligned_alloc(alignment[Local(15)]: usize, size[Local(16)]: usize) -> *mut u8
-    ExternFn[14] exit(status[Local(17)]: i32)
-    ExternFn[15] _Exit(status[Local(18)]: i32)
-    ExternFn[16] quick_exit(status[Local(19)]: i32)
-    ExternFn[17] abort()
-    ExternFn[18] atoi(s[Local(20)]: *const [u8]) -> i32
-    ExternFn[19] atoll(s[Local(21)]: *const [u8]) -> i64
-    ExternFn[20] abs(x[Local(22)]: i32) -> i32
-    ExternFn[21] llabs(x[Local(23)]: i64) -> i64
-    ExternFn[22] rand() -> i32
-    ExternFn[23] srand(seed[Local(24)]: u32)
-    ExternFn[24] getenv(name[Local(25)]: *const [u8]) -> *const [u8]
-    ExternFn[25] system(cmd[Local(26)]: *const [u8]) -> i32
+    ExternFn[11] malloc(size[Local(11)]: usize) -> *mut u8
+    ExternFn[12] calloc(count[Local(12)]: usize, size[Local(13)]: usize) -> *mut u8
+    ExternFn[13] realloc(ptr[Local(14)]: *mut u8, size[Local(15)]: usize) -> *mut u8
+    ExternFn[14] free(ptr[Local(16)]: *mut u8)
+    ExternFn[15] aligned_alloc(alignment[Local(17)]: usize, size[Local(18)]: usize) -> *mut u8
+    ExternFn[16] exit(status[Local(19)]: i32)
+    ExternFn[17] _Exit(status[Local(20)]: i32)
+    ExternFn[18] quick_exit(status[Local(21)]: i32)
+    ExternFn[19] abort()
+    ExternFn[20] atoi(s[Local(22)]: *const [u8]) -> i32
+    ExternFn[21] atoll(s[Local(23)]: *const [u8]) -> i64
+    ExternFn[22] abs(x[Local(24)]: i32) -> i32
+    ExternFn[23] llabs(x[Local(25)]: i64) -> i64
+    ExternFn[24] rand() -> i32
+    ExternFn[25] srand(seed[Local(26)]: u32)
+    ExternFn[26] getenv(name[Local(27)]: *const [u8]) -> *const [u8]
+    ExternFn[27] system(cmd[Local(28)]: *const [u8]) -> i32

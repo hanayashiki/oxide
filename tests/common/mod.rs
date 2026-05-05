@@ -227,12 +227,8 @@ pub fn render_parser(file_name: &str, src: &str) -> String {
     let sess = Session::for_test(&host);
     let mut snap = ParserSnap::default();
     {
-        let mut b = Builder::from_inline(
-            sess,
-            PathBuf::from(file_name),
-            src.to_string(),
-            &mut snap,
-        );
+        let mut b =
+            Builder::from_inline(sess, PathBuf::from(file_name), src.to_string(), &mut snap);
         b.run(Phase::Ast);
     }
     snap.out
@@ -419,8 +415,7 @@ pub fn render_mono(file_name: &str, src: &str) -> String {
     let sess = Session::for_test(&host);
     let mut snap = MonoSnap::default();
     {
-        let mut b =
-            Builder::from_root(sess, root, &mut snap).with_mono_depth_limit(8);
+        let mut b = Builder::from_root(sess, root, &mut snap).with_mono_depth_limit(8);
         b.run(Phase::Mono);
     }
     snap.out
@@ -506,19 +501,17 @@ pub fn render_codegen(file_name: &str, src: &str) -> String {
 ///
 /// Safety: the caller asserts the function's actual return type
 /// matches `R`. A mismatch here is undefined behaviour.
-pub unsafe fn jit_run_with_ir<R: Copy + 'static>(src: &str, entry: &str) -> (String, R) {
-    let host = VfsHost::new(HashMap::new());
+pub unsafe fn jit_run_with_ir<R: Copy + 'static>(entry: &str, src: &str) -> (String, R) {
+    let (host, root) = vfs_for_fixture(entry, src);
     let sess = Session::for_test(&host);
     let mut tapper = NoopTapper;
     let ctx = Context::create();
     let module = {
-        let mut b = Builder::from_inline(
-            sess,
-            PathBuf::from("<jit>"),
-            src.to_string(),
-            &mut tapper,
-        );
-        b.codegen(&ctx, "jit").expect("codegen failed (compile clean expected)")
+        let mut b = Builder::from_root(sess, root, &mut tapper);
+
+        let r = b.codegen(&ctx, "jit");
+        println!("codegen result: {r:?}");
+        r.expect("codegen failed (compile clean expected)")
     };
 
     // Capture IR text before handing the module to the execution
@@ -536,13 +529,6 @@ pub unsafe fn jit_run_with_ir<R: Copy + 'static>(src: &str, entry: &str) -> (Str
     };
     let result = unsafe { func.call() };
     (ir, result)
-}
-
-/// Convenience wrapper around `jit_run_with_ir` for callers that only
-/// want the runtime result.
-pub unsafe fn jit_run<R: Copy + 'static>(src: &str, entry: &str) -> R {
-    let (_ir, r) = unsafe { jit_run_with_ir::<R>(src, entry) };
-    r
 }
 
 // ============================================================
@@ -570,15 +556,7 @@ fn write_typeck_signatures(
             oxide::hir::HirConstValue::Char(c) => format!("Char({c})"),
             oxide::hir::HirConstValue::Str(s) => format!("Str({s:?})"),
         };
-        writeln!(
-            out,
-            "Const[{}] {}: {} = {}",
-            cid.raw(),
-            hc.name,
-            ty,
-            value,
-        )
-        .unwrap();
+        writeln!(out, "Const[{}] {}: {} = {}", cid.raw(), hc.name, ty, value,).unwrap();
     }
     for (fid, sig) in results.fn_sigs.iter_enumerated() {
         let f = &hir.fns[fid];
