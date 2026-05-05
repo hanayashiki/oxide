@@ -4,137 +4,106 @@ An educational compiler that writes like Rust and compiles like C, targeting LLV
 
 ⚠️ Currently just for recreation, and still a work in progress
 
+The documentation is hosted at [oxide.cwang.io](https://oxide.cwang.io/).
+
+# Why Oxide?
+
+- Performance: compiled to LLVM then to machine code, getting down to raw metal as its name suggests
+- Modern: Rust developers should feel at home with its Rust-like syntax and generic types.
+- Fun: No unsafe blocks, no annoying checks — juggle pointers with sheer joy.
+
 # Examples
 
 ## Hello World
 
+Pull in libc's stdio and print your first line of Oxide.
+
 ```rust
-extern "C" {
-    fn puts(s: *const u8) -> i32;
-}
+// hello.ox
+import "stdio.ox";
 
 fn main() -> i32 {
     puts("hello world");
-    puts("goodbye");
     0
 }
 ```
 
 ```bash
+> oxide hello.ox
 hello world
-goodbye
 ```
 
-## Socket Server
+## Linked List
+
+Monomorphized to concrete machine code at every call site.
 
 ```rust
-// A minimal "Hello, world!" HTTP server in pure Oxide.
-//
-// Demonstrates: extern "C" FFI to libc / Darwin sockets, struct
-// construction, field assignment, address-of (&/&mut), recursion as
-// a substitute for the missing `while` loop.
-struct sockaddr_in {
-    sin_len: u8,
-    sin_family: u8,
-    sin_port: u16,
-    sin_addr: u32,
-    sin_zero: u64,
+// linked-list.ox
+import "stdio.ox";
+import "mem.ox";
+
+struct Node<T> {
+    value: T,
+    next: *mut Node<T>,
 }
 
-extern "C" {
-    fn socket(domain: i32, ty: i32, protocol: i32) -> i32;
-    fn bind(fd: i32, addr: *const sockaddr_in, len: u32) -> i32;
-    fn listen(fd: i32, backlog: i32) -> i32;
-    fn accept(fd: i32, addr: *mut sockaddr_in, len: *mut u32) -> i32;
-    fn write(fd: i32, buf: *const u8, count: u64) -> i64;
-    fn close(fd: i32) -> i32;
-    fn htons(host: u16) -> u16;
-    fn perror(s: *const u8);
-    fn puts(s: *const u8) -> i32;
+// Push a new node onto the front of the list. Returns the new head.
+fn push<T>(head: *mut Node<T>, v: T) -> *mut Node<T> {
+    let n = ox_alloc::<Node<T>>();
+    n.value = v;
+    n.next = head;
+    n
 }
 
-// Accept one connection, write the canned response, close, recurse.
-// No `while`-loop yet — recursion is the v0 substitute.
-fn serve(server_fd: i32) -> i32 {
-    let mut addr = sockaddr_in {
-        sin_len: 16,
-        sin_family: 2,
-        sin_port: 0,
-        sin_addr: 0,
-        sin_zero: 0,
-    };
-    let mut addr_len: u32 = 16;
-
-    let client_fd = accept(server_fd, &mut addr, &mut addr_len);
-    if client_fd < 0 {
-        perror("accept");
-        return 1;
+fn len<T>(head: *mut Node<T>) -> i32 {
+    let mut count: i32 = 0;
+    let mut cur = head;
+    while !ox_ptr_eq(cur, null) {
+        count = count + 1;
+        cur = cur.next;
     }
+    count
+}
 
-    // Hardcoded response. We deliberately don't read() the request —
-    // toy server, doesn't dispatch on path / method. The kernel buffers
-    // the request bytes; they get discarded on close.
-    let response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 13\r\n\r\nHello, world!";
-    write(client_fd, response, 78);
-    close(client_fd);
-
-    // Tail-recurse to keep accepting. Without TCO this leaks stack
-    // per request — fine for the demo, would need real `while` for
-    // production.
-    serve(server_fd)
+fn free_all<T>(head: *mut Node<T>) {
+    let mut cur = head;
+    while !ox_ptr_eq(cur, null) {
+        let next = cur.next;
+        ox_dealloc(cur);
+        cur = next;
+    }
 }
 
 fn main() -> i32 {
-    let mut addr = sockaddr_in {
-        sin_len: 16,
-        sin_family: 2,        // AF_INET
-        sin_port: 0,          // set below via htons
-        sin_addr: 0,          // INADDR_ANY
-        sin_zero: 0,
-    };
-    addr.sin_port = htons(8080);
+    let mut head: *mut Node<i32> = null;
+    head = push(head, 10);
+    head = push(head, 20);
+    head = push(head, 30);
 
-    let server_fd = socket(2, 1, 0);     // AF_INET, SOCK_STREAM, default proto
-    if server_fd < 0 {
-        perror("socket");
-        return 1;
+    printf("length = %d\n", len(head));
+
+    let mut cur = head;
+    while !ox_ptr_eq(cur, null) {
+        printf("%d -> ", cur.value);
+        cur = cur.next;
     }
+    puts("(nil)");
 
-    if bind(server_fd, &addr, 16) < 0 {
-        perror("bind");
-        return 1;
-    }
-
-    if listen(server_fd, 10) < 0 {
-        perror("listen");
-        return 1;
-    }
-
-    puts("Listening on http://localhost:8080/");
-    serve(server_fd)
+    free_all(head);
+    0
 }
+
 ```
 
-Server output:
-
-```bash
-Listening on http://localhost:8080/
+```rust
+> oxide linked-list.ox
+length = 3
+30 -> 20 -> 10 -> (nil)
 ```
 
-Client output:
+# Example Projects
 
-```bash
-curl -i http://localhost:8080/ 
-HTTP/1.1 200 OK
-Content-Type: text/plain
-Content-Length: 13
-
-Hello, world!
-```
-
-# References
-
-- [Mapping High Level Constructs to LLVM IR](https://mapping-high-level-constructs-to-llvm-ir.readthedocs.io/en/latest/)
+Go to [./example-projects](./example-projects/) for end-to-end programs.
 
 # License
 
