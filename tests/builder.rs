@@ -1,6 +1,7 @@
 //! End-to-end tests for `oxide::builder`.
 //!
-//! Each test drives lex → parse → HIR lower → typeck → builder build,
+//! Each test drives the full pipeline (load → lower → typeck → mono →
+//! codegen → optional opt → emit → optional link) through `Builder`,
 //! using a `VfsHost` with a per-test workdir under
 //! `target/test-artifacts/builder/<test_name>/`. Object files and
 //! executables land on real disk via the host's `to_real` boundary;
@@ -13,18 +14,11 @@ use std::process::Command;
 use inkwell::context::Context;
 
 use oxide::builder::{
-    BuildArtifact, BuildError, BuildOptions, EmitKind, OutputPath, build,
+    BuildArtifact, BuildError, BuildOptions, Builder, EmitKind, NoopTapper, OutputPath,
 };
-use oxide::codegen::codegen;
 use oxide::config::{CompilerConfig, LinkerChoice};
-use oxide::hir::lower;
-use oxide::lexer::lex;
 use oxide::loader::VfsHost;
-use oxide::mono::monomorphize;
-use oxide::parser::parse;
-use oxide::reporter::SourceMap;
 use oxide::session::Session;
-use oxide::typeck::check;
 
 const FIXTURE_RETURN_42: &str = "fn main() -> i32 { 42 }";
 
@@ -41,40 +35,25 @@ fn host_with_workdir(workdir: PathBuf) -> VfsHost {
     VfsHost::new(HashMap::new()).with_workdir(workdir)
 }
 
-/// Lower `src` through to HIR + TypeckResults + MonoResults, panicking
-/// on any error (test fixtures must compile clean).
-fn drive_pipeline(
-    src: &str,
-) -> (
-    SourceMap,
-    oxide::hir::HirProgram,
-    oxide::typeck::TypeckResults,
-    oxide::mono::MonoResults,
-) {
-    let mut map = SourceMap::new();
-    let file = map.add(PathBuf::from("<test>"), src.to_string());
-    let tokens = lex(src, file);
-    let (ast, parse_errs) = parse(&tokens, file);
-    assert!(parse_errs.is_empty(), "parse errors: {parse_errs:#?}");
-    let (hir, hir_errs) = lower(&ast);
-    assert!(hir_errs.is_empty(), "hir errors: {hir_errs:#?}");
-    let (mut typeck, type_errs) = check(&hir);
-    assert!(type_errs.is_empty(), "type errors: {type_errs:#?}");
-    let (mono, mono_errs) = monomorphize(&hir, &mut typeck);
-    assert!(mono_errs.is_empty(), "mono errors: {mono_errs:#?}");
-    (map, hir, typeck, mono)
-}
-
+/// Drive the new `Builder::emit_artifact` end-to-end against an inline
+/// fixture. Uses `NoopTapper` since these tests only assert on the
+/// produced artifact, not on phase observations.
 fn run_build(
     src: &str,
     workdir: PathBuf,
     config: CompilerConfig,
     opts: BuildOptions,
 ) -> Result<BuildArtifact, BuildError> {
-    let (_map, hir, mut typeck, mono) = drive_pipeline(src);
     let host = host_with_workdir(workdir);
     let sess = Session::new(&host, config);
-    build(&sess, &hir, &mut typeck, &mono, &opts)
+    let mut tapper = NoopTapper;
+    let mut b = Builder::from_inline(
+        sess,
+        PathBuf::from("<test>"),
+        src.to_string(),
+        &mut tapper,
+    );
+    b.emit_artifact(&opts)
 }
 
 #[test]
@@ -149,10 +128,10 @@ fn is_known_object_magic(b: &[u8]) -> bool {
 
 #[test]
 fn ir_matches_codegen_only() {
-    // EmitKind::Ir at OptLevel::None must equal codegen(...).print_to_string()
-    // byte-for-byte (modulo the trailing target-stamping that emit-time adds).
-    // We compare ignoring the lines that the builder injects (target triple
-    // + data layout) since those aren't present in the bare codegen output.
+    // EmitKind::Ir at OptLevel::None must equal `Builder::codegen(...)`'s
+    // raw `print_to_string()` byte-for-byte (modulo the trailing
+    // target-stamping that emit-time adds). We compare ignoring the
+    // lines that the builder injects (target triple + data layout).
     let workdir = workdir_for("ir_matches_codegen_only");
     let config = CompilerConfig::default();
     let opts = BuildOptions {
@@ -163,7 +142,8 @@ fn ir_matches_codegen_only() {
         extra_link_args: Vec::new(),
     };
 
-    let artifact = run_build(FIXTURE_RETURN_42, workdir.clone(), config, opts).expect("build failed");
+    let artifact =
+        run_build(FIXTURE_RETURN_42, workdir.clone(), config.clone(), opts).expect("build failed");
     let ir = std::fs::read_to_string(artifact.primary_output_real.unwrap()).unwrap();
 
     // Sanity: the builder-emitted IR contains the function body.
@@ -176,12 +156,24 @@ fn ir_matches_codegen_only() {
         "expected `target triple` line in builder IR, got:\n{ir}"
     );
 
-    // The builder's IR should be identical to direct codegen except for
-    // the stamped target lines. Strip them and compare bodies.
-    let (_map, hir, mut typeck, mono) = drive_pipeline(FIXTURE_RETURN_42);
-    let ctx = Context::create();
-    let raw_module = codegen(&ctx, &hir, &mut typeck, &mono, "ir_matches_codegen_only");
-    let raw_ir = raw_module.print_to_string().to_string();
+    // Run codegen via the Builder against a fresh host + session so we
+    // can compare. Use the NoopTapper.
+    let raw_ir = {
+        let host = host_with_workdir(workdir_for("ir_matches_codegen_only-raw"));
+        let sess = Session::new(&host, config);
+        let mut tapper = NoopTapper;
+        let mut b = Builder::from_inline(
+            sess,
+            PathBuf::from("<test>"),
+            FIXTURE_RETURN_42.to_string(),
+            &mut tapper,
+        );
+        let ctx = Context::create();
+        let module = b
+            .codegen(&ctx, "ir_matches_codegen_only")
+            .expect("codegen failed");
+        module.print_to_string().to_string()
+    };
 
     let strip_target = |s: &str| -> String {
         s.lines()
@@ -248,7 +240,8 @@ fn aot_matches_jit() {
     let config = CompilerConfig::default();
     let opts = BuildOptions::new("aot_matches_jit");
 
-    let artifact = run_build(FIXTURE_RETURN_42, workdir, config, opts).expect("build failed");
+    let artifact =
+        run_build(FIXTURE_RETURN_42, workdir, config, opts).expect("build failed");
     let exe = artifact.primary_output_real.expect("real exe path missing");
     let status = Command::new(&exe).status().expect("spawn aot exe");
     let aot_code = status.code().expect("no exit code") as u32;
@@ -261,15 +254,21 @@ fn aot_matches_jit() {
     );
 }
 
-/// Local, minimal JIT runner. We don't depend on `tests/common` here
-/// because the builder integration test stands alone.
+/// Local, minimal JIT runner using `Builder::codegen`. We don't depend
+/// on `tests/common` here because the builder integration test stands
+/// alone.
 unsafe fn jit_return<R: Copy + 'static>(src: &str, entry: &str) -> R {
     use inkwell::OptimizationLevel;
     use inkwell::execution_engine::JitFunction;
 
-    let (_map, hir, mut typeck, mono) = drive_pipeline(src);
+    let host = host_with_workdir(workdir_for(&format!("jit_return-{entry}")));
+    let sess = Session::new(&host, CompilerConfig::default());
+    let mut tapper = NoopTapper;
+    let mut b = Builder::from_inline(sess, PathBuf::from("<jit>"), src.to_string(), &mut tapper);
+
     let ctx = Context::create();
-    let module = codegen(&ctx, &hir, &mut typeck, &mono, "jit");
+    let module = b.codegen(&ctx, "jit").expect("codegen failed");
+
     let ee = module
         .create_jit_execution_engine(OptimizationLevel::None)
         .expect("create JIT execution engine");

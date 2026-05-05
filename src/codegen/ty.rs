@@ -222,6 +222,30 @@ pub fn is_signed_prim(p: PrimTy) -> bool {
     )
 }
 
+/// LLVM bit-width of a primitive. Mirrors `lower_prim` row by row so the
+/// two stay in sync. Used by `emit_transmute` for the (Prim, Prim)
+/// same-width arm and by anything else that needs to compare widths
+/// without materializing an `IntType<'ctx>`.
+pub fn prim_bit_width(p: PrimTy) -> u32 {
+    match p {
+        PrimTy::I8 | PrimTy::U8 | PrimTy::Bool => 8,
+        PrimTy::I16 | PrimTy::U16 => 16,
+        PrimTy::I32 | PrimTy::U32 => 32,
+        PrimTy::I64 | PrimTy::U64 | PrimTy::Usize | PrimTy::Isize => 64,
+    }
+}
+
+/// Whether a primitive is a target-pointer-width integer. v0 is fixed
+/// at 64-bit pointers, so the predicate matches `i64`, `u64`, `usize`,
+/// `isize`. Used by `emit_transmute` to gate the `ptrtoint`/`inttoptr`
+/// arms (LLVM rejects bitcast between non-ptr-width int and ptr).
+pub fn is_ptr_width_int(p: PrimTy) -> bool {
+    matches!(
+        p,
+        PrimTy::I64 | PrimTy::U64 | PrimTy::Usize | PrimTy::Isize
+    )
+}
+
 /// Resolve a `TyId` to its `PrimTy`. Used by binary-op codegen to pick
 /// signed vs unsigned opcodes from the operand type.
 pub fn as_prim(tcx: &TyArena, ty: TyId) -> Option<PrimTy> {

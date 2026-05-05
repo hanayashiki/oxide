@@ -149,10 +149,8 @@ pub struct HirFn {
     /// `None` when source omits `-> T` — typeck defaults to unit.
     pub ret_ty: Option<HirTy>,
     /// `Some(_)` for defined fns; `None` for foreign fns declared in an
-    /// `extern "C"` block. The two correlate today (`body.is_none()` iff
-    /// `is_extern`), but they're distinct fields so future cases that
-    /// have no body for non-extern reasons (trait methods, etc.) don't
-    /// require a refactor.
+    /// `extern "C"` block, **or** for compiler-recognized intrinsics
+    /// declared bodyless in `stdlib/intrinsics.ox` (see `intrinsic`).
     pub body: Option<HBlockId>,
     /// `true` if this fn was declared inside an `extern "C"` block —
     /// linker resolves the symbol against an external object file.
@@ -160,8 +158,33 @@ pub struct HirFn {
     /// `true` if the fn signature ends in `, ...` — a C-ABI variadic.
     /// The parser enforces `is_variadic ⇒ is_extern`.
     pub is_variadic: bool,
+    /// `Some(_)` for compiler-recognized intrinsics. Set by the HIR
+    /// scanner when both gates pass: (a) the fn is declared in
+    /// `stdlib/intrinsics.ox`, (b) its name matches an entry in the
+    /// `name_to_intrinsic` allowlist. Read by the HIR scanner only to
+    /// decide whether to emit `BodylessFnOutsideExtern` (E0209) for a
+    /// body-less fn at module scope. Mono uses it to decide which
+    /// `InstanceOperation` to stamp; codegen reads from the stamped
+    /// operation, not from this field. See spec/17_LAYOUT.md §Intrinsic
+    /// recognition.
+    pub intrinsic: Option<Intrinsic>,
     /// Source span — origin file is `span.file`.
     pub span: Span,
+}
+
+/// Compiler-recognized intrinsic kind. The variant names are the
+/// Rust-side enum (no `ox_` prefix); the Oxide-source name lives in
+/// the `HirFn.name` field. Mapping from name → variant is
+/// `name_to_intrinsic` in the scanner — that function is the single
+/// source of truth for the allowlist; do not introduce a parallel
+/// `INTRINSIC_NAMES` constant. See spec/17_LAYOUT.md §Intrinsic
+/// recognition.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Intrinsic {
+    /// `fn ox_transmute<Src, Dst>(x: Src) -> Dst` — bit-copy reinterpret.
+    Transmute,
+    /// `fn ox_size_of<T>() -> usize` — runtime constant size in bytes.
+    SizeOf,
 }
 
 #[derive(Clone, Debug)]

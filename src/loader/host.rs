@@ -83,14 +83,18 @@ pub struct VfsHost {
     workdir: PathBuf,
 }
 
+pub const INTRINSICS_FILE: &str = "intrinsics.ox";
+
 /// Bundled stdlib, baked into the binary via `include_str!`. Each
 /// entry is `(import-name, source)`; the import name is also the
 /// canonical VFS path the file mounts at. Resolution checks this
 /// table before relative-path resolution per `spec/14_MODULES.md:206-211`.
 const STDLIB_FILES: &[(&str, &str)] = &[
+    (INTRINSICS_FILE, include_str!("../../stdlib/intrinsics.ox")),
     ("stdio.ox", include_str!("../../stdlib/stdio.ox")),
     ("stdlib.ox", include_str!("../../stdlib/stdlib.ox")),
     ("string.ox", include_str!("../../stdlib/string.ox")),
+    ("mem.ox", include_str!("../../stdlib/mem.ox")),
 ];
 
 impl VfsHost {
@@ -150,7 +154,9 @@ impl BuilderHost for VfsHost {
         if self.files.contains_key(&candidate) || candidate.exists() {
             Ok(candidate)
         } else {
-            Err(ResolveError::NotFound { raw: raw.to_string() })
+            Err(ResolveError::NotFound {
+                raw: raw.to_string(),
+            })
         }
     }
 
@@ -188,10 +194,7 @@ fn lexical_normalize(p: &Path) -> PathBuf {
             Component::ParentDir => {
                 // Pop only if the last component is a normal directory.
                 // Leading `..` (or `..` past a root) stays as-is.
-                let popped = matches!(
-                    out.components().next_back(),
-                    Some(Component::Normal(_))
-                );
+                let popped = matches!(out.components().next_back(), Some(Component::Normal(_)));
                 if popped {
                     out.pop();
                 } else {
@@ -227,9 +230,7 @@ mod tests {
     #[test]
     fn resolve_collapses_dot_segments() {
         let h = host(&[("/a/main.ox", ""), ("/a/util.ox", "")]);
-        let r = h
-            .resolve(Path::new("/a/main.ox"), "./././util.ox")
-            .unwrap();
+        let r = h.resolve(Path::new("/a/main.ox"), "./././util.ox").unwrap();
         assert_eq!(r, PathBuf::from("/a/util.ox"));
     }
 
@@ -243,7 +244,9 @@ mod tests {
     #[test]
     fn resolve_not_found_returns_error() {
         let h = host(&[("/main.ox", "")]);
-        let err = h.resolve(Path::new("/main.ox"), "./missing.ox").unwrap_err();
+        let err = h
+            .resolve(Path::new("/main.ox"), "./missing.ox")
+            .unwrap_err();
         let ResolveError::NotFound { raw } = err;
         assert_eq!(raw, "./missing.ox");
     }
@@ -335,9 +338,7 @@ mod tests {
         let main_path = dir.join("main.ox");
         std::fs::write(&main_path, "").expect("write main fixture");
         let h = host(&[]);
-        let err = h
-            .resolve(&main_path, "./does-not-exist.ox")
-            .unwrap_err();
+        let err = h.resolve(&main_path, "./does-not-exist.ox").unwrap_err();
         let ResolveError::NotFound { raw } = err;
         assert_eq!(raw, "./does-not-exist.ox");
     }

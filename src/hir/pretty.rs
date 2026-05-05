@@ -102,8 +102,24 @@ impl<'a> Printer<'a> {
 
     fn print_fn(&mut self, fid: FnId) {
         let f = &self.m.fns[fid];
-        let prefix = if f.is_extern { "ExternFn" } else { "Fn" };
-        let mut header = format!("{}[{}] {}", prefix, fid.raw(), f.name);
+        // Three label forms (mutually exclusive):
+        //   - `IntrinsicFn[<id>, <variant>]` for compiler-recognized
+        //     intrinsics (body-less, declared in `stdlib/intrinsics.ox`).
+        //   - `ExternFn[<id>]` for `extern "C"` fns.
+        //   - `Fn[<id>]` for ordinary user fns.
+        // See spec/17_LAYOUT.md §Intrinsic recognition.
+        let mut header = if let Some(intrinsic) = f.intrinsic {
+            format!(
+                "IntrinsicFn[{}, {:?}] {}",
+                fid.raw(),
+                intrinsic,
+                f.name
+            )
+        } else if f.is_extern {
+            format!("ExternFn[{}] {}", fid.raw(), f.name)
+        } else {
+            format!("Fn[{}] {}", fid.raw(), f.name)
+        };
         // Generic-param list. Empty → no decoration (matches non-generic
         // and `fn name<>()` source forms; both store
         // `generic_params: vec![]`). See spec/16_GENERIC.md §HIR.

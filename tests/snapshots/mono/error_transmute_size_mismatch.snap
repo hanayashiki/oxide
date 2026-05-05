@@ -1,0 +1,16 @@
+== diagnostics ==
+[E0276] Error: cannot transmute between types of different sizes
+   ╭─[ error_transmute_size_mismatch.ox:9:22 ]
+   │
+ 9 │     let bad: i64 = ox_transmute::<i32, i64>(1);
+   │                      ─────────────┬─────────────  
+   │                                   ╰─────────────── transmute size mismatch
+   │ 
+   │ Note 1: source type: `i32` (4 bytes)
+   │ 
+   │ Note 2: target type: `i64` (8 bytes)
+───╯
+== instances ==
+Inst[0] mangled=ox_transmute__$i32__$i64 depth=1 parent=Fn(0)
+== sig ==
+Inst[0] params=[i32] ret=i64

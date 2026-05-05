@@ -54,7 +54,6 @@ let s_size: usize = ox_size_of::<S>();                                   // ✓ 
 
 ```rust
 let bad = ox_transmute::<i32, i64>(1);                                  // ✗ E0276: 4 ≠ 8 bytes
-let bad = ox_size_of::<[i32]>();                                         // ✗ E0277: unsized
 ```
 
 ## Position in the pipeline
@@ -64,7 +63,7 @@ let bad = ox_size_of::<[i32]>();                                         // ✗ 
 - Typeck treats intrinsic fns as ordinary generic fns for unification and `call_type_args` recording — no special path.
 - Mono treats intrinsic instances as ordinary instances for cascading. At instantiation time it **(a) runs the per-instance validity check** and **(b) stamps an `Instance::operation: InstanceOperation` field** (see §Per-instance operation) that records what codegen should do:
   - `ox_transmute`: size-equality check runs after substitution; on mismatch push E0276. Either way, stamp `operation = Transmute`. Means `ox_transmute<T, U>(x)` in a generic body type-checks *unconditionally*; the check fires per instantiation. Consequence: the error span is the call site of the *instantiation*, not the body of the generic — matches Rust's E0512 and is more actionable for users.
-  - `ox_size_of`: call the Rust-side `size_of` helper on the substituted `T`. On `None` push E0277; on `Some(n)` stamp `operation = SizeOf { size: n }`.
+  - `ox_size_of`: call the Rust-side `size_of` helper on the substituted `T` and stamp `operation = SizeOf { size: n }`. The helper returning `None` is unreachable in v0 — typeck's E0269 `UnsizedArrayAsValue` rejects unsized type-args before mono runs, and every other type with no size (`Param`/`Infer`/`Fn`/`Error`) is caught earlier still. The arm panics with `unreachable!()` if it ever fires; see §Out of scope for the deferred `LayoutUnknown` error and its prerequisites.
   - Regular calls: stamp `operation = Call`.
 - Codegen reads `Instance::operation` and dispatches — no name-string match, no recomputation of `size_of`, no second peek at `HirFn::intrinsic`. Intrinsic instances (`operation != Call`) are **not** declared in Pass 1 — no LLVM `declare` lines for them ever appear in the module. The `HirFn::intrinsic` field still exists, but only the HIR scanner reads it (to decide whether to fire E0209); mono and codegen route through `Instance::operation` instead.
 
@@ -159,25 +158,27 @@ pub struct Instance {
 ```rust
 let operation = match hir.fns[fid].intrinsic {
     Some(Intrinsic::Transmute) => {
-        let src_size = size_of(typeck, params[0]);
-        let dst_size = size_of(typeck, ret);
-        match (src_size, dst_size) {
-            (Some(s), Some(d)) if s == d => InstanceOperation::Transmute,
-            (Some(s), Some(d))           => { push E0276 { src_size: s, dst_size: d, .. };
-                                              InstanceOperation::Transmute },
-            _                            => unreachable!(),  // post-mono types are concrete
+        let src_size = size_of(typeck, params[0]).unwrap_or_else(|| unreachable!());
+        let dst_size = size_of(typeck, ret).unwrap_or_else(|| unreachable!());
+        if src_size != dst_size {
+            push E0276 { src_size, dst_size, .. };
         }
+        InstanceOperation::Transmute
     }
-    Some(Intrinsic::SizeOf) => match size_of(typeck, type_args[0]) {
-        Some(n) => InstanceOperation::SizeOf { size: n },
-        None    => { push E0277 { ty: type_args[0], .. };
-                     InstanceOperation::SizeOf { size: 0 /* placeholder */ } },
-    },
+    Some(Intrinsic::SizeOf) => {
+        // size_of returning None on a post-substitution type-arg is
+        // unreachable in v0: typeck's E0269 rejects unsized type-args
+        // (Array(_, None)), and Param/Infer/Fn never reach mono after
+        // substitution. Reaching the panic indicates a compiler bug,
+        // not a user error.
+        let n = size_of(typeck, type_args[0]).unwrap_or_else(|| unreachable!());
+        InstanceOperation::SizeOf { size: n }
+    }
     None => InstanceOperation::Call,
 };
 ```
 
-When validity fails (E0276 or E0277), the instance is still pushed (codegen needs the `(fid, resolved_args)` key to be stable for diagnostics span lookup), the placeholder operation is stamped so codegen can match exhaustively, and the error short-circuits the driver before codegen runs — so the placeholder is never observed in a successful build.
+When the size-mismatch validity check fails (E0276), the instance is still pushed (codegen needs the `(fid, resolved_args)` key to be stable for diagnostics span lookup), the operation is still stamped, and the error short-circuits the driver before codegen runs — so the post-error instance is never observed at codegen.
 
 **Why this design**:
 
@@ -274,9 +275,9 @@ fn ox_size_of<T>() -> usize   // body-less; compiler-recognized
 
 **Declaration**: in `stdlib/intrinsics.ox`. Recognition mechanism is specified in §Intrinsic recognition.
 
-**Mono-time evaluation**: per instance, call the Rust-side `size_of(typeck, T_substituted)` helper (with `T_substituted = instance.type_args[0]`). On `Some(n)`, **stamp `InstanceOperation::SizeOf { size: n }`** on the instance — this is the only place the size value is computed. On `None`, push E0277 and stamp the placeholder `SizeOf { size: 0 }` (never observed because the error short-circuits before codegen). See §Per-instance operation for the stamping logic.
+**Mono-time evaluation**: per instance, call the Rust-side `size_of(typeck, T_substituted)` helper (with `T_substituted = instance.type_args[0]`). The expected result is `Some(n)` — every reachable type-arg passes typeck's E0269 `Sized` obligation, so by the time mono runs `T` is concrete-sized. **Stamp `InstanceOperation::SizeOf { size: n }`** on the instance — this is the only place the size value is computed.
 
-**Validity** (per instance, after substitution): helper result must be `Some`. If `None` (e.g., `ox_size_of::<[i32]>()` over an unsized array), emit E0277 `LayoutUnknown`. Mirrors how E0276 fires.
+**Validity**: helper returning `None` is unreachable in v0 (typeck's E0269 catches unsized type-args before mono); the stamp arm panics with `unreachable!()` if it ever fires. A user-facing `LayoutUnknown` (E0277) is deferred until a reachable trigger lands — see §Out of scope.
 
 **Codegen**: read `size` directly off `InstanceOperation::SizeOf { size }` and emit an `i64` constant at the call site in `emit_call`. No helper call from codegen, no call instruction emitted. The intrinsic's instance has no LLVM `declare` (per §Intrinsic recognition).
 
@@ -313,9 +314,8 @@ Per-instance LLVM declarations are **not** emitted for any non-`Call` operation 
 | Code | Variant | When |
 |------|---------|------|
 | E0276 | `TransmuteSizeMismatch { src: TyId, dst: TyId, src_size: u64, dst_size: u64, span: Span }` | Per-`ox_transmute`-instance: Rust-side `size_of(Src) != size_of(Dst)` after substitution. |
-| E0277 | `LayoutUnknown { ty: TyId, span: Span }` | Per-`ox_size_of`-instance: Rust-side `size_of(T)` returns `None` after substitution. |
 
-Both live on `MonoError` (mono-time errors per `src/mono/mod.rs:92`). The existing `DivergentMonomorphization` (E0278) is unaffected.
+Lives on `MonoError` (mono-time errors). The existing `DivergentMonomorphization` (E0278) is unaffected. A `LayoutUnknown` (E0277) for `ox_size_of` is deferred — see §Out of scope.
 
 Diagnostic format for E0276 (mirrors rustc E0512):
 ```
@@ -329,17 +329,6 @@ N  |     let x = ox_transmute::<i32, i64>(1);
    = note: target type: `i64` (8 bytes)
 ```
 
-Diagnostic format for E0277:
-```
-error[E0277]: cannot determine size of type `[i32]`
-  --> file.ox:N:M
-   |
-N  |     let bad: usize = ox_size_of::<[i32]>();
-   |                      ^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: type `[i32]` has no statically-known layout
-```
-
 ## Out of scope (this round)
 
 - `ox_align_of<T>()` as a user-callable expression — no v0 consumer. The Rust-side `align_of(TyId)` helper is internal-only this round.
@@ -348,6 +337,7 @@ N  |     let bad: usize = ox_size_of::<[i32]>();
 - `repr(C)` / `repr(packed)` / `repr(align(N))` attributes — implicit C layout only.
 - Dependently-sized transmutes.
 - Const-evaluable layout queries (`const N: usize = ox_size_of::<i32>();` — Oxide has no const-expr).
+- `E0277 LayoutUnknown` — deferred until a reachable trigger exists. The current spec layer rejects unsized type-args at typeck (E0269) before mono ever runs, so `ox_size_of`'s layout-known check fires `unreachable!()` rather than a user-facing diagnostic. Lights up when `?Sized`, niche-occupied layouts, or dynamically-sized ADTs land.
 
 ## Out of scope (forever-ish)
 

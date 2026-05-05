@@ -1,0 +1,4 @@
+HirProgram
+  Module intrinsics.ox (root)
+    IntrinsicFn[0, Transmute] ox_transmute<Src[TyParam(0)], Dst[TyParam(1)]>(x[Local(0)]: Param(0)) -> Param(1)
+    IntrinsicFn[1, SizeOf] ox_size_of<T[TyParam(2)]>() -> usize

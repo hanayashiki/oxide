@@ -2,17 +2,25 @@ use index_vec::IndexVec;
 
 use crate::{
     hir::{HirError, ir::*},
-    loader::LoadedFile,
+    loader::{INTRINSICS_FILE, LoadedFile},
     reporter::{FileId, Span},
 };
 
 use super::ty;
 
 use crate::parser::ast::{self, *};
-use std::{
-    cell::RefCell,
-    collections::HashMap,
-};
+use std::{cell::RefCell, collections::HashMap};
+
+/// Name → `Intrinsic` lookup. **Single source of truth for the intrinsic
+/// allowlist** — every recognized intrinsic name has an arm here, and
+/// nowhere else. See spec/17_LAYOUT.md §Intrinsic recognition.
+fn name_to_intrinsic(name: &str) -> Option<Intrinsic> {
+    match name {
+        "ox_transmute" => Some(Intrinsic::Transmute),
+        "ox_size_of" => Some(Intrinsic::SizeOf),
+        _ => None,
+    }
+}
 
 #[derive(Default)]
 pub(super) struct ModuleScope {
@@ -98,9 +106,7 @@ impl<'a> ScanCtx<'a> {
     }
 }
 
-pub(super) fn scan(
-    files: &IndexVec<FileId, LoadedFile>,
-) -> (ScanResult, Vec<HirError>) {
+pub(super) fn scan(files: &IndexVec<FileId, LoadedFile>) -> (ScanResult, Vec<HirError>) {
     let mut scanner = Scanner::default();
 
     // Pass 1: prescan each file for item names, leaving content empty, building local scopes.
@@ -211,8 +217,7 @@ impl Scanner {
                     // `Named(T)` can resolve to `Param(tpid)`. The
                     // arena is global on `HirProgram.ty_params`.
                     // See spec/16_GENERIC.md §HIR.
-                    let mut generic_params =
-                        Vec::with_capacity(fn_decl.generic_params.len());
+                    let mut generic_params = Vec::with_capacity(fn_decl.generic_params.len());
                     for (idx, gp_ident) in fn_decl.generic_params.iter().enumerate() {
                         let tpid = self.items.ty_params.push(TyParamInfo {
                             owner: TyParamOwner::Fn(fn_id),
@@ -259,10 +264,28 @@ impl Scanner {
                             });
                         }
                     } else if fn_decl.body.is_none() {
-                        self.emit_error(HirError::BodylessFnOutsideExtern {
-                            name: name.clone(),
-                            span: span.clone(),
-                        });
+                        // Body-less non-`extern` fn. Two-gate intrinsic
+                        // recognition (spec/17_LAYOUT.md §Intrinsic
+                        // recognition):
+                        //   1. file gate: the source file is the bundled
+                        //      `stdlib/intrinsics.ox`,
+                        //   2. name gate: `name_to_intrinsic(...)` returns
+                        //      `Some(_)`.
+                        // Both true → stamp the intrinsic flag and skip
+                        // E0209. Otherwise (user file, or unknown name in
+                        // intrinsics.ox) E0209 still fires.
+                        let in_intrinsics_file = &file.path == INTRINSICS_FILE;
+                        match (in_intrinsics_file, name_to_intrinsic(name)) {
+                            (true, Some(intr)) => {
+                                self.items.fns[fn_id].intrinsic = Some(intr);
+                            }
+                            _ => {
+                                self.emit_error(HirError::BodylessFnOutsideExtern {
+                                    name: name.clone(),
+                                    span: span.clone(),
+                                });
+                            }
+                        }
                     }
 
                     self.fn_work.push((fn_id, iid));
@@ -295,8 +318,7 @@ impl Scanner {
                     // and needs the IDs allocated to build a per-ADT
                     // `TyParamScope`. See spec/16_GENERIC.md §HIR
                     // (extension).
-                    let mut generic_params =
-                        Vec::with_capacity(struct_decl.generic_params.len());
+                    let mut generic_params = Vec::with_capacity(struct_decl.generic_params.len());
                     for (idx, gp_ident) in struct_decl.generic_params.iter().enumerate() {
                         let tpid = self.items.ty_params.push(TyParamInfo {
                             owner: TyParamOwner::Adt(adt_id),

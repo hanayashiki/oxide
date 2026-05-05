@@ -50,6 +50,22 @@ fn stdlib_auto_mounted_on_vfs_new() {
         .read(Path::new("string.ox"))
         .expect("string.ox should be auto-mounted");
     assert!(string_src.contains("fn strlen"));
+
+    let intrinsics_src = host
+        .read(Path::new("intrinsics.ox"))
+        .expect("intrinsics.ox should be auto-mounted");
+    assert!(
+        intrinsics_src.contains("fn ox_transmute"),
+        "expected `fn ox_transmute` in bundled intrinsics.ox, got len={}",
+        intrinsics_src.len()
+    );
+    assert!(intrinsics_src.contains("fn ox_size_of"));
+
+    let mem_src = host
+        .read(Path::new("mem.ox"))
+        .expect("mem.ox should be auto-mounted");
+    assert!(mem_src.contains("fn ox_alloc"));
+    assert!(mem_src.contains("fn ox_realloc"));
 }
 
 #[test]
@@ -103,6 +119,8 @@ fn each_bundled_file_lowers_clean() {
         ("stdio.ox", "puts"),
         ("stdlib.ox", "malloc"),
         ("string.ox", "strlen"),
+        ("intrinsics.ox", "ox_transmute"),
+        ("mem.ox", "ox_alloc"),
     ] {
         let main_src = format!(
             "import \"{lib}\";\n\
@@ -116,7 +134,15 @@ fn each_bundled_file_lowers_clean() {
             load_errs.is_empty(),
             "load_errs for {lib}: {load_errs:#?}"
         );
-        assert_eq!(files.len(), 2, "{lib} loads alongside main");
+        // `lib` plus main is the minimum; some stdlib files (e.g.
+        // `mem.ox`) transitively import other stdlib files (intrinsics,
+        // stdlib), so the actual count varies. Just assert main+lib are
+        // present.
+        assert!(files.len() >= 2, "{lib}: expected at least main + lib, got {} files", files.len());
+        assert!(
+            files.iter().any(|f| f.path == PathBuf::from(lib)),
+            "{lib}: expected `{lib}` among loaded files"
+        );
 
         let (hir, hir_errs) = lower_program(files, root);
         assert!(hir_errs.is_empty(), "hir errors for {lib}: {hir_errs:#?}");

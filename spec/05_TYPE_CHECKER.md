@@ -145,7 +145,7 @@ responsible for unifying with whatever they expected.
 | `Unary { Not, e }` | `equate(e, bool)`; result `bool` |
 | `Unary { BitNot, e }` | type of `e` |
 | `Binary { arith/bitwise, l, r }` | `equate(l, r)`; result = equated type |
-| `Binary { cmp, l, r }` | `equate(l, r)`; result = `bool` |
+| `Binary { cmp, l, r }` where cmp ∈ {Eq, Ne, Lt, Le, Gt, Ge} | `equate(l, r)` for type structure; enqueue `Obligation::IntegerComparison { ty, span }` for the equated type. `ty` must resolve to an integer `Prim`; if a `Ptr` (pointer comparison), emit E0265 `PointerComparison` ("use `ox_ptr_eq` for pointer equality"; "pointer ordering undefined"); result = `bool` |
 | `Binary { logical, l, r }` | `equate` both with `bool`; result = `bool` |
 | `Binary { shift, l, r }` | result = `l`'s type |
 | `Assign { _, target, rhs }` | `subtype(rhs, target)` (directional — pointer-mut subtype applies); result = `Unit` |
@@ -283,6 +283,12 @@ Two obligation kinds today:
   Enqueued during HirTy resolution at decl phase
   (param/return/field) and at `infer_let` (let-binding) /
   `Unary { Deref, _ }` (deref).
+- **`IntegerComparison { ty, span }`** — comparison operators (Eq, Ne, 
+  Lt, Le, Gt, Ge) require integer operands. `ty` is the resolved type 
+  both operands equate to. Discharge checks that `ty` is `Prim(_)` with 
+  an integer kind; if `ty` is `Ptr(..)`, emit E0265 `PointerComparison`; 
+  other kinds (Adt, Fn, Array, Never) emit a generic type mismatch.
+  Enqueued from every binary comparison in `infer_binary`.
 
 **Discharge is pure observation and recursive.** Each handler walks
 the resolved type structurally — `discharge_subtype` /
@@ -337,6 +343,7 @@ pub enum TypeError {
     MutateImmutable           { op: MutateOp, span: Span },                       // E0263 — see spec/10_ADDRESS_OF.md, spec/11_MUTABILITY.md
     UnsizedArrayAsValue       { pos: SizedPos, span: Span },                      // E0261 (collision — see note) — spec/09_ARRAY.md
     // E0264 InvalidCast reserved per spec/12_AS.md
+    PointerComparison         { span: Span },                                      // E0265 — pointer ordering undefined; use ox_ptr_eq for equality
 }
 ```
 

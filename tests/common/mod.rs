@@ -1,18 +1,21 @@
 //! Shared helpers for integration tests.
 //!
-//! Each `render_*` produces the byte payload that the corresponding
-//! snapshot suite (`tests/{parser,hir,typeck}_snapshot.rs`) diffs against
-//! its `.snap` files. All three go through the `oxide::reporter` pipeline
-//! (color=false) so error output reads as human-friendly diagnostics
-//! instead of `Debug`-formatted enum dumps.
+//! Each `render_*` produces the snapshot string that the corresponding
+//! suite (`tests/{parser,hir,typeck,mono,codegen}_snapshot.rs`) diffs
+//! against its `.snap` files. Every renderer is a thin driver that:
+//!   1. Builds a `VfsHost` from the fixture (multi-file via
+//!      `/// path` headers, or one synthetic file otherwise).
+//!   2. Constructs a `Builder` with a per-renderer `Tapper`.
+//!   3. Calls `b.run(target_phase)` (or `b.codegen(...)`).
+//!   4. Returns the tapper's accumulated string.
 //!
-//! `render_typeck` always emits a `== diagnostics ==` section followed by
-//! `== types ==`. `render_parser` / `render_hir` emit a `== diagnostics ==`
-//! section only when the corresponding layer reports errors. `render_hir`
-//! panics on parse errors (snapshot inputs must parse cleanly).
+//! Per-renderer tappers panic on errors at phases earlier than the
+//! target — matching today's behaviour where `lower_fixture` /
+//! `render_typeck` / `render_codegen` assert clean input. The target
+//! phase's errors are rendered into the snapshot.
 //!
-//! `dead_code` is allowed because each test binary only calls one of the
-//! three renderers; the unused ones still get compiled in.
+//! `dead_code` is allowed because each test binary only calls one of
+//! the renderers; the unused ones still get compiled in.
 
 #![allow(dead_code)]
 
@@ -23,26 +26,50 @@ use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use index_vec::IndexVec;
 use inkwell::OptimizationLevel;
 use inkwell::context::Context;
 use inkwell::execution_engine::JitFunction;
 
-use oxide::codegen::codegen;
-use oxide::hir::pretty::pretty_print as hir_pretty_print;
-use oxide::hir::{lower, lower_program};
-use oxide::lexer::lex;
-use oxide::loader::{BuilderHost, LoadedFile};
-use oxide::mono::{monomorphize, monomorphize_with_limit};
-use oxide::parser::pretty::pretty_print as parser_pretty_print;
-use oxide::parser::{ItemKind, parse};
-use oxide::reporter::{
-    Diagnostic, FileId, SourceMap, emit, from_hir_error, from_mono_error, from_parse_error,
-    from_typeck_error,
+use oxide::builder::{
+    Builder, Flow, NoopTapper, Phase, TapAst, TapCodegen, TapHir, TapLoad, TapMono, TapTypeck,
+    Tapper,
 };
-use oxide::typeck::check;
+use oxide::hir::pretty::pretty_print as hir_pretty_print;
+use oxide::loader::VfsHost;
+use oxide::parser::pretty::pretty_print as parser_pretty_print;
+use oxide::reporter::{
+    Diagnostic, SourceMap, emit, from_hir_error, from_load_error, from_mono_error,
+    from_parse_error, from_typeck_error,
+};
+use oxide::session::Session;
 
 use self::multi_file::{build_vfs, split_fixture};
+
+/// Split a fixture (possibly multi-file via `/// path` headers) into a
+/// `VfsHost` mount and the root file path. Single-file fixtures
+/// (no headers) become a one-element mount keyed at `file_name`.
+pub fn vfs_for_fixture(file_name: &str, src: &str) -> (VfsHost, PathBuf) {
+    let segments = split_fixture(src, Path::new(file_name)).expect("split fixture");
+    let root = segments[0].0.clone();
+    let host = build_vfs(segments);
+    (host, root)
+}
+
+/// Append rendered diagnostics for `errs` to `out`. Replaces today's
+/// inline `render_diagnostics`.
+pub fn write_diags<E>(
+    out: &mut String,
+    map: &SourceMap,
+    errs: &[E],
+    to_diag: impl Fn(&E) -> Diagnostic,
+) {
+    let mut bytes: Vec<u8> = Vec::new();
+    for e in errs {
+        let d = to_diag(e);
+        emit(&d, map, &mut bytes, false).expect("write to Vec failed");
+    }
+    out.push_str(&String::from_utf8(bytes).expect("non-utf8 in diagnostic output"));
+}
 
 fn render_diagnostics(diags: &[Diagnostic], map: &SourceMap) -> String {
     let mut buf: Vec<u8> = Vec::new();
@@ -52,10 +79,16 @@ fn render_diagnostics(diags: &[Diagnostic], map: &SourceMap) -> String {
     String::from_utf8(buf).expect("non-utf8 in diagnostic output")
 }
 
-fn make_map(file_name: &str, src: &str) -> (SourceMap, FileId) {
-    let mut map = SourceMap::new();
-    let file = map.add(PathBuf::from(file_name), src.to_string());
-    (map, file)
+/// Render `LoadError`s (each may produce multiple diagnostics) for
+/// panic messages when the test expected clean input.
+fn render_load_errs(map: &SourceMap, errs: &[oxide::loader::LoadError]) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    for e in errs {
+        for d in from_load_error(e) {
+            emit(&d, map, &mut buf, false).expect("write to Vec failed");
+        }
+    }
+    String::from_utf8(buf).expect("non-utf8 in diagnostic output")
 }
 
 /// Walks a snapshot directory, rendering every `<name>.ox` and comparing
@@ -163,131 +196,334 @@ fn format_mismatch(path: &Path, expected: &str, actual: &str) -> String {
     out
 }
 
-pub fn render_parser(file_name: &str, src: &str) -> String {
-    let (map, file) = make_map(file_name, src);
-    let tokens = lex(src, file);
-    let (module, errors) = parse(&tokens, file);
-    let mut out = parser_pretty_print(&module);
-    if !errors.is_empty() {
-        let diags: Vec<_> = errors.iter().map(|e| from_parse_error(e, file)).collect();
-        out.push_str("== diagnostics ==\n");
-        out.push_str(&render_diagnostics(&diags, &map));
+// ============================================================
+// Per-renderer Tappers and driver functions.
+// ============================================================
+
+/// Parser snapshot: lex + parse, render AST + parse-error diagnostics.
+/// Inline mode — single-file inspection, imports ignored. Mirrors
+/// today's `render_parser` exactly (which never went through the
+/// loader).
+#[derive(Default)]
+struct ParserSnap {
+    out: String,
+}
+
+impl Tapper for ParserSnap {
+    fn on_ast(&mut self, t: TapAst<'_>) -> Flow {
+        self.out = parser_pretty_print(t.ast);
+        if !t.errors.is_empty() {
+            self.out.push_str("== diagnostics ==\n");
+            write_diags(&mut self.out, t.source_map, t.errors, |e| {
+                from_parse_error(e, t.root)
+            });
+        }
+        Flow::Continue
     }
-    out
+}
+
+pub fn render_parser(file_name: &str, src: &str) -> String {
+    let host = VfsHost::new(HashMap::new());
+    let sess = Session::for_test(&host);
+    let mut snap = ParserSnap::default();
+    {
+        let mut b = Builder::from_inline(
+            sess,
+            PathBuf::from(file_name),
+            src.to_string(),
+            &mut snap,
+        );
+        b.run(Phase::Ast);
+    }
+    snap.out
+}
+
+/// HIR snapshot: lower → render HIR + hir-error diagnostics. Multi-file
+/// fixtures (with `/// path` headers) flow through the real loader so
+/// imports resolve via VFS. Panics on load errors (parse failures in
+/// any file) — matches today's `lower_fixture` `assert!` on
+/// `parse_errs.is_empty()`.
+#[derive(Default)]
+struct HirSnap {
+    out: String,
+}
+
+impl Tapper for HirSnap {
+    fn on_load(&mut self, t: TapLoad<'_>) -> Flow {
+        if !t.errors.is_empty() {
+            panic!(
+                "load errors (parse failures or unresolved imports):\n{}",
+                render_load_errs(t.source_map, t.errors)
+            );
+        }
+        Flow::Continue
+    }
+
+    fn on_hir(&mut self, t: TapHir<'_>) -> Flow {
+        self.out = hir_pretty_print(t.hir, t.source_map);
+        if !t.errors.is_empty() {
+            self.out.push_str("== diagnostics ==\n");
+            write_diags(&mut self.out, t.source_map, t.errors, from_hir_error);
+        }
+        Flow::Continue
+    }
 }
 
 pub fn render_hir(file_name: &str, src: &str) -> String {
-    let (map, hir, errors) = lower_fixture(file_name, src);
-    let mut out = hir_pretty_print(&hir, &map);
-    if !errors.is_empty() {
-        let diags: Vec<_> = errors.iter().map(from_hir_error).collect();
-        out.push_str("== diagnostics ==\n");
-        out.push_str(&render_diagnostics(&diags, &map));
+    let (host, root) = vfs_for_fixture(file_name, src);
+    let sess = Session::for_test(&host);
+    let mut snap = HirSnap::default();
+    {
+        let mut b = Builder::from_root(sess, root, &mut snap);
+        b.run(Phase::Hir);
     }
-    out
+    snap.out
 }
 
-/// Drive lex/parse/lower for a fixture that may contain multiple
-/// `/// path` segments. Single-segment fixtures (no headers) lower
-/// through the same code path as a one-element file list. The first
-/// segment is treated as the program root.
-fn lower_fixture(
-    file_name: &str,
-    src: &str,
-) -> (SourceMap, oxide::hir::HirProgram, Vec<oxide::hir::HirError>) {
-    let segments = split_fixture(src, Path::new(file_name)).expect("split fixture");
-    let host = build_vfs(segments.clone());
+/// Typeck snapshot: typecheck → render `== diagnostics ==` + `==
+/// types ==`. Panics on load / hir errors (input must be clean).
+#[derive(Default)]
+struct TypeckSnap {
+    out: String,
+}
 
-    let mut map = SourceMap::new();
-    let mut path_to_file: HashMap<PathBuf, FileId> = HashMap::new();
-    let mut files: Vec<LoadedFile> = Vec::with_capacity(segments.len());
-    for (path, source) in &segments {
-        let file = map.add(path.clone(), source.clone());
-        path_to_file.insert(path.clone(), file);
-        let tokens = lex(source, file);
-        let (ast, parse_errs) = parse(&tokens, file);
-        assert!(
-            parse_errs.is_empty(),
-            "parse errors in {}: {parse_errs:#?}",
-            path.display()
-        );
-        files.push(LoadedFile {
-            file,
-            path: path.clone(),
-            ast,
-            direct_imports: Vec::new(),
-        });
-    }
-
-    // Resolve each file's `import` items against the in-memory VFS so
-    // `lower_program` sees the same import edges the real loader would.
-    for lf in files.iter_mut() {
-        for &iid in &lf.ast.root_items {
-            if let ItemKind::Import(imp) = &lf.ast.items[iid].kind {
-                if let Ok(canon) = host.resolve(&lf.path, &imp.path) {
-                    if let Some(&fid) = path_to_file.get(&canon) {
-                        lf.direct_imports.push(fid);
-                    }
-                }
-            }
+impl Tapper for TypeckSnap {
+    fn on_load(&mut self, t: TapLoad<'_>) -> Flow {
+        if !t.errors.is_empty() {
+            panic!("load errors:\n{}", render_load_errs(t.source_map, t.errors));
         }
+        Flow::Continue
     }
 
-    let root = files[0].file;
-    let files: IndexVec<FileId, LoadedFile> = files.into();
-    let (program, errors) = lower_program(files, root);
-    (map, program, errors)
+    fn on_hir(&mut self, t: TapHir<'_>) -> Flow {
+        if !t.errors.is_empty() {
+            let mut s = String::new();
+            write_diags(&mut s, t.source_map, t.errors, from_hir_error);
+            panic!("hir errors:\n{s}");
+        }
+        Flow::Continue
+    }
+
+    fn on_typeck(&mut self, t: TapTypeck<'_>) -> Flow {
+        self.out.push_str("== diagnostics ==\n");
+        if !t.errors.is_empty() {
+            write_diags(&mut self.out, t.source_map, t.errors, |e| {
+                from_typeck_error(e, t.root, &t.results.tys)
+            });
+        }
+        self.out.push_str("== types ==\n");
+        write_typeck_signatures(&mut self.out, t.hir, t.results);
+        Flow::Continue
+    }
 }
 
-/// JIT-compile `src` end-to-end (lex → parse → HIR → typeck → codegen)
-/// and run the function `entry` with no arguments. Returns the LLVM IR
-/// text alongside whatever the function returned.
+pub fn render_typeck(file_name: &str, src: &str) -> String {
+    let (host, root) = vfs_for_fixture(file_name, src);
+    let sess = Session::for_test(&host);
+    let mut snap = TypeckSnap::default();
+    {
+        let mut b = Builder::from_root(sess, root, &mut snap);
+        b.run(Phase::Typeck);
+    }
+    snap.out
+}
+
+/// Mono snapshot: full pipeline through monomorphization. Panics on
+/// load / hir / typeck errors. Renders `== diagnostics ==` + `==
+/// instances ==` + `== sig ==` (depth-limited to 8 per existing
+/// behaviour).
+#[derive(Default)]
+struct MonoSnap {
+    out: String,
+}
+
+impl Tapper for MonoSnap {
+    fn on_load(&mut self, t: TapLoad<'_>) -> Flow {
+        if !t.errors.is_empty() {
+            panic!("load errors:\n{}", render_load_errs(t.source_map, t.errors));
+        }
+        Flow::Continue
+    }
+
+    fn on_hir(&mut self, t: TapHir<'_>) -> Flow {
+        if !t.errors.is_empty() {
+            let mut s = String::new();
+            write_diags(&mut s, t.source_map, t.errors, from_hir_error);
+            panic!("hir errors:\n{s}");
+        }
+        Flow::Continue
+    }
+
+    fn on_typeck(&mut self, t: TapTypeck<'_>) -> Flow {
+        if !t.errors.is_empty() {
+            let mut s = String::new();
+            write_diags(&mut s, t.source_map, t.errors, |e| {
+                from_typeck_error(e, t.root, &t.results.tys)
+            });
+            panic!("type errors:\n{s}");
+        }
+        Flow::Continue
+    }
+
+    fn on_mono(&mut self, t: TapMono<'_>) -> Flow {
+        self.out.push_str("== diagnostics ==\n");
+        if !t.errors.is_empty() {
+            write_diags(&mut self.out, t.source_map, t.errors, |e| {
+                from_mono_error(e, t.root, t.hir, &t.results.tys)
+            });
+        }
+
+        self.out.push_str("== instances ==\n");
+        for (iid, inst) in t.mono.instances.iter_enumerated() {
+            let parent = match &inst.origin.parent {
+                oxide::mono::InstanceParent::Inst(p) => format!("Inst({})", p.raw()),
+                oxide::mono::InstanceParent::Fn(fid) => format!("Fn({})", fid.raw()),
+            };
+            writeln!(
+                self.out,
+                "Inst[{}] mangled={} depth={} parent={}",
+                iid.raw(),
+                inst.mangled,
+                inst.depth,
+                parent,
+            )
+            .unwrap();
+        }
+
+        self.out.push_str("== sig ==\n");
+        for (iid, inst) in t.mono.instances.iter_enumerated() {
+            let params: Vec<String> = inst
+                .params
+                .iter()
+                .map(|&ty| t.results.tys.render(ty))
+                .collect();
+            writeln!(
+                self.out,
+                "Inst[{}] params=[{}] ret={}",
+                iid.raw(),
+                params.join(", "),
+                t.results.tys.render(inst.ret),
+            )
+            .unwrap();
+        }
+
+        Flow::Continue
+    }
+}
+
+/// Mono uses a small depth_limit (8) to keep the divergent-mono
+/// fixtures' rendered cascade chain readable. Production default is
+/// 256 — see `Builder::with_mono_depth_limit`.
+pub fn render_mono(file_name: &str, src: &str) -> String {
+    let (host, root) = vfs_for_fixture(file_name, src);
+    let sess = Session::for_test(&host);
+    let mut snap = MonoSnap::default();
+    {
+        let mut b =
+            Builder::from_root(sess, root, &mut snap).with_mono_depth_limit(8);
+        b.run(Phase::Mono);
+    }
+    snap.out
+}
+
+/// Codegen snapshot: lex → parse → lower → typeck → mono → codegen,
+/// returning the LLVM IR text. Panics on any pre-codegen error.
+#[derive(Default)]
+struct CodegenSnap {
+    out: String,
+}
+
+impl Tapper for CodegenSnap {
+    fn on_load(&mut self, t: TapLoad<'_>) -> Flow {
+        if !t.errors.is_empty() {
+            panic!("load errors:\n{}", render_load_errs(t.source_map, t.errors));
+        }
+        Flow::Continue
+    }
+
+    fn on_hir(&mut self, t: TapHir<'_>) -> Flow {
+        if !t.errors.is_empty() {
+            let mut s = String::new();
+            write_diags(&mut s, t.source_map, t.errors, from_hir_error);
+            panic!("hir errors:\n{s}");
+        }
+        Flow::Continue
+    }
+
+    fn on_typeck(&mut self, t: TapTypeck<'_>) -> Flow {
+        if !t.errors.is_empty() {
+            let mut s = String::new();
+            write_diags(&mut s, t.source_map, t.errors, |e| {
+                from_typeck_error(e, t.root, &t.results.tys)
+            });
+            panic!("type errors:\n{s}");
+        }
+        Flow::Continue
+    }
+
+    fn on_mono(&mut self, t: TapMono<'_>) -> Flow {
+        if !t.errors.is_empty() {
+            let mut s = String::new();
+            write_diags(&mut s, t.source_map, t.errors, |e| {
+                from_mono_error(e, t.root, t.hir, &t.results.tys)
+            });
+            panic!("mono errors:\n{s}");
+        }
+        Flow::Continue
+    }
+
+    fn on_codegen(&mut self, t: TapCodegen<'_, '_>) -> Flow {
+        self.out = t.module.print_to_string().to_string();
+        Flow::Continue
+    }
+}
+
+pub fn render_codegen(file_name: &str, src: &str) -> String {
+    let (host, root) = vfs_for_fixture(file_name, src);
+    let sess = Session::for_test(&host);
+    let mut snap = CodegenSnap::default();
+    {
+        let mut b = Builder::from_root(sess, root, &mut snap);
+        let ctx = Context::create();
+        let _ = b.codegen(&ctx, "test").expect("codegen failed");
+    }
+    snap.out
+}
+
+/// JIT-compile `src` end-to-end (lex → parse → HIR → typeck → mono →
+/// codegen) and run the function `entry` with no arguments. Returns
+/// the LLVM IR text alongside whatever the function returned.
 ///
 /// **Constraints:**
-/// - Test programs must compile clean: any parse / HIR / typeck error
-///   panics so the test fails loudly with the diagnostic.
-/// - `entry` is a no-arg function. Multi-arg variants can be added when
-///   needed.
+/// - Test programs must compile clean: any parse / HIR / typeck / mono
+///   error panics so the test fails loudly with the diagnostic.
+/// - `entry` is a no-arg function. Multi-arg variants can be added
+///   when needed.
 /// - `R` must be a primitive that survives the C ABI return convention
 ///   for this target (i32, i64, bool, etc.). Struct return is the
 ///   deferred ABI work; tests should return primitives that encode
 ///   what they want to verify (e.g., `let p = Point{...}; p.x`).
 ///
-/// Safety: the caller asserts the function's actual return type matches
-/// `R`. A mismatch here is undefined behaviour.
+/// Safety: the caller asserts the function's actual return type
+/// matches `R`. A mismatch here is undefined behaviour.
 pub unsafe fn jit_run_with_ir<R: Copy + 'static>(src: &str, entry: &str) -> (String, R) {
-    let (map, file) = make_map("<jit>", src);
-    let tokens = lex(src, file);
-    let (ast, parse_errs) = parse(&tokens, file);
-    assert!(parse_errs.is_empty(), "parse errors: {parse_errs:#?}");
-    let (hir, hir_errs) = lower(&ast);
-    if !hir_errs.is_empty() {
-        let diags: Vec<_> = hir_errs.iter().map(from_hir_error).collect();
-        panic!("hir errors:\n{}", render_diagnostics(&diags, &map));
-    }
-    let (mut results, type_errs) = check(&hir);
-    if !type_errs.is_empty() {
-        let diags: Vec<_> = type_errs
-            .iter()
-            .map(|e| from_typeck_error(e, file, &results.tys))
-            .collect();
-        panic!("type errors:\n{}", render_diagnostics(&diags, &map));
-    }
-
-    let (mono, mono_errs) = monomorphize(&hir, &mut results);
-    if !mono_errs.is_empty() {
-        let diags: Vec<_> = mono_errs
-            .iter()
-            .map(|e| from_mono_error(e, file, &hir, &results.tys))
-            .collect();
-        panic!("mono errors:\n{}", render_diagnostics(&diags, &map));
-    }
-
+    let host = VfsHost::new(HashMap::new());
+    let sess = Session::for_test(&host);
+    let mut tapper = NoopTapper;
     let ctx = Context::create();
-    let module = codegen(&ctx, &hir, &mut results, &mono, "jit");
+    let module = {
+        let mut b = Builder::from_inline(
+            sess,
+            PathBuf::from("<jit>"),
+            src.to_string(),
+            &mut tapper,
+        );
+        b.codegen(&ctx, "jit").expect("codegen failed (compile clean expected)")
+    };
 
-    // Capture IR text before handing the module to the execution engine
-    // (which takes ownership). The string ends with a trailing newline.
+    // Capture IR text before handing the module to the execution
+    // engine (which takes ownership). The string ends with a trailing
+    // newline.
     let ir = module.print_to_string().to_string();
 
     let ee = module
@@ -309,172 +545,19 @@ pub unsafe fn jit_run<R: Copy + 'static>(src: &str, entry: &str) -> R {
     r
 }
 
-/// Render LLVM IR for a single-file fixture as a snapshot string. Lex →
-/// parse → HIR → typeck → codegen, panicking on any errors so the test
-/// reports the underlying diagnostic. Codegen invokes `print_to_string`
-/// on the resulting `Module` and the text is returned verbatim — already
-/// trailing-newline terminated.
-pub fn render_codegen(file_name: &str, src: &str) -> String {
-    let (map, file) = make_map(file_name, src);
-    let tokens = lex(src, file);
-    let (ast, parse_errs) = parse(&tokens, file);
-    assert!(
-        parse_errs.is_empty(),
-        "parse errors in {file_name}: {parse_errs:#?}"
-    );
-    let (hir, hir_errs) = lower(&ast);
-    if !hir_errs.is_empty() {
-        let diags: Vec<_> = hir_errs.iter().map(from_hir_error).collect();
-        panic!(
-            "hir errors in {file_name}:\n{}",
-            render_diagnostics(&diags, &map)
-        );
-    }
-    let (mut results, type_errs) = check(&hir);
-    if !type_errs.is_empty() {
-        let diags: Vec<_> = type_errs
-            .iter()
-            .map(|e| from_typeck_error(e, file, &results.tys))
-            .collect();
-        panic!(
-            "type errors in {file_name}:\n{}",
-            render_diagnostics(&diags, &map)
-        );
-    }
+// ============================================================
+// Pure formatter helpers — extracted from the legacy renderers.
+// They consume phase outputs and produce strings; the Builder
+// wraps them via per-renderer Tapper impls above.
+// ============================================================
 
-    let (mono, mono_errs) = monomorphize(&hir, &mut results);
-    if !mono_errs.is_empty() {
-        let diags: Vec<_> = mono_errs
-            .iter()
-            .map(|e| from_mono_error(e, file, &hir, &results.tys))
-            .collect();
-        panic!(
-            "mono errors in {file_name}:\n{}",
-            render_diagnostics(&diags, &map)
-        );
-    }
-
-    let ctx = Context::create();
-    let module = codegen(&ctx, &hir, &mut results, &mono, "test");
-    module.print_to_string().to_string()
-}
-
-/// Render the result of monomorphization for snapshot tests.
-///
-/// Output sections:
-///   `== diagnostics ==` — mono errors via `from_mono_error`. Empty
-///     section header is always emitted so error vs no-error is
-///     visible at a glance.
-///   `== instances ==` — one line per `InstId`:
-///     `Inst[N] mangled=<m> depth=<d> parent=<Inst(N)|Fn(N)>`
-///     The parent chain captures cascade structure: `Inst(p)` for a
-///     hop from another generic instance, `Fn(fid)` for a cascade
-///     entry from a non-generic body (the non-generic fn itself is
-///     not an Instance).
-///   `== sig ==` — per instance: `params=[<ty>...] ret=<ty>` from
-///     `inst.params` / `inst.ret` (the substituted shape).
-pub fn render_mono(file_name: &str, src: &str) -> String {
-    let (map, file) = make_map(file_name, src);
-    let tokens = lex(src, file);
-    let (ast, parse_errs) = parse(&tokens, file);
-    assert!(
-        parse_errs.is_empty(),
-        "parse errors in {file_name}: {parse_errs:#?}"
-    );
-    let (hir, hir_errs) = lower(&ast);
-    if !hir_errs.is_empty() {
-        let diags: Vec<_> = hir_errs.iter().map(from_hir_error).collect();
-        panic!(
-            "hir errors in {file_name}:\n{}",
-            render_diagnostics(&diags, &map)
-        );
-    }
-    let (mut results, type_errs) = check(&hir);
-    if !type_errs.is_empty() {
-        let diags: Vec<_> = type_errs
-            .iter()
-            .map(|e| from_typeck_error(e, file, &results.tys))
-            .collect();
-        panic!(
-            "type errors in {file_name}:\n{}",
-            render_diagnostics(&diags, &map)
-        );
-    }
-
-    // Tests use a small depth_limit to keep the output manageable
-    let (mono, mono_errs) = monomorphize_with_limit(&hir, &mut results, 8);
-
-    let mut out = String::new();
-
-    out.push_str("== diagnostics ==\n");
-    if !mono_errs.is_empty() {
-        let diags: Vec<_> = mono_errs
-            .iter()
-            .map(|e| from_mono_error(e, file, &hir, &results.tys))
-            .collect();
-        out.push_str(&render_diagnostics(&diags, &map));
-    }
-
-    out.push_str("== instances ==\n");
-    for (iid, inst) in mono.instances.iter_enumerated() {
-        let parent = match &inst.origin.parent {
-            oxide::mono::InstanceParent::Inst(p) => format!("Inst({})", p.raw()),
-            oxide::mono::InstanceParent::Fn(fid) => format!("Fn({})", fid.raw()),
-        };
-        writeln!(
-            out,
-            "Inst[{}] mangled={} depth={} parent={}",
-            iid.raw(),
-            inst.mangled,
-            inst.depth,
-            parent,
-        )
-        .unwrap();
-    }
-
-    out.push_str("== sig ==\n");
-    for (iid, inst) in mono.instances.iter_enumerated() {
-        let params: Vec<String> = inst.params.iter().map(|&t| results.tys.render(t)).collect();
-        writeln!(
-            out,
-            "Inst[{}] params=[{}] ret={}",
-            iid.raw(),
-            params.join(", "),
-            results.tys.render(inst.ret),
-        )
-        .unwrap();
-    }
-
-    out
-}
-
-pub fn render_typeck(file_name: &str, src: &str) -> String {
-    let (map, file) = make_map(file_name, src);
-    let tokens = lex(src, file);
-    let (ast, parse_errs) = parse(&tokens, file);
-    assert!(
-        parse_errs.is_empty(),
-        "parse errors in {file_name}: {parse_errs:#?}"
-    );
-    let (hir, hir_errs) = lower(&ast);
-    assert!(
-        hir_errs.is_empty(),
-        "hir errors in {file_name}: {hir_errs:#?}"
-    );
-    let (results, type_errors) = check(&hir);
-
-    let mut out = String::new();
-
-    out.push_str("== diagnostics ==\n");
-    if !type_errors.is_empty() {
-        let diags: Vec<_> = type_errors
-            .iter()
-            .map(|e| from_typeck_error(e, file, &results.tys))
-            .collect();
-        out.push_str(&render_diagnostics(&diags, &map));
-    }
-
-    out.push_str("== types ==\n");
+/// Render the per-fn signature + per-expr type lines that form the
+/// body of `render_typeck`'s `== types ==` section.
+fn write_typeck_signatures(
+    out: &mut String,
+    hir: &oxide::hir::HirProgram,
+    results: &oxide::typeck::TypeckResults,
+) {
     for (fid, sig) in results.fn_sigs.iter_enumerated() {
         let f = &hir.fns[fid];
         let generic_params: Vec<String> = sig
@@ -521,7 +604,7 @@ pub fn render_typeck(file_name: &str, src: &str) -> String {
         let mut owned: std::collections::BTreeSet<oxide::hir::HExprId> =
             std::collections::BTreeSet::new();
         if let Some(body) = f.body {
-            collect_block_exprs(&hir, body, &mut owned);
+            collect_block_exprs(hir, body, &mut owned);
         }
         for eid in owned {
             let ty = results.expr_tys[eid];
@@ -544,8 +627,6 @@ pub fn render_typeck(file_name: &str, src: &str) -> String {
             .unwrap();
         }
     }
-
-    out
 }
 
 /// Collect every `HExprId` reachable from a body block. Used by the

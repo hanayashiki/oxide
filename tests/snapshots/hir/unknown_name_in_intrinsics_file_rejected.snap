@@ -1,0 +1,13 @@
+HirProgram
+  Module intrinsics.ox (root)
+    Fn[0] ox_unknown<T[TyParam(0)]>(x[Local(0)]: Param(0)) -> Param(0)
+== diagnostics ==
+[E0209] Error: bodyless `fn ox_unknown` must be inside an `extern "C" { ... }` block
+   ╭─[ intrinsics.ox:2:1 ]
+   │
+ 2 │ fn ox_unknown<T>(x: T) -> T;
+   │ ──────────────┬─────────────  
+   │               ╰─────────────── missing function body
+   │ 
+   │ Help: module-level fns require `{ ... }`; `;` is reserved for foreign declarations inside `extern "C"`
+───╯

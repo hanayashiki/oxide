@@ -4,11 +4,9 @@ use crate::hir::HirProgram;
 use crate::mono::MonoError;
 use crate::typeck::TyArena;
 
-/// Render a mono error to a structured diagnostic. Currently the only
-/// variant is E0278 (DivergentMonomorphization); the chain renders via
-/// `TyArena::render` for each type-arg so a human reads the same form
-/// they'd see in any other typeck-side diagnostic. See
-/// spec/16_GENERIC.md §Errors.
+/// Render a mono error to a structured diagnostic. Two variants today:
+/// E0276 (TransmuteSizeMismatch — see spec/17_LAYOUT.md §Errors) and
+/// E0278 (DivergentMonomorphization — see spec/16_GENERIC.md §Errors).
 pub fn from_mono_error(
     err: &MonoError,
     file: FileId,
@@ -16,6 +14,36 @@ pub fn from_mono_error(
     tys: &TyArena,
 ) -> Diagnostic {
     match err {
+        MonoError::TransmuteSizeMismatch {
+            src,
+            dst,
+            src_size,
+            dst_size,
+            span,
+        } => {
+            // Mirrors rustc E0512 format. The two `note:` lines come
+            // through `with_note` so the rendered diagnostic emits
+            // `= note:` (matches the spec's diagnostic-format example).
+            Diagnostic::error(
+                "E0276",
+                "cannot transmute between types of different sizes",
+            )
+            .with_label(Label::primary(
+                file,
+                span.clone(),
+                "transmute size mismatch",
+            ))
+            .with_note(format!(
+                "source type: `{}` ({} bytes)",
+                tys.render(*src),
+                src_size
+            ))
+            .with_note(format!(
+                "target type: `{}` ({} bytes)",
+                tys.render(*dst),
+                dst_size
+            ))
+        }
         MonoError::DivergentMonomorphization { chain, span, limit } => {
             // Cap rendered type width: a divergent recursion can
             // produce types with hundreds of `*mut` layers, and

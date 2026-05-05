@@ -1,0 +1,81 @@
+; ModuleID = 'test'
+source_filename = "test"
+
+define i32 @main() {
+allocas:
+  %p.0.slot = alloca ptr, align 8
+  %v.1.slot = alloca i32, align 4
+  br label %body
+
+body:                                             ; preds = %allocas
+  %call = call ptr @"ox_alloc__$i32"()
+  store ptr %call, ptr %p.0.slot, align 8
+  %load = load ptr, ptr %p.0.slot, align 8
+  store i32 7, ptr %load, align 4
+  %load1 = load ptr, ptr %p.0.slot, align 8
+  call void @llvm.memcpy.p0.p0.i64(ptr align 1 %v.1.slot, ptr align 1 %load1, i64 ptrtoint (ptr getelementptr (i32, ptr null, i32 1) to i64), i1 false)
+  %load2 = load ptr, ptr %p.0.slot, align 8
+  call void @"ox_dealloc__$i32"(ptr %load2)
+  %load3 = load i32, ptr %v.1.slot, align 4
+  ret i32 %load3
+}
+
+declare ptr @malloc(i64)
+
+declare ptr @calloc(i64, i64)
+
+declare ptr @realloc(ptr, i64)
+
+declare void @free(ptr)
+
+declare ptr @aligned_alloc(i64, i64)
+
+declare void @exit(i32)
+
+declare void @_Exit(i32)
+
+declare void @quick_exit(i32)
+
+declare void @abort()
+
+declare i32 @atoi(ptr)
+
+declare i64 @atoll(ptr)
+
+declare i32 @abs(i32)
+
+declare i64 @llabs(i64)
+
+declare i32 @rand()
+
+declare void @srand(i32)
+
+declare ptr @getenv(ptr)
+
+declare i32 @system(ptr)
+
+define ptr @"ox_alloc__$i32"() {
+allocas:
+  br label %body
+
+body:                                             ; preds = %allocas
+  %call = call ptr @malloc(i64 4)
+  ret ptr %call
+}
+
+define void @"ox_dealloc__$i32"(ptr %p) {
+allocas:
+  %p.2.slot = alloca ptr, align 8
+  br label %body
+
+body:                                             ; preds = %allocas
+  store ptr %p, ptr %p.2.slot, align 8
+  %load = load ptr, ptr %p.2.slot, align 8
+  call void @free(ptr %load)
+  ret void
+}
+
+; Function Attrs: nocallback nofree nounwind willreturn memory(argmem: readwrite)
+declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg) #0
+
+attributes #0 = { nocallback nofree nounwind willreturn memory(argmem: readwrite) }

@@ -51,9 +51,9 @@ use std::collections::{HashMap, VecDeque};
 
 use index_vec::IndexVec;
 
-use crate::hir::{FnId, HirProgram};
+use crate::hir::{FnId, HirProgram, Intrinsic};
 use crate::reporter::Span;
-use crate::typeck::{TyId, TypeckResults, subst_from};
+use crate::typeck::{TyId, TypeckResults, layout, subst_from};
 
 pub use mangle::mangle_inst;
 
@@ -88,6 +88,37 @@ pub struct Instance {
     pub mangled: String,
     pub depth: u32,
     pub origin: InstanceOrigin,
+    /// What codegen should do for this instance — Call (normal lowering),
+    /// SizeOf { size } (emit i64 const), or Transmute (structural dispatch
+    /// on (Src, Dst) shapes). Stamped by `instantiate` after the
+    /// per-instance validity check. See spec/17_LAYOUT.md §Per-instance
+    /// operation.
+    pub operation: InstanceOperation,
+}
+
+/// Per-instance codegen dispatch decision. Stamped by `mono::instantiate`
+/// after substituting params/ret and running any per-intrinsic validity
+/// checks. Codegen reads `instance.operation` and pattern-matches; it
+/// never re-derives the kind from `HirFn::intrinsic`.
+///
+/// See spec/17_LAYOUT.md §Per-instance operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InstanceOperation {
+    /// Default: codegen does normal call lowering (Pass 1 declares the
+    /// LLVM symbol, Pass 2 emits the body, `emit_call` issues a `call`
+    /// instruction).
+    Call,
+    /// `ox_size_of<T>()` instance — `size` is the precomputed
+    /// `size_of(typeck, T_substituted)` from the layout helper. Codegen
+    /// emits a single `i64 <size>` constant at the call site, no LLVM
+    /// declare for this instance.
+    SizeOf { size: u64 },
+    /// `ox_transmute<Src, Dst>(x)` instance — marker only; codegen
+    /// dispatches structurally on `(instance.params[0] kind,
+    /// instance.ret kind)`. Size equality is already enforced by the
+    /// per-instance E0276 check at mono time, so codegen needn't recheck.
+    /// No LLVM declare for this instance.
+    Transmute,
 }
 
 /// Bookkeeping for the call-site that produced an `Instance`. Used by
@@ -132,6 +163,17 @@ pub enum MonoError {
         chain: Vec<(FnId, Vec<TyId>, Span)>,
         span: Span,
         limit: u32,
+    },
+    /// `ox_transmute::<Src, Dst>(x)` was called with `size_of(Src) !=
+    /// size_of(Dst)` after substitution. E0276 — see
+    /// spec/17_LAYOUT.md §Errors. Span is the call expression of the
+    /// failing instance.
+    TransmuteSizeMismatch {
+        src: TyId,
+        dst: TyId,
+        src_size: u64,
+        dst_size: u64,
+        span: Span,
     },
 }
 
@@ -312,6 +354,51 @@ pub(crate) fn instantiate(
     let ret = cx.typeck.substitute_ty(ret_in, &subst);
     let mangled = mangle_inst(cx.hir, fn_id, &fn_type_args, &cx.typeck.tys);
 
+    // Compute the per-instance operation that codegen will dispatch on.
+    // For intrinsic fns this is also where per-instance validity checks
+    // fire (E0276 for transmute size mismatch). See spec/17_LAYOUT.md
+    // §Per-instance operation.
+    let operation = match cx.hir.fns[fn_id].intrinsic {
+        Some(Intrinsic::Transmute) => {
+            // post-substitution, both Src and Dst are fully concrete; if
+            // size_of returns None it's a layout-helper bug, not user error.
+            let src_size = layout::size_of(cx.typeck, params[0]).unwrap_or_else(|| {
+                unreachable!(
+                    "ox_transmute Src has no size after substitution: {}",
+                    cx.typeck.tys.render(params[0])
+                )
+            });
+            let dst_size = layout::size_of(cx.typeck, ret).unwrap_or_else(|| {
+                unreachable!(
+                    "ox_transmute Dst has no size after substitution: {}",
+                    cx.typeck.tys.render(ret)
+                )
+            });
+            if src_size != dst_size {
+                cx.errors.push(MonoError::TransmuteSizeMismatch {
+                    src: params[0],
+                    dst: ret,
+                    src_size,
+                    dst_size,
+                    span: origin.call_span.clone(),
+                });
+            }
+            InstanceOperation::Transmute
+        }
+        Some(Intrinsic::SizeOf) => {
+            let t = fn_type_args[0];
+            let size = layout::size_of(cx.typeck, t).unwrap_or_else(|| {
+                unreachable!(
+                    "ox_size_of::<T>() with no size: T={}; typeck E0269 \
+                     should have rejected unsized type-args before mono",
+                    cx.typeck.tys.render(t)
+                )
+            });
+            InstanceOperation::SizeOf { size }
+        }
+        None => InstanceOperation::Call,
+    };
+
     // Push the instance moving `type_args` into Instance, then re-borrow
     // it from cx.instances[id].type_args for the instance_map insert
     // key — second clone avoided.
@@ -323,6 +410,7 @@ pub(crate) fn instantiate(
         mangled,
         depth,
         origin,
+        operation,
     });
     let key_args = cx.instances[id].type_args.clone();
     cx.instance_map.insert((fn_id, key_args), id);

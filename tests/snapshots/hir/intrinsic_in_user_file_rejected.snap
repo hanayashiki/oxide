@@ -1,0 +1,13 @@
+HirProgram
+  Module intrinsic_in_user_file_rejected.ox (root)
+    Fn[0] ox_transmute<Src[TyParam(0)], Dst[TyParam(1)]>(x[Local(0)]: Param(0)) -> Param(1)
+== diagnostics ==
+[E0209] Error: bodyless `fn ox_transmute` must be inside an `extern "C" { ... }` block
+   ╭─[ intrinsic_in_user_file_rejected.ox:1:1 ]
+   │
+ 1 │ fn ox_transmute<Src, Dst>(x: Src) -> Dst;
+   │ ────────────────────┬────────────────────  
+   │                     ╰────────────────────── missing function body
+   │ 
+   │ Help: module-level fns require `{ ... }`; `;` is reserved for foreign declarations inside `extern "C"`
+───╯

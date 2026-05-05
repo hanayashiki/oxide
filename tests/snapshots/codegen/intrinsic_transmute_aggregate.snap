@@ -1,0 +1,35 @@
+; ModuleID = 'test'
+source_filename = "test"
+
+%S = type { i32, i32 }
+
+define i32 @main() {
+allocas:
+  %s.0.slot = alloca %S, align 8
+  %bytes.1.slot = alloca [8 x i8], align 1
+  %transmute.slot = alloca %S, align 4
+  br label %body
+
+body:                                             ; preds = %allocas
+  store %S { i32 1, i32 2 }, ptr %s.0.slot, align 4
+  %load = load %S, ptr %s.0.slot, align 4
+  store %S %load, ptr %transmute.slot, align 4
+  %transmute.out = load [8 x i8], ptr %transmute.slot, align 4
+  store [8 x i8] %transmute.out, ptr %bytes.1.slot, align 1
+  br i1 false, label %bounds.trap, label %bounds.ok
+
+bounds.trap:                                      ; preds = %body
+  call void @llvm.trap()
+  unreachable
+
+bounds.ok:                                        ; preds = %body
+  %idx.gep = getelementptr inbounds [8 x i8], ptr %bytes.1.slot, i64 0, i64 0
+  %idx.load = load i8, ptr %idx.gep, align 1
+  %zext = zext i8 %idx.load to i32
+  ret i32 %zext
+}
+
+; Function Attrs: cold noreturn nounwind memory(inaccessiblemem: write)
+declare void @llvm.trap() #0
+
+attributes #0 = { cold noreturn nounwind memory(inaccessiblemem: write) }

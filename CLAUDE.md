@@ -25,3 +25,7 @@ A local `.git/hooks/pre-commit` is setup to guard the commit. Tests and types mu
 ## Style
 
 - Prefer `if let Pattern = expr` over `if matches!(expr, Pattern)`
+
+## Important Notice
+
+AskUserQuestion tool is [broken](https://github.com/pingdotgg/t3code/issues/2522). Please do not use it because it does not return my answer to you.

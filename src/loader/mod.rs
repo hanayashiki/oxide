@@ -3,7 +3,7 @@
 
 pub mod host;
 
-pub use host::{BuilderHost, MaterializeError, ResolveError, VfsHost};
+pub use host::{BuilderHost, INTRINSICS_FILE, MaterializeError, ResolveError, VfsHost};
 
 use std::collections::HashMap;
 use std::io;

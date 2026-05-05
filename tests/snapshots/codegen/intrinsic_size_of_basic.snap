@@ -1,0 +1,22 @@
+; ModuleID = 'test'
+source_filename = "test"
+
+define i32 @main() {
+allocas:
+  %four.0.slot = alloca i64, align 8
+  %eight.1.slot = alloca i64, align 8
+  %twelve.2.slot = alloca i64, align 8
+  br label %body
+
+body:                                             ; preds = %allocas
+  store i64 4, ptr %four.0.slot, align 4
+  store i64 8, ptr %eight.1.slot, align 4
+  store i64 12, ptr %twelve.2.slot, align 4
+  %load = load i64, ptr %four.0.slot, align 4
+  %load1 = load i64, ptr %eight.1.slot, align 4
+  %add = add i64 %load, %load1
+  %load2 = load i64, ptr %twelve.2.slot, align 4
+  %add3 = add i64 %add, %load2
+  %trunc = trunc i64 %add3 to i32
+  ret i32 %trunc
+}

@@ -5,20 +5,19 @@ A five-minute tour of Oxide.
 ## What is Oxide?
 
 **C semantics in Rust syntax.** Oxide is a tiny, ahead-of-time-compiled,
-statically-typed language that compiles down to LLVM and links against
-native code. If you've written C, the runtime model will feel familiar:
-manual memory management, raw pointers, no implicit allocations, no
-dispatch overhead, the C ABI for FFI. If you've written Rust, the
-surface syntax will too: `let`, `fn`, `fn generic<T>`, `mut`, `*const T` / `*mut T`,
+statically-typed language that lowers to LLVM and links against native
+code. If you've written C, the runtime model will feel familiar: manual
+memory management, raw pointers, no implicit allocations, no dispatch
+overhead, the C ABI for FFI. If you've written Rust, the surface syntax
+will too — `let`, `fn`, `fn name<T>`, `mut`, `*const T` / `*mut T`,
 `extern "C"`, `as` casts, `if`/`else` as expressions.
 
-What Oxide deliberately does **not** have: closures, traits,
-`enum` payloads (the keyword is reserved but not implemented), `match`,
-`unsafe`, floats, async, or modules-with-visibility. There is no GC, no
-borrow checker, no overload resolution. The type system catches shape
-errors and enforces mutability/pointer-aliasing rules at compile time,
-then gets out of the way. We ship exactly what's needed to write
-idiomatic C through a Rust-shaped lens.
+What Oxide deliberately does **not** have: closures, traits, `enum`
+payloads (the keyword is reserved but unimplemented), `match`, `unsafe`,
+floats, async, or modules-with-visibility. No GC, no borrow checker, no
+overload resolution. The type system catches shape errors and enforces
+mutability and pointer-aliasing rules at compile time, then gets out of
+the way. The goal is idiomatic C with Rust-shaped syntax — nothing more.
 
 ## Install
 
@@ -45,8 +44,6 @@ Build and run:
 oxide hello.ox
 ```
 
-
-
 ## Tour by example
 
 ### Bindings
@@ -63,10 +60,10 @@ Integer literals default to `i32`. Widen or narrow with `as`.
 ### Primitives
 
 `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `isize`, `usize`,
-`bool`.  No `f32` / `f64` yet. The unit type is `()` and is
-written by omitting the return type on a function.
+`bool`. No `f32` / `f64` yet. The unit type `()` has no surface
+spelling — write it by omitting a function's return type.
 
-> Use `u8` instead of `char`
+> Use `u8` instead of `char`.
 
 ### Strings and pointers
 
@@ -77,11 +74,10 @@ let q = &x;                // *const i32       — address of x
 let r = &mut y;            // *mut i32         — address of mut y
 ```
 
-A string literal carries its length in the type (`*const [u8; N]`). When
-an `extern "C"` parameter is declared as `*const [u8]`, the length erases
-implicitly so you can pass any literal there. Pointer types are
-`*const T` and `*mut T`; `*mut T` is assignable to `*const T` but not
-the other way around.
+A string literal carries its length in its type (`*const [u8; N]`). An
+`extern "C"` parameter declared as `*const [u8]` erases the length so
+any literal fits. Pointer types come in two flavors, `*const T` and
+`*mut T`; `*mut T` coerces to `*const T`, but not the other way around.
 
 ### `if` / `else` is an expression
 
@@ -95,8 +91,8 @@ if x > 0 {
 }
 ```
 
-Conditions must be `bool`. There is no implicit int-to-bool coercion;
-write `x != 0` if you mean it.
+Conditions must be `bool` — no implicit int-to-bool coercion. Write
+`x != 0` if you mean it.
 
 ### Loops
 
@@ -112,7 +108,7 @@ loop {
 }
 ```
 
-`for` is C-style (init, condition, step) — not the iterator form.
+`for` is C-style (init, condition, step), not the iterator form.
 `break` and `continue` work everywhere.
 
 ### Functions and unit return
@@ -125,8 +121,8 @@ fn shout(s: *const [u8]) {     // returns ()
 }
 ```
 
-A trailing expression returns; an explicit `return e;` works too.
-Bodies that don't produce a value have unit type — omit the `-> ()`.
+A trailing expression is the return value; explicit `return e;` works
+too. A body that produces no value has unit type — drop the `-> ()`.
 
 ### Structs
 
@@ -139,26 +135,25 @@ let mut p = Point { x: 1, y: 2 };
 p.x = 5;        // requires `let mut p`
 ```
 
-Mutability is per-binding, not per-field. To mutate a single field,
+Mutability is per-binding, not per-field: to mutate a single field,
 the whole struct binding must be `mut`.
 
 ### Pointer usage
 
-As in C, you can dereference a pointer on either side of an assignment:
+As in C, a pointer dereference is valid on either side of an assignment:
 
 ```rust
 let mut n = 1;
 let ptr_to_n = &mut n;           // *mut i32
 
 *ptr_to_n = 42;                  // writes through the pointer; n is now 42
-let m = *ptr_to_n;               // loads through the pointer; m is 42
+let m = *ptr_to_n;               // reads through the pointer; m is 42
 ```
 
-`&` produces `*const T` (read-only); `&mut` produces `*mut T` (write-through).
+`&` yields `*const T` (read-only); `&mut` yields `*mut T` (write-through).
 
-Field access on a struct pointer automatically dereferences, so there's
-no need for the explicit `(*ptr).field` form (and Oxide has no `->`
-operator):
+Field access on a struct pointer auto-dereferences, so the explicit
+`(*ptr).field` form is unnecessary (and there is no `->` operator):
 
 ```rust
 let mut p = Point { x: 1, y: 2 };
@@ -182,16 +177,16 @@ fn main() -> i32 {
 }
 ```
 
-`extern "C"` blocks declare functions that link against C code. The
-trailing `...` declares C-variadic parameters; you can *call* C
-variadics, but you cannot define your own. Narrow integer args at
-variadic positions are widened to `i32` automatically (signed-narrow
-sign-extends, unsigned-narrow and `bool` zero-extend), matching C's
+An `extern "C"` block declares functions that link against C symbols.
+A trailing `...` marks a C-variadic parameter list — you can _call_ C
+variadics, but you can't define your own. Narrow integer args at
+variadic positions widen to `i32` automatically (signed-narrow types
+sign-extend, unsigned-narrow and `bool` zero-extend), matching C's
 default argument promotions.
 
 ## Generic types
 
-Oxide supports generic types at `fn`s and `struct`s.
+Both `fn`s and `struct`s can take type parameters.
 
 Generic structs:
 
@@ -227,42 +222,43 @@ id(1);          // ✅ inferred, same as above
 id::<[i32]>(x); // ❌ `T` must have a known size
 ```
 
-In the body, only copying is allowed if the value is of generic type:
+Inside a generic body, a value of generic type can only be copied —
+assignments and pass-throughs are fine; operations that would require
+knowing more about `T` are not.
 
 ```rust
-// ✅ can be assigned
-fn swap<T>(*mut a: T, *mut b: T) {
-    let c = a;
-    a = b;
-    b = c;
+// ✅ can be assigned around
+fn swap<T>(a: *mut T, b: *mut T) {
+    let c = *a;
+    *a = *b;
+    *b = c;
 }
 
-// ✅ can be passed as parameter
+// ✅ can be passed as a parameter
 fn eat<T>(x: T) {
     eat(x);
 }
 
-// ❌ because we do not know whether `T` supports comparison
-fn compare(a: T, b: T) {
+// ❌ rejected: `T` may not support comparison
+fn compare<T>(a: T, b: T) -> bool {
     a < b
 }
 ```
 
-
 ## Building and emitting
 
-`oxide` is a single-file driver: pass the entry point and it walks
+`oxide` is a single-file driver: pass the entry point, and it walks
 imports from there.
 
-| Flag | Effect |
-|---|---|
-| `--emit exe` (default) | compile, link, run via `execv` |
-| `--no-run` | stop after linking; print the binary path to stderr |
-| `--emit ir` | print textual LLVM IR to stdout (or `-o` path) |
-| `--emit obj` | emit a `.o` object file |
-| `--emit lex` / `ast` / `hir` / `typeck` | dump an intermediate representation, useful for tinkering |
-| `-O 0\|1\|2\|3\|s\|z` | LLVM optimization level (codegen emits only) |
-| `-o <path>` | explicit output path; defaults to `target/oxide-build/<stem>` |
+| Flag                                    | Effect                                                        |
+| --------------------------------------- | ------------------------------------------------------------- |
+| `--emit exe` (default)                  | compile, link, run via `execv`                                |
+| `--no-run`                              | stop after linking; print the binary path to stderr           |
+| `--emit ir`                             | print textual LLVM IR to stdout (or `-o` path)                |
+| `--emit obj`                            | emit a `.o` object file                                       |
+| `--emit lex` / `ast` / `hir` / `typeck` | dump an intermediate representation, useful for tinkering     |
+| `-O 0\|1\|2\|3\|s\|z`                   | LLVM optimization level (codegen emits only)                  |
+| `-o <path>`                             | explicit output path; defaults to `target/oxide-build/<stem>` |
 
 Arguments after `--` are forwarded to the running program:
 
@@ -270,10 +266,35 @@ Arguments after `--` are forwarded to the running program:
 oxide hello.ox -- --my-arg
 ```
 
-## Standard library
+## Memory management
 
-Three files are baked into the compiler binary and auto-mount when you
-import them by name:
+`mem.ox` ships typed wrappers around the C allocator: `ox_alloc<T>`,
+`ox_alloc_zeroed<T>`, `ox_dealloc<T>`, and `ox_realloc<T>`. Import it
+like any other stdlib file.
+
+```rust
+import "stdio.ox";
+import "mem.ox";
+
+struct Point { x: i32, y: i32 }
+
+fn main() -> i32 {
+    let integer = ox_alloc::<i32>();           // uninitialized
+    *integer = 42;
+
+    let point = ox_alloc_zeroed::<Point>();    // zero-initialized
+    printf("point.x = %d\n", point.x);         // → "point.x = 0"
+
+    ox_dealloc(integer);
+    ox_dealloc(point);
+    0
+}
+```
+
+## C standard library
+
+Three header-shaped bindings are bundled with the compiler and import
+under their bare names:
 
 - **`stdio.ox`** — `printf`, `puts`, `getchar`, `fopen` / `fclose`,
   `fread` / `fwrite`, `scanf`, `fflush`, plus the rest of `<stdio.h>`.
@@ -282,20 +303,23 @@ import them by name:
 - **`stdlib.ox`** — `malloc` / `free` / `realloc`, `exit` / `abort`,
   `getenv`, `system`, `atoi`, `rand` / `srand`.
 
-Use them by importing the bare name:
-
 ```rust
 import "stdio.ox";
 import "string.ox";
 import "stdlib.ox";
+
+fn main() -> i32 {
+    printf("Hello, %d\n", 42);
+    0
+}
 ```
 
-The bundled file wins over a local file of the same name; if you want
-to shadow one, name your own file differently. Symbols resolve at link
-time against the host's C library (libc on Linux/macOS), so the
-available behavior matches what your platform's libc provides.
+A bundled file wins over a local file with the same name — rename your
+own to disambiguate. Symbols resolve at link time against the host's C
+library (libc on Linux and macOS), so the available behavior tracks
+your platform's libc.
 
-You can also import your own files by relative path:
+Your own files import by relative path:
 
 ```rust
 import "./geometry.ox";
@@ -303,15 +327,18 @@ import "./geometry.ox";
 
 ## Where to next
 
-Browse `example-projects/` in the [repository](https://github.com/hanayashiki/oxide) for end-to-end programs.
-Each is a self-contained module you build with the same
-`oxide path/to/main.ox` invocation:
+Browse `example-projects/` in the [repository](https://github.com/hanayashiki/oxide)
+for end-to-end programs. Each is a self-contained module you build
+with the same `oxide path/to/main.ox` invocation:
 
 - **`puts/`** — the hello-world above.
 - **`fib/`** — recursive Fibonacci with a C-extern `print_int` callout.
-- **`socket-server/`** — a small HTTP server demonstrating structs,
-  `&mut`, and `loop`.
-- **`flappy/`** — a TUI game using arrays (`[u8; N]`), mutable indexing,
-  and nested loops.
+- **`layout_intrinsics/`** — a tour of `ox_size_of`, `ox_transmute`,
+  and the `mem.ox` typed allocator wrappers.
+- **`layout_mem/`** — a minimal `ox_alloc` / `ox_dealloc` round-trip.
+- **`socket-server/`** — a small HTTP server built on structs, `&mut`,
+  and `loop`.
+- **`flappy/`** — a TUI game using arrays (`[u8; N]`), mutable
+  indexing, and nested loops.
 
 Pick whichever looks fun, copy it out, and start changing things.

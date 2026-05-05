@@ -9,33 +9,36 @@
 //! ```
 //!
 //! Pipeline stages by `--emit`:
-//!   lex / ast    → root file only (no imports)
-//!   hir / typeck → load_program + lower_program
-//!   ir / bc / obj → + codegen + builder emit
+//!   lex / ast    → root file only (no imports — `Builder::from_inline`)
+//!   hir / typeck → load_program + lower_program (`Builder::from_root`)
+//!   ir / bc / obj → + codegen + builder emit (`Builder::emit_artifact`)
 //!   exe          → + link + (execv unless --no-run)
+//!
+//! Architecture: this driver owns no orchestration. It parses CLI
+//! options, hands them to a `CliEmit` tapper that prints + tracks an
+//! exit code, and runs them through `oxide::builder::Builder` —
+//! exactly the pattern integration tests use.
 
 use std::collections::HashMap;
-use std::io::IsTerminal;
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
 
-use oxide::builder::{BuildOptions, EmitKind as BuilderEmitKind, OutputPath, build};
+use oxide::builder::{
+    BuildOptions, Builder, EmitKind as BuilderEmitKind, Flow, OutputPath, Phase, TapAst, TapHir,
+    TapLex, TapLoad, TapMono, TapTypeck, Tapper,
+};
 use oxide::config::{CompilerConfig, OptLevel};
-use oxide::hir::lower_program;
 use oxide::hir::pretty::pretty_print as hir_pretty;
-use oxide::lexer::lex;
-use oxide::loader::{BuilderHost, VfsHost, load_program};
-use oxide::mono::monomorphize;
-use oxide::parser::parse;
+use oxide::loader::{BuilderHost, VfsHost};
 use oxide::parser::pretty::pretty_print as ast_pretty;
 use oxide::reporter::{
-    SourceMap, emit, from_hir_error, from_lex_error, from_load_error, from_mono_error,
-    from_parse_error, from_typeck_error,
+    emit, from_hir_error, from_lex_error, from_load_error, from_mono_error, from_parse_error,
+    from_typeck_error,
 };
 use oxide::session::Session;
-use oxide::typeck::check;
 
 #[derive(Parser, Debug)]
 #[command(name = "oxide", version, about = "Oxide compiler driver")]
@@ -87,6 +90,19 @@ impl EmitArg {
     fn is_codegen(self) -> bool {
         matches!(self, Self::Ir | Self::Bc | Self::Obj | Self::Exe)
     }
+
+    /// The phase the Builder needs to drive to. For codegen emits we
+    /// only use it as a "halt before running codegen" signal; the
+    /// actual driver is `emit_artifact`.
+    fn target_phase(self) -> Phase {
+        match self {
+            Self::Lex => Phase::Lex,
+            Self::Ast => Phase::Ast,
+            Self::Hir => Phase::Hir,
+            Self::Typeck => Phase::Typeck,
+            Self::Ir | Self::Bc | Self::Obj | Self::Exe => Phase::Mono,
+        }
+    }
 }
 
 fn parse_opt_level(s: &str) -> Result<OptLevel, String> {
@@ -120,204 +136,128 @@ fn main() -> ExitCode {
     // everything. Workdir defaults to `target/oxide-build` for builder
     // intermediates (.o files for Exe).
     let host = VfsHost::new(HashMap::new());
-    let stderr = std::io::stderr();
-    let color = stderr.is_terminal();
+    let color = io::stderr().is_terminal();
 
-    let exit = match args.emit {
-        EmitArg::Lex => emit_lex(&args.path),
-        EmitArg::Ast => emit_ast(&args.path),
-        EmitArg::Hir | EmitArg::Typeck | EmitArg::Ir | EmitArg::Bc | EmitArg::Obj | EmitArg::Exe => {
-            run_pipeline(&args, opt_level, &host, color)
-        }
-    };
-
-    exit
-}
-
-/// Single-file lex emit: read root, lex, dump tokens (Eof filtered).
-fn emit_lex(path: &Path) -> ExitCode {
-    let src = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("oxide: failed to read {}: {e}", path.display());
-            return ExitCode::from(1);
-        }
-    };
-    let mut map = SourceMap::new();
-    let file = map.add(path.to_path_buf(), src.clone());
-    let tokens = lex(&src, file);
-
-    let stderr = std::io::stderr();
-    let color = stderr.is_terminal();
-    let mut had_error = false;
-    let mut printable = Vec::with_capacity(tokens.len());
-    for t in &tokens {
-        match &t.kind {
-            oxide::lexer::TokenKind::Error(e) => {
-                let diag = from_lex_error(e, file, t.span.clone());
-                emit(&diag, &map, &mut std::io::stderr().lock(), color)
-                    .expect("write stderr");
-                had_error = true;
-            }
-            oxide::lexer::TokenKind::Eof => {}
-            other => printable.push(other.clone()),
-        }
-    }
-    println!("{printable:?}");
-    if had_error {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
-    }
-}
-
-/// Single-file AST emit: read root, lex, parse, pretty-print.
-fn emit_ast(path: &Path) -> ExitCode {
-    let src = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("oxide: failed to read {}: {e}", path.display());
-            return ExitCode::from(1);
-        }
-    };
-    let mut map = SourceMap::new();
-    let file = map.add(path.to_path_buf(), src.clone());
-    let tokens = lex(&src, file);
-    let (module, parse_errs) = parse(&tokens, file);
-
-    let stderr = std::io::stderr();
-    let color = stderr.is_terminal();
-    if !parse_errs.is_empty() {
-        let mut out = stderr.lock();
-        for err in &parse_errs {
-            let diag = from_parse_error(err, file);
-            emit(&diag, &map, &mut out, color).expect("write stderr");
-        }
-        return ExitCode::from(1);
-    }
-
-    print!("{}", ast_pretty(&module));
-    ExitCode::SUCCESS
-}
-
-/// Full-pipeline path: load_program → lower_program → typeck →
-/// (codegen + emit) → (link + run) depending on emit kind.
-fn run_pipeline(
-    args: &Args,
-    opt_level: OptLevel,
-    host: &VfsHost,
-    color: bool,
-) -> ExitCode {
-    let mut map = SourceMap::new();
-    let (files, root, load_errs) = load_program(host, &mut map, args.path.clone());
-
-    if !load_errs.is_empty() {
-        let mut out = std::io::stderr().lock();
-        for err in &load_errs {
-            for diag in from_load_error(err) {
-                emit(&diag, &map, &mut out, color).expect("write stderr");
-            }
-        }
-        return ExitCode::from(1);
-    }
-
-    let (hir, hir_errs) = lower_program(files, root);
-    if !hir_errs.is_empty() {
-        let mut out = std::io::stderr().lock();
-        for err in &hir_errs {
-            let diag = from_hir_error(err);
-            emit(&diag, &map, &mut out, color).expect("write stderr");
-        }
-        return ExitCode::from(1);
-    }
-
-    if args.emit == EmitArg::Hir {
-        print!("{}", hir_pretty(&hir, &map));
-        return ExitCode::SUCCESS;
-    }
-
-    let (mut results, type_errs) = check(&hir);
-    if !type_errs.is_empty() {
-        let mut out = std::io::stderr().lock();
-        for err in &type_errs {
-            let diag = from_typeck_error(err, root, &results.tys);
-            emit(&diag, &map, &mut out, color).expect("write stderr");
-        }
-        return ExitCode::from(1);
-    }
-
-    if args.emit == EmitArg::Typeck {
-        print_typeck(&hir, &results);
-        return ExitCode::SUCCESS;
-    }
-
-    // Monomorphization. Walks HIR per-instance to discover the full
-    // instantiation graph from non-generic entry points, substitutes
-    // signatures, populates `instance_map` for codegen's emit_call to
-    // resolve generic-call sites against. See spec/16_GENERIC.md.
-    let (mono, mono_errs) = monomorphize(&hir, &mut results);
-    if !mono_errs.is_empty() {
-        let mut out = std::io::stderr().lock();
-        for err in &mono_errs {
-            let diag = from_mono_error(err, root, &hir, &results.tys);
-            emit(&diag, &map, &mut out, color).expect("write stderr");
-        }
-        return ExitCode::from(1);
-    }
-
-    // Codegen / builder.
     let module_name = args
         .path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "oxide".into());
 
+    let mut emit_st = CliEmit::new(args.emit, color);
+
+    if args.emit.is_codegen() {
+        run_codegen(&args, &host, opt_level, &module_name, &mut emit_st)
+    } else {
+        run_inspect(&args, &host, opt_level, &mut emit_st)
+    }
+}
+
+/// Drive `--emit lex|ast|hir|typeck` through the Builder. The CliEmit
+/// tapper prints the requested artifact (or the diagnostics that
+/// blocked it).
+fn run_inspect(
+    args: &Args,
+    host: &VfsHost,
+    opt_level: OptLevel,
+    emit_st: &mut CliEmit,
+) -> ExitCode {
+    let target = args.emit.target_phase();
     let config = CompilerConfig {
         opt_level,
         ..CompilerConfig::default()
     };
-    let sess = Session::new(host, config);
+
+    {
+        let sess = Session::new(host, config);
+        match args.emit {
+            EmitArg::Lex | EmitArg::Ast => {
+                let src = match std::fs::read_to_string(&args.path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("oxide: failed to read {}: {e}", args.path.display());
+                        return ExitCode::from(1);
+                    }
+                };
+                let mut b =
+                    Builder::from_inline(sess, args.path.clone(), src, emit_st);
+                b.run(target);
+            }
+            _ => {
+                let mut b = Builder::from_root(sess, args.path.clone(), emit_st);
+                b.run(target);
+            }
+        }
+    }
+
+    if emit_st.had_errors {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Drive `--emit ir|bc|obj|exe` through the Builder. Produces an
+/// artifact on disk; for `Exe` either execs it (default) or prints the
+/// path (`--no-run`). For `--emit ir` without `-o`, the produced file
+/// is read back and printed to stdout to match historical behaviour.
+fn run_codegen(
+    args: &Args,
+    host: &VfsHost,
+    opt_level: OptLevel,
+    module_name: &str,
+    emit_st: &mut CliEmit,
+) -> ExitCode {
+    let print_ir_to_stdout = args.emit == EmitArg::Ir && args.output.is_none();
+
+    let exe_default_path = || -> PathBuf { host.workdir().join(module_name) };
+
+    let output = match (&args.output, args.emit, print_ir_to_stdout) {
+        (Some(p), _, _) => OutputPath::Explicit(p.clone()),
+        (None, EmitArg::Ir, true) => {
+            OutputPath::Explicit(host.workdir().join(format!("{module_name}.ll")))
+        }
+        (None, EmitArg::Exe, _) => OutputPath::Explicit(exe_default_path()),
+        (None, _, _) => OutputPath::Auto,
+    };
 
     let emit_kind = match args.emit {
         EmitArg::Ir => BuilderEmitKind::Ir,
         EmitArg::Bc => BuilderEmitKind::Bc,
         EmitArg::Obj => BuilderEmitKind::Obj,
         EmitArg::Exe => BuilderEmitKind::Exe,
-        _ => unreachable!("non-builder emits handled above"),
-    };
-
-    let print_ir_to_stdout = matches!(args.emit, EmitArg::Ir) && args.output.is_none();
-
-    // Default artifact path goes under `host.workdir()` (= `target/oxide-build/`)
-    // so that produced binaries land in `target/` and inherit Cargo's gitignore.
-    // Exe gets the bare module name (no extension on Unix); the intermediate `.o`
-    // for Exe lives alongside as `<name>-<pid>.o`, so no collision.
-    let exe_default_path = || -> PathBuf { host.workdir().join(&module_name) };
-
-    let output = match (&args.output, args.emit, print_ir_to_stdout) {
-        (Some(p), _, _) => OutputPath::Explicit(p.clone()),
-        (None, EmitArg::Ir, true) => OutputPath::Explicit(
-            host.workdir().join(format!("{module_name}.ll")),
-        ),
-        (None, EmitArg::Exe, _) => OutputPath::Explicit(exe_default_path()),
-        (None, _, _) => OutputPath::Auto,
+        _ => unreachable!("non-codegen emits handled in run_inspect"),
     };
 
     let opts = BuildOptions {
         emit: emit_kind,
         output,
-        module_name,
+        module_name: module_name.to_string(),
         keep_intermediates: false,
         extra_link_args: Vec::new(),
     };
 
-    let artifact = match build(&sess, &hir, &mut results, &mono, &opts) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("oxide: build failed: {e}");
-            return ExitCode::from(1);
+    let config = CompilerConfig {
+        opt_level,
+        ..CompilerConfig::default()
+    };
+
+    let artifact = {
+        let sess = Session::new(host, config);
+        let mut b = Builder::from_root(sess, args.path.clone(), emit_st);
+        match b.emit_artifact(&opts) {
+            Ok(a) => a,
+            Err(_) => {
+                // CliEmit has already printed phase diagnostics via
+                // its tapper callbacks; just propagate the failure.
+                return ExitCode::from(1);
+            }
         }
     };
+
+    if emit_st.had_errors {
+        return ExitCode::from(1);
+    }
 
     if print_ir_to_stdout {
         let real = artifact
@@ -348,6 +288,136 @@ fn run_pipeline(
     }
 
     ExitCode::SUCCESS
+}
+
+/// CLI's `Tapper`. Prints the requested artifact or the diagnostics
+/// that prevented it; returns `Flow::Halt` on the first phase with
+/// errors so the rest of the pipeline doesn't run on poison input
+/// (matching today's "print one phase's diagnostics and exit"
+/// behaviour). `had_errors` flips at each error site so `main` can
+/// translate to a non-zero exit code after the Builder returns.
+struct CliEmit {
+    target: EmitArg,
+    color: bool,
+    had_errors: bool,
+}
+
+impl CliEmit {
+    fn new(target: EmitArg, color: bool) -> Self {
+        Self {
+            target,
+            color,
+            had_errors: false,
+        }
+    }
+}
+
+impl Tapper for CliEmit {
+    fn on_lex(&mut self, t: TapLex<'_>) -> Flow {
+        // Print only when --emit lex is the target; for higher emits
+        // we just observe (lex errors there flow through on_load via
+        // load_program's error reporting).
+        if self.target != EmitArg::Lex {
+            return Flow::Continue;
+        }
+
+        let mut out = io::stderr().lock();
+        let mut had_lex_error = false;
+        let mut printable = Vec::with_capacity(t.tokens.len());
+        for tok in t.tokens {
+            match &tok.kind {
+                oxide::lexer::TokenKind::Error(e) => {
+                    let diag = from_lex_error(e, t.root, tok.span.clone());
+                    emit(&diag, t.source_map, &mut out, self.color).expect("write stderr");
+                    had_lex_error = true;
+                }
+                oxide::lexer::TokenKind::Eof => {}
+                other => printable.push(other.clone()),
+            }
+        }
+        println!("{printable:?}");
+        if had_lex_error {
+            self.had_errors = true;
+            Flow::Halt
+        } else {
+            Flow::Continue
+        }
+    }
+
+    fn on_ast(&mut self, t: TapAst<'_>) -> Flow {
+        if !t.errors.is_empty() {
+            let mut out = io::stderr().lock();
+            for err in t.errors {
+                let diag = from_parse_error(err, t.root);
+                emit(&diag, t.source_map, &mut out, self.color).expect("write stderr");
+            }
+            self.had_errors = true;
+            return Flow::Halt;
+        }
+        if self.target == EmitArg::Ast {
+            print!("{}", ast_pretty(t.ast));
+        }
+        Flow::Continue
+    }
+
+    fn on_load(&mut self, t: TapLoad<'_>) -> Flow {
+        if !t.errors.is_empty() {
+            let mut out = io::stderr().lock();
+            for err in t.errors {
+                for diag in from_load_error(err) {
+                    emit(&diag, t.source_map, &mut out, self.color).expect("write stderr");
+                }
+            }
+            self.had_errors = true;
+            return Flow::Halt;
+        }
+        Flow::Continue
+    }
+
+    fn on_hir(&mut self, t: TapHir<'_>) -> Flow {
+        if !t.errors.is_empty() {
+            let mut out = io::stderr().lock();
+            for err in t.errors {
+                let diag = from_hir_error(err);
+                emit(&diag, t.source_map, &mut out, self.color).expect("write stderr");
+            }
+            self.had_errors = true;
+            return Flow::Halt;
+        }
+        if self.target == EmitArg::Hir {
+            print!("{}", hir_pretty(t.hir, t.source_map));
+        }
+        Flow::Continue
+    }
+
+    fn on_typeck(&mut self, t: TapTypeck<'_>) -> Flow {
+        if !t.errors.is_empty() {
+            let mut out = io::stderr().lock();
+            for err in t.errors {
+                let diag = from_typeck_error(err, t.root, &t.results.tys);
+                emit(&diag, t.source_map, &mut out, self.color).expect("write stderr");
+            }
+            self.had_errors = true;
+            return Flow::Halt;
+        }
+        if self.target == EmitArg::Typeck {
+            print_typeck(t.hir, t.results);
+        }
+        Flow::Continue
+    }
+
+    fn on_mono(&mut self, t: TapMono<'_>) -> Flow {
+        if !t.errors.is_empty() {
+            let mut out = io::stderr().lock();
+            for err in t.errors {
+                let diag = from_mono_error(err, t.root, t.hir, &t.results.tys);
+                emit(&diag, t.source_map, &mut out, self.color).expect("write stderr");
+            }
+            self.had_errors = true;
+            return Flow::Halt;
+        }
+        Flow::Continue
+    }
 }
 
 /// Print typeck signatures + per-expr types in the format the old

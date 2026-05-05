@@ -21,13 +21,13 @@ use crate::hir::{
     FieldIdx, FnId, HBlockId, HElseArm, HExprId, HirArrayLit, HirConst, HirExprKind, HirProgram,
     LocalId, VariantIdx,
 };
-use crate::mono::{InstId, MonoResults};
+use crate::mono::{InstId, InstanceOperation, MonoResults};
 use crate::parser::ast::{AssignOp, BinOp, UnOp};
-use crate::typeck::{AdtId, ParamId, PrimTy, TyId, TyKind, TypeckResults, subst_from};
+use crate::typeck::{AdtId, ParamId, PrimTy, TyId, TyKind, TypeckResults, layout, subst_from};
 
 use super::ty::{
-    AdtLlTypes, as_prim, is_signed_prim, is_void_ret, lower_adt_type, lower_fn_type, lower_prim,
-    lower_ty,
+    AdtLlTypes, as_prim, is_ptr_width_int, is_signed_prim, is_void_ret, lower_adt_type,
+    lower_fn_type, lower_prim, lower_ty, prim_bit_width,
 };
 
 /// Lower an entire `HirProgram` to an LLVM `Module`. Consumes mono's
@@ -39,9 +39,11 @@ use super::ty::{
 ///     FnId-keyed table consulted by `emit_call`'s non-generic /
 ///     extern dispatch path. Populated for extern fns and for
 ///     non-generic non-extern fns directly from `hir.fns` (Pass A).
-///   - `inst_decls: IndexVec<InstId, FunctionValue>` — the InstId-
-///     keyed table consulted by `emit_call`'s generic dispatch path.
-///     Populated for every generic `Instance` mono produced (Pass B).
+///   - `inst_decls: IndexVec<InstId, Option<FunctionValue>>` — the
+///     InstId-keyed table consulted by `emit_call`'s generic dispatch
+///     path. Populated for every generic `Instance` mono produced
+///     (Pass B); intrinsic instances push `None` to keep the InstId →
+///     idx correspondence intact.
 ///
 /// Pass A walks `hir.fns` and adds one declaration per non-generic fn
 /// (extern keeps its verbatim source name; non-generic non-extern uses
@@ -123,9 +125,21 @@ pub fn codegen<'ctx>(
     // signature. The FunctionValue lands in `inst_decls[inst_id]` for
     // the generic dispatch path at `emit_call`. Non-generic fns are
     // **not** in mono.instances under the redesigned model.
-    let mut inst_decls: IndexVec<InstId, FunctionValue<'ctx>> =
+    //
+    // **Intrinsic instances are NOT declared.** When `inst.operation !=
+    // Call`, codegen synthesizes the IR inline at the call site
+    // (`emit_call` dispatches on `inst.operation`). To preserve the
+    // `InstId → idx` correspondence in `inst_decls`, we still push an
+    // entry — `None` instead of `Some(fnv)` — so downstream lookups
+    // index correctly. See spec/17_LAYOUT.md §Intrinsic recognition
+    // (Symbol emission).
+    let mut inst_decls: IndexVec<InstId, Option<FunctionValue<'ctx>>> =
         IndexVec::with_capacity(mono.instances.len());
     for (_inst_id, inst) in mono.instances.iter_enumerated() {
+        if inst.operation != InstanceOperation::Call {
+            inst_decls.push(None);
+            continue;
+        }
         let c_variadic = hir.fns[inst.fid].is_variadic;
         let fn_ty = lower_fn_type(
             ctx,
@@ -141,7 +155,7 @@ pub fn codegen<'ctx>(
             let lid = hir.fns[inst.fid].params[i];
             pv.set_name(&hir.locals[lid].name);
         }
-        inst_decls.push(fnv);
+        inst_decls.push(Some(fnv));
     }
 
     let mut cg = Codegen {
@@ -178,7 +192,12 @@ pub fn codegen<'ctx>(
     for fid in non_generic_targets {
         cg.lower_fn(LowerTarget::NonGeneric(fid));
     }
-    for (inst_id, _inst) in cg.mono.instances.iter_enumerated() {
+    for (inst_id, inst) in cg.mono.instances.iter_enumerated() {
+        // Intrinsic instances have no body — codegen synthesizes the
+        // IR at the call site via `emit_call`'s operation dispatch.
+        if inst.operation != InstanceOperation::Call {
+            continue;
+        }
         cg.lower_fn(LowerTarget::Generic(inst_id));
     }
 
@@ -217,8 +236,12 @@ struct Codegen<'a, 'ctx> {
     /// `mono.instances`; Phase 2 reads to find the FunctionValue being
     /// defined. `emit_call`'s generic-call path resolves
     /// `mono.instance_map[(fid, resolved_args)] → InstId` and then
-    /// `inst_decls[inst_id]` to the FunctionValue.
-    inst_decls: IndexVec<InstId, FunctionValue<'ctx>>,
+    /// `inst_decls[inst_id]` to the FunctionValue. Intrinsic instances
+    /// (`operation != Call`) push `None` here so the InstId → idx
+    /// correspondence is preserved; their callsites short-circuit before
+    /// hitting `inst_decls` in `emit_call`. See
+    /// spec/17_LAYOUT.md §Intrinsic recognition.
+    inst_decls: IndexVec<InstId, Option<FunctionValue<'ctx>>>,
     /// LLVM struct type per `AdtId`, populated up front by
     /// `prepare_adt_types`. All later `lower_ty` / `lower_fn_type` calls
     /// thread this in.
@@ -366,6 +389,13 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// Always inserts right before the block's terminator (the `br` to
     /// `body`), so allocas stay grouped at the top of the entry block in
     /// emission order.
+    ///
+    /// **Alignment**: callers don't need to call `set_alignment` on the
+    /// returned slot when the slot is *only* used through the same LLVM
+    /// type that was passed in here — inkwell's default `align` matches
+    /// across the alloca/store/load triple in that case. The exception
+    /// is `emit_transmute`, which deliberately punts the type at the
+    /// load site and so must align all three instructions explicitly.
     fn alloca_in_entry(
         &mut self,
         fx: &FnCodegenContext<'ctx>,
@@ -599,7 +629,15 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     &self.typeck_results.fn_sig(inst_fid).generic_params,
                     &self.mono.instances[inst_id].type_args,
                 );
-                (inst_fid, inst_ret, subst, self.inst_decls[inst_id])
+                (
+                    inst_fid,
+                    inst_ret,
+                    subst,
+                    self.inst_decls[inst_id].expect(
+                        "lower_fn called on intrinsic instance — \
+                         Pass 2 should have skipped non-Call operations",
+                    ),
+                )
             }
         };
 
@@ -1626,9 +1664,40 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                     .instance_map
                     .get(&(fid, resolved_args))
                     .expect("mono should have instantiated every reachable generic call");
+
+                // Intrinsic dispatch — short-circuit normal call lowering
+                // when the mono pass stamped a non-Call operation. See
+                // spec/17_LAYOUT.md §Codegen.
+                let op = self.mono.instances[inst_id].operation.clone();
+                match op {
+                    InstanceOperation::Call => {
+                        // Fall through to the normal lowering below.
+                    }
+                    InstanceOperation::SizeOf { size } => {
+                        return Some(Operand::Value(
+                            self.ctx.i64_type().const_int(size, false).into(),
+                        ));
+                    }
+                    InstanceOperation::Transmute => {
+                        debug_assert_eq!(
+                            args.len(),
+                            1,
+                            "ox_transmute takes exactly one argument"
+                        );
+                        let src_ty = self.mono.instances[inst_id].params[0];
+                        let dst_ty = self.mono.instances[inst_id].ret;
+                        let arg_op = self.emit_expr(fx, args[0])?;
+                        return self.emit_transmute(fx, arg_op, src_ty, dst_ty);
+                    }
+                }
+
                 let inst = &self.mono.instances[inst_id];
                 (
-                    self.inst_decls[inst_id],
+                    self.inst_decls[inst_id].expect(
+                        "Call-operation instance must have an LLVM declaration: \
+                         intrinsic instances are filtered to early-return above; \
+                         everything reaching here was declared in Pass 1 Pass B",
+                    ),
                     inst.params.len(),
                     inst.ret,
                     self.hir.fns[inst.fid].is_variadic,
@@ -1721,6 +1790,141 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 .left()
                 .expect("non-void call produced no value"),
         ))
+    }
+
+    // ---------- intrinsics ----------
+
+    /// `ox_transmute<Src, Dst>(x)` — bit-copy reinterpret. Size equality
+    /// is enforced by the per-instance E0276 check at mono time, so
+    /// codegen trusts it and doesn't recheck. Dispatches structurally on
+    /// `(Src kind, Dst kind)` per spec/17_LAYOUT.md §Codegen:
+    ///
+    /// | (Src, Dst)                  | LLVM op                      |
+    /// |-----------------------------|------------------------------|
+    /// | (Prim, Prim) same width     | bitcast (no-op for same int) |
+    /// | (Ptr, Ptr)                  | no-op (LLVM ptr is opaque)   |
+    /// | (Ptr, Prim) ptr-width int   | ptrtoint                     |
+    /// | (Prim, Ptr) ptr-width int   | inttoptr                     |
+    /// | all other size-equal pairs  | alloca + store + load        |
+    ///
+    /// The fallback uses an alloca sized for `Src` (which equals `Dst`
+    /// in size by E0276), with alignment = max(align(Src), align(Dst))
+    /// to keep both the store and the load aligned. Spec is silent on
+    /// which side's alignment to use; max is the safe default. The
+    /// alloca lands in the fn's dedicated `allocas:` entry block via
+    /// `alloca_in_entry` — placing it inline at the call site would
+    /// hide the slot from `mem2reg` and `SROA` and bloat `-O0` IR.
+    fn emit_transmute(
+        &mut self,
+        fx: &FnCodegenContext<'ctx>,
+        arg_op: Operand<'ctx>,
+        src_ty: TyId,
+        dst_ty: TyId,
+    ) -> Option<Operand<'ctx>> {
+        // Identity (Src == Dst): no-op. The load_value below would be
+        // a no-op anyway, but skipping it preserves the input shape
+        // (Place stays Place, etc.).
+        if src_ty == dst_ty {
+            return Some(arg_op);
+        }
+
+        let src_kind = self.typeck_results.tys().kind(src_ty).clone();
+        let dst_kind = self.typeck_results.tys().kind(dst_ty).clone();
+
+        // (Ptr, Ptr) — LLVM `ptr` is opaque; mutability/pointee
+        // information lives in the Oxide type system only. Just thread
+        // the operand through without touching the LLVM value.
+        if matches!(&src_kind, TyKind::Ptr(..)) && matches!(&dst_kind, TyKind::Ptr(..)) {
+            return Some(arg_op);
+        }
+
+        // For everything below we need the SSA-form input value.
+        let src_val = self.load_value(arg_op, src_ty, "transmute.in");
+
+        // (Prim, Prim) same width — emit `bitcast`. LLVM allows bitcast
+        // between same-width int types and is a no-op at the IR level
+        // when the source and destination LLVM types coincide
+        // (e.g., u32→i32 both lower to LLVM `i32`). Keeping the explicit
+        // bitcast preserves IR shape uniformity.
+        if let (TyKind::Prim(sp), TyKind::Prim(dp)) = (&src_kind, &dst_kind) {
+            if prim_bit_width(*sp) == prim_bit_width(*dp) {
+                let dst_ll = lower_prim(self.ctx, *dp);
+                let result = self
+                    .builder
+                    .build_bit_cast(src_val.into_int_value(), dst_ll, "transmute.bc")
+                    .unwrap();
+                return Some(Operand::Value(result));
+            }
+            // Same-Prim with different widths shouldn't reach codegen —
+            // mono's E0276 already rejected it. Fall through to the
+            // alloca fallback for defense-in-depth.
+        }
+
+        // (Ptr, Prim) ptr-width int — emit `ptrtoint`. Only ptr-width
+        // primitives are valid here (8 bytes on supported targets);
+        // E0276 enforces this at mono time.
+        if let (TyKind::Ptr(..), TyKind::Prim(dp)) = (&src_kind, &dst_kind) {
+            if is_ptr_width_int(*dp) {
+                let dst_ll = lower_prim(self.ctx, *dp);
+                let result = self
+                    .builder
+                    .build_ptr_to_int(src_val.into_pointer_value(), dst_ll, "transmute.p2i")
+                    .unwrap();
+                return Some(Operand::Value(result.into()));
+            }
+        }
+        if let (TyKind::Prim(sp), TyKind::Ptr(..)) = (&src_kind, &dst_kind) {
+            if is_ptr_width_int(*sp) {
+                let dst_ll = self.ctx.ptr_type(inkwell::AddressSpace::default());
+                let result = self
+                    .builder
+                    .build_int_to_ptr(src_val.into_int_value(), dst_ll, "transmute.i2p")
+                    .unwrap();
+                return Some(Operand::Value(result.into()));
+            }
+        }
+
+        // Fallback: alloca + store + load. Handles aggregate↔aggregate,
+        // aggregate↔primitive, aggregate↔array, and any other
+        // size-equal pair the table above doesn't catch. LLVM IR is
+        // type-erased on memory, so loading a different LLVM type from
+        // the same pointer is sound as long as the byte count fits the
+        // alloca — which mono's E0276 has already ensured.
+        //
+        // The alloca goes in the fn's entry block via `alloca_in_entry`
+        // so `mem2reg` / `SROA` see it as a static-shape stack slot.
+        // The store/load stay at the current insertion point (the call
+        // site).
+        //
+        // Alignment is set on all three of {alloca, store, load} to
+        // `max(align(Src), align(Dst))`. inkwell's defaults pick the
+        // *operand-type's* natural alignment, which is correct but
+        // pessimistic — e.g. `load [u8; 8], align 1` from a 4-byte-
+        // aligned slot would force LLVM to byte-wise IO when the slot
+        // is actually 4-byte aligned. Bumping store/load to the slot's
+        // alignment lets LLVM widen ops to whatever the alignment
+        // permits.
+        let src_ll = lower_ty(self.ctx, self.typeck_results, &mut self.adt_ll, src_ty);
+        let dst_ll = lower_ty(self.ctx, self.typeck_results, &mut self.adt_ll, dst_ty);
+        let max_align = layout::align_of(self.typeck_results, src_ty)
+            .unwrap_or(1)
+            .max(layout::align_of(self.typeck_results, dst_ty).unwrap_or(1))
+            as u32;
+
+        let slot = self.alloca_in_entry(fx, src_ll, "transmute.slot");
+        if let Some(inst) = slot.as_instruction() {
+            inst.set_alignment(max_align).ok();
+        }
+        let store = self.builder.build_store(slot, src_val).unwrap();
+        store.set_alignment(max_align).ok();
+        let load = self
+            .builder
+            .build_load(dst_ll, slot, "transmute.out")
+            .unwrap();
+        if let Some(inst) = load.as_instruction_value() {
+            inst.set_alignment(max_align).ok();
+        }
+        Some(Operand::Value(load))
     }
 
     /// C default argument promotion for variadic args. C11 §6.5.2.2 ¶7
