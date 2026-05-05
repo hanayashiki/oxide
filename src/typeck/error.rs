@@ -3,19 +3,22 @@ use crate::reporter::Span;
 
 use super::ty::TyId;
 
-/// Discriminator on `Obligation::Integer` (and the `NonIntegerOperand`
+/// Discriminator on `Obligation::Primitive` (and the `NonIntegerOperand`
 /// variant below) so the discharge / renderer can produce help text
-/// appropriate to the syntactic form that pushed the obligation. See
-/// spec/05_TYPE_CHECKER.md §Obligations.
+/// appropriate to the syntactic form that pushed the obligation. The
+/// site also determines *which* primitives are admitted at discharge:
+/// `Bin(Eq | Ne)` accepts integer or `bool`; every other site is
+/// integer-only. See spec/05_TYPE_CHECKER.md §Obligations.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum IntegerSite {
+pub enum PrimitiveSite {
     /// Binary op except `And`/`Or` (logical, covered by `equate(_, bool)`).
-    /// Includes arith, bitwise, cmp, and shift.
+    /// Includes arith, bitwise, cmp, and shift. The `Eq` / `Ne` arms also
+    /// admit `bool` operands at discharge; the other arms are integer-only.
     Bin(BinOp),
-    /// Unary `-x` or `~x`. (`!x` is bool and uses equate.)
+    /// Unary `-x` or `~x`. (`!x` is bool and uses equate.) Integer-only.
     Un(UnOp),
     /// Compound assignment except plain `Eq`. Covers `+=`, `-=`,
-    /// `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`.
+    /// `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`. Integer-only.
     Assign(AssignOp),
 }
 
@@ -219,10 +222,13 @@ pub enum TypeError {
     /// op-aware help text. The cmp-on-Ptr case is split out into
     /// `PointerComparison` (E0279) so its actionable
     /// "use `ox_ptr_eq`" help is contiguous with the variant.
-    /// `found` is fully resolved at emission. See
+    /// `found` is fully resolved at emission. Note: `Bin(Eq | Ne)` on
+    /// `bool` is *accepted* at discharge (see `Obligation::Primitive`),
+    /// so this variant only fires at integer-required sites — the
+    /// existing message text and code remain accurate. See
     /// spec/05_TYPE_CHECKER.md §Obligations. E0280.
     NonIntegerOperand {
-        site: IntegerSite,
+        site: PrimitiveSite,
         found: TyId,
         span: Span,
     },

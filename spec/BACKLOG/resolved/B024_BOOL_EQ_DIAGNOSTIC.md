@@ -100,3 +100,48 @@ Strictly worse than A but a cheap mitigation if the rule survives.
 - Comparison operators (`<`, `<=`, `>`, `>=`) on bool. Genuinely
   meaningless in v0; rejection is fine. This issue is about
   equality only.
+
+## Resolution
+
+Landed Option A — `==` / `!=` on bool now typecheck. Discharge of
+the operand obligation gates on the *site*: `Bin(Eq | Ne)` admits
+integer or `bool`; every other site (arith / bitwise / shift binary,
+unary, compound assign) stays integer-only. Codegen was untouched —
+`build_int_compare` with `IntPredicate::EQ` / `NE` lowers `i1`
+operands to `icmp eq i1` directly.
+
+Bundled the rename the obligation/site asked for: `IntegerSite` →
+`PrimitiveSite`, `Obligation::Integer` → `Obligation::Primitive`,
+`discharge_integer` → `discharge_primitive`. The error variant
+`TypeError::NonIntegerOperand` (E0280) keeps its name and code —
+it now only fires at integer-required sites, so the message text
+("expected an integer operand") is still accurate at every emit
+site.
+
+Help text for the `(Bin(Eq | Ne), Bool)` arm is gone (admitted at
+discharge, never reaches the renderer). Ordering ops on bool
+(`<`/`<=`/`>`/`>=`) get a new dedicated hint:
+
+> ordering comparisons aren't defined on `bool`; branch on the
+> value or convert via `b as i32` if you really need an order
+
+Note the original report's claim that `bool as i32` is rejected
+per spec/12 was wrong — `BoolToInt` is admitted at
+`src/typeck/check.rs:126,160` and exercised by
+`tests/snapshots/typeck/acceptance_cast_bool_to_int.snap`. The
+original help text was awkward (`b as i32` is a roundabout way to
+spell equality), not contradictory.
+
+### Files touched
+
+- `src/typeck/error.rs` — `IntegerSite` → `PrimitiveSite`.
+- `src/typeck/check/obligation.rs` — `Obligation::Integer` → `Primitive`.
+- `src/typeck/check.rs` — push sites + `discharge_primitive` site-gate.
+- `src/typeck/mod.rs` — re-export rename.
+- `src/reporter/from_typeck.rs` — help-text split + `is_cmp` removal.
+- `spec/05_TYPE_CHECKER.md`, `spec/07_POINTER.md` — terminology.
+- `tests/snapshots/typeck/` — `error_cmp_bool` retired,
+  `acceptance_bool_eq` / `acceptance_bool_ne` /
+  `error_cmp_bool_lt` added.
+- `tests/snapshots/codegen/` — `bool_eq_uses_icmp_eq_i1` added to
+  prove the zero-codegen-change claim.

@@ -8,7 +8,7 @@ pub mod layout;
 mod ty;
 
 pub use check::{CastKind, TypeckResults, cast_kind, check};
-pub use error::{IntegerSite, MutateOp, ParamOrReturn, SizedPos, TypeError};
+pub use error::{MutateOp, ParamOrReturn, PrimitiveSite, SizedPos, TypeError};
 pub use layout::{align_of, size_of};
 pub use ty::{
     AdtDef, AdtId, FieldDef, FnSig, InferId, ParamId, PrimTy, TyArena, TyId, TyKind, VariantDef,

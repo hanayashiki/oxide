@@ -1,0 +1,15 @@
+== diagnostics ==
+[E0280] Error: expected an integer operand, found `bool`
+   ╭─[ error_cmp_bool_lt.ox:2:5 ]
+   │
+ 2 │     a < b
+   │     ──┬──  
+   │       ╰──── expected integer here
+   │ 
+   │ Help: ordering comparisons aren't defined on `bool`; branch on the value or convert via `b as i32` if you really need an order
+───╯
+== types ==
+Fn[0] f(a[Local(0)]: bool, b[Local(1)]: bool) -> bool
+  HExprId(0) : bool
+  HExprId(1) : bool
+  HExprId(2) : bool

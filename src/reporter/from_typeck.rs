@@ -2,7 +2,7 @@ use super::diagnostic::{Diagnostic, Label};
 use super::source_map::FileId;
 use crate::parser::ast::{BinOp, Mutability, UnOp};
 use crate::typeck::{
-    IntegerSite, MutateOp, ParamOrReturn, PrimTy, SizedPos, TyArena, TyId, TyKind, TypeError,
+    MutateOp, ParamOrReturn, PrimTy, PrimitiveSite, SizedPos, TyArena, TyId, TyKind, TypeError,
 };
 
 /// Map a typeck error to a structured diagnostic. Needs the `TyArena` to
@@ -396,25 +396,35 @@ fn invalid_cast_help(tys: &TyArena, src: TyId, dst: TyId) -> &'static str {
 }
 
 /// Help text for E0280 `NonIntegerOperand`. Renders site- and
-/// kind-aware advice. See spec/05_TYPE_CHECKER.md §Obligations.
-fn non_integer_help(site: IntegerSite, found_kind: &TyKind) -> (&'static str, &'static str) {
+/// kind-aware advice. `Bin(Eq | Ne)` on `bool` is admitted at discharge
+/// (see `discharge_primitive`), so this function is never called for
+/// that combination — only ordering ops on bool need a hint here.
+/// See spec/05_TYPE_CHECKER.md §Obligations.
+fn non_integer_help(site: PrimitiveSite, found_kind: &TyKind) -> (&'static str, &'static str) {
     let label = "expected integer here";
     let help = match (site, found_kind) {
         // Bool — recommend logical-op replacements per op family.
-        (IntegerSite::Bin(op), TyKind::Prim(PrimTy::Bool)) if is_cmp(op) => {
-            "compare booleans with `&&` / `||` / `!`, or convert via `b as i32`"
+        // `Eq` / `Ne` on bool no longer reach this function (admitted
+        // at discharge); the ordering ops still error and get a
+        // dedicated hint below.
+        (
+            PrimitiveSite::Bin(BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge),
+            TyKind::Prim(PrimTy::Bool),
+        ) => {
+            "ordering comparisons aren't defined on `bool`; \
+             branch on the value or convert via `b as i32` if you really need an order"
         }
-        (IntegerSite::Bin(_), TyKind::Prim(PrimTy::Bool)) => {
+        (PrimitiveSite::Bin(_), TyKind::Prim(PrimTy::Bool)) => {
             "boolean arithmetic / bitwise / shift isn't defined; \
              use `&&`, `||`, `!` for logical combinations"
         }
-        (IntegerSite::Un(UnOp::Neg), TyKind::Prim(PrimTy::Bool)) => {
+        (PrimitiveSite::Un(UnOp::Neg), TyKind::Prim(PrimTy::Bool)) => {
             "negation is integer-only; flip booleans with `!`"
         }
-        (IntegerSite::Un(UnOp::BitNot), TyKind::Prim(PrimTy::Bool)) => {
+        (PrimitiveSite::Un(UnOp::BitNot), TyKind::Prim(PrimTy::Bool)) => {
             "bitwise NOT is integer-only; logical NOT is `!`"
         }
-        (IntegerSite::Assign(_), TyKind::Prim(PrimTy::Bool)) => {
+        (PrimitiveSite::Assign(_), TyKind::Prim(PrimTy::Bool)) => {
             "compound assignment is integer-only; booleans use `&&`, `||`, `!`"
         }
 
@@ -429,11 +439,4 @@ fn non_integer_help(site: IntegerSite, found_kind: &TyKind) -> (&'static str, &'
               (`i8`..`i64`, `u8`..`u64`, `usize`, `isize`)",
     };
     (label, help)
-}
-
-fn is_cmp(op: BinOp) -> bool {
-    matches!(
-        op,
-        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
-    )
 }

@@ -38,7 +38,7 @@ use crate::reporter::Span;
 
 use self::obligation::Obligation;
 use self::unify::MismatchCtx;
-use super::error::{IntegerSite, MutateOp, SizedPos, TypeError};
+use super::error::{MutateOp, PrimitiveSite, SizedPos, TypeError};
 use super::ty::{
     AdtDef, AdtId, FnSig, InferId, ParamId, PrimTy, TyArena, TyId, TyKind, subst_from,
 };
@@ -465,12 +465,12 @@ impl<'hir> Checker<'hir> {
                 };
                 self.check_variadic_promotable(t, span);
             }
-            Obligation::Integer { site, ty, span } => {
+            Obligation::Primitive { site, ty, span } => {
                 let t = match inf {
                     Some(i) => self.resolve_fully(i, ty),
                     None => ty,
                 };
-                self.discharge_integer(site, t, span);
+                self.discharge_primitive(site, t, span);
             }
             Obligation::Cast { src, dst, span } => {
                 let s = match inf {
@@ -493,15 +493,24 @@ impl<'hir> Checker<'hir> {
     }
 
     /// Per spec/05_TYPE_CHECKER.md §Obligations: every operand position
-    /// the codegen assumes is integer must resolve to an integer
-    /// `Prim`. Pointer cmp is the actionable case (E0279
-    /// `PointerComparison` → `ox_ptr_eq`); everything else is the
-    /// generic E0280 `NonIntegerOperand`. Pure observation — never
+    /// whose codegen assumes a primitive type must resolve to one of
+    /// the primitives admitted at the site. The admitted set is
+    /// site-dependent: `Bin(Eq | Ne)` accepts integer or `bool`; every
+    /// other site is integer-only. Pointer cmp is the actionable case
+    /// (E0279 `PointerComparison` → `ox_ptr_eq`); everything else is
+    /// the generic E0280 `NonIntegerOperand`. Pure observation — never
     /// binds, never unifies.
-    fn discharge_integer(&mut self, site: IntegerSite, ty: TyId, span: Span) {
+    fn discharge_primitive(&mut self, site: PrimitiveSite, ty: TyId, span: Span) {
+        // `==` / `!=` admit `bool` in addition to integer; every other
+        // site is integer-only (per spec/05 §Obligations).
+        let allow_bool = matches!(site, PrimitiveSite::Bin(BinOp::Eq | BinOp::Ne));
         match self.tys.kind(ty) {
             TyKind::Prim(p) if p.is_integer() => {
-                // ok — the only success case.
+                // ok — integer at any primitive site.
+            }
+            TyKind::Prim(PrimTy::Bool) if allow_bool => {
+                // ok — bool at `==` / `!=`. Codegen lowers to
+                // `icmp eq/ne i1`; LLVM has no special case.
             }
             TyKind::Error => {
                 // poison absorbs.
@@ -512,8 +521,10 @@ impl<'hir> Checker<'hir> {
                 // double-report.
             }
             TyKind::Ptr(..) => {
-                // Pointer cmp is the actionable special case.
-                if let IntegerSite::Bin(
+                // Pointer cmp is the actionable special case — fires
+                // for all six cmp ops regardless of the bool widening
+                // above (Bool relaxation is in the Prim arm only).
+                if let PrimitiveSite::Bin(
                     op @ (BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge),
                 ) = site
                 {
@@ -527,9 +538,9 @@ impl<'hir> Checker<'hir> {
                     });
                 }
             }
-            // Bool, Adt, Fn, Array, Unit, Never, Param — all the
-            // "wrong shape" cases route through NonIntegerOperand
-            // with site-aware help in the renderer.
+            // Bool (at integer-only sites), Adt, Fn, Array, Unit,
+            // Never, Param — all the "wrong shape" cases route through
+            // NonIntegerOperand with site-aware help in the renderer.
             _ => {
                 self.errors.push(TypeError::NonIntegerOperand {
                     site,
@@ -1287,13 +1298,14 @@ impl<'hir> Checker<'hir> {
         match op {
             // `-x` / `~x` require an integer operand. The eager rule
             // returns `t` regardless so cascades stay typed; the
-            // `Integer` obligation runs at finalize against the
-            // resolved type and emits E0280 / E0279 as appropriate.
+            // `Primitive` obligation runs at finalize against the
+            // resolved type and emits E0280 / E0279 as appropriate
+            // (this site is integer-only — Bool is rejected).
             // See spec/05_TYPE_CHECKER.md §Obligations.
             UnOp::Neg | UnOp::BitNot => {
                 let span = self.hir.exprs[inner].span.clone();
-                inf.obligations.push(Obligation::Integer {
-                    site: IntegerSite::Un(op),
+                inf.obligations.push(Obligation::Primitive {
+                    site: PrimitiveSite::Un(op),
                     ty: t,
                     span,
                 });
@@ -1397,9 +1409,9 @@ impl<'hir> Checker<'hir> {
                 unify::equate(self, inf, rt, bool_ty, rhs_span);
                 bool_ty
             }
-            // Arithmetic / bitwise: equate sides; one Integer
-            // obligation on the equated type covers both operands.
-            // Result = the equated type.
+            // Arithmetic / bitwise: equate sides; one Primitive
+            // obligation on the equated type covers both operands
+            // (integer-only at this site). Result = the equated type.
             BinOp::Add
             | BinOp::Sub
             | BinOp::Mul
@@ -1409,20 +1421,22 @@ impl<'hir> Checker<'hir> {
             | BinOp::BitOr
             | BinOp::BitXor => {
                 unify::equate(self, inf, lt, rt, span.clone());
-                inf.obligations.push(Obligation::Integer {
-                    site: IntegerSite::Bin(op),
+                inf.obligations.push(Obligation::Primitive {
+                    site: PrimitiveSite::Bin(op),
                     ty: lt,
                     span: span.clone(),
                 });
                 lt
             }
-            // Comparisons: equate sides; one Integer obligation on
-            // the equated type. Result = bool. Pointer comparison
-            // surfaces E0279 (use ox_ptr_eq) at discharge.
+            // Comparisons: equate sides; one Primitive obligation on
+            // the equated type. Result = bool. Discharge accepts
+            // integer or `bool` for `Eq` / `Ne`; integer only for
+            // `Lt` / `Le` / `Gt` / `Ge`. Pointer comparison surfaces
+            // E0279 (use `ox_ptr_eq`) at discharge.
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 unify::equate(self, inf, lt, rt, span.clone());
-                inf.obligations.push(Obligation::Integer {
-                    site: IntegerSite::Bin(op),
+                inf.obligations.push(Obligation::Primitive {
+                    site: PrimitiveSite::Bin(op),
                     ty: lt,
                     span: span.clone(),
                 });
@@ -1430,17 +1444,17 @@ impl<'hir> Checker<'hir> {
             }
             // Shifts: NO equate — Rust permits `1u32 << 2u8`, and
             // codegen's `coerce_shift_amt` widens at emit time.
-            // Each side gets its own Integer obligation so the
-            // diagnostic points at the offending operand.
-            // Result = `lt`.
+            // Each side gets its own Primitive obligation so the
+            // diagnostic points at the offending operand
+            // (integer-only at this site). Result = `lt`.
             BinOp::Shl | BinOp::Shr => {
-                inf.obligations.push(Obligation::Integer {
-                    site: IntegerSite::Bin(op),
+                inf.obligations.push(Obligation::Primitive {
+                    site: PrimitiveSite::Bin(op),
                     ty: lt,
                     span: lhs_span,
                 });
-                inf.obligations.push(Obligation::Integer {
-                    site: IntegerSite::Bin(op),
+                inf.obligations.push(Obligation::Primitive {
+                    site: PrimitiveSite::Bin(op),
                     ty: rt,
                     span: rhs_span,
                 });
@@ -1463,13 +1477,15 @@ impl<'hir> Checker<'hir> {
         let rhs_span = self.hir.exprs[rhs].span.clone();
 
         // Per spec/05_TYPE_CHECKER.md §"Per-expression rules":
-        //   - Plain `=`: subtype(rhs, target). No Integer obligation —
+        //   - Plain `=`: subtype(rhs, target). No Primitive obligation —
         //     plain assignment works for any type.
-        //   - Compound arith/bitwise: subtype + one Integer obligation
+        //   - Compound arith/bitwise: subtype + one Primitive obligation
         //     on `t` (subtype ties rhs → no second obligation needed).
+        //     Integer-only at this site.
         //   - Compound shift: NO subtype between sides (Rust permits
         //     mixed widths; codegen's `coerce_shift_amt` handles
-        //     widening). Two Integer obligations, one per side.
+        //     widening). Two Primitive obligations, one per side.
+        //     Integer-only at this site.
         match op {
             AssignOp::Eq => {
                 unify::subtype(self, inf, r, t, span.clone());
@@ -1483,20 +1499,20 @@ impl<'hir> Checker<'hir> {
             | AssignOp::BitOr
             | AssignOp::BitXor => {
                 unify::subtype(self, inf, r, t, span.clone());
-                inf.obligations.push(Obligation::Integer {
-                    site: IntegerSite::Assign(op),
+                inf.obligations.push(Obligation::Primitive {
+                    site: PrimitiveSite::Assign(op),
                     ty: t,
                     span: span.clone(),
                 });
             }
             AssignOp::Shl | AssignOp::Shr => {
-                inf.obligations.push(Obligation::Integer {
-                    site: IntegerSite::Assign(op),
+                inf.obligations.push(Obligation::Primitive {
+                    site: PrimitiveSite::Assign(op),
                     ty: t,
                     span: target_span.clone(),
                 });
-                inf.obligations.push(Obligation::Integer {
-                    site: IntegerSite::Assign(op),
+                inf.obligations.push(Obligation::Primitive {
+                    site: PrimitiveSite::Assign(op),
                     ty: r,
                     span: rhs_span,
                 });

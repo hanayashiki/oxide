@@ -141,16 +141,16 @@ responsible for unifying with whatever they expected.
 | `Local(lid)` | `local_tys[lid]` (set in Phase 1 for params; in `infer_let` for bindings) |
 | `Fn(fid)` | intern `Fn(fn_sigs[fid].params, fn_sigs[fid].ret)` |
 | `Unresolved(_)` | `Error` (already errored at HIR) |
-| `Unary { Neg, e }` | type of `e`; enqueue `Obligation::Integer { site: Un(Neg), ty, span }` for the operand type |
-| `Unary { Not, e }` | `equate(e, bool)`; result `bool`. **No Integer obligation** |
-| `Unary { BitNot, e }` | type of `e`; enqueue `Obligation::Integer { site: Un(BitNot), ty, span }` for the operand type |
-| `Binary { arith/bitwise, l, r }` where op ∈ {Add, Sub, Mul, Div, Rem, BitAnd, BitOr, BitXor} | `equate(l, r)`; enqueue `Obligation::Integer { site: Bin(op), ty, span }` for the equated type; result = equated type |
-| `Binary { cmp, l, r }` where op ∈ {Eq, Ne, Lt, Le, Gt, Ge} | `equate(l, r)`; enqueue `Obligation::Integer { site: Bin(op), ty, span }` for the equated type; result = `bool` |
-| `Binary { logical, l, r }` where op ∈ {And, Or} | `equate(l, bool)` + `equate(r, bool)`; result = `bool`. **No Integer obligation** — Bool is the required type here |
-| `Binary { shift, l, r }` where op ∈ {Shl, Shr} | **No `equate`** — shift amount may be a different integer width. Enqueue *two* `Obligation::Integer { site: Bin(op), .. }` entries (one per operand at its own span). Result = `lt` |
-| `Assign { Eq, target, rhs }` | `subtype(rhs, target)` (directional — pointer-mut subtype applies); mut check on target (E0263 if `Const`); result = `Unit`. **No Integer obligation** — plain `=` works for any type |
-| `Assign { compound arith/bitwise, target, rhs }` where op ∈ {Add, Sub, Mul, Div, Rem, BitAnd, BitOr, BitXor} | `subtype(rhs, target)`; mut check; enqueue `Obligation::Integer { site: Assign(op), ty: target_ty, span }`; result = `Unit` |
-| `Assign { compound shift, target, rhs }` where op ∈ {Shl, Shr} | **No subtype between sides** (Rust permits mixed widths); mut check on target; enqueue *two* `Obligation::Integer { site: Assign(op), .. }` entries (target_ty at target span, rhs_ty at rhs span); result = `Unit` |
+| `Unary { Neg, e }` | type of `e`; enqueue `Obligation::Primitive { site: Un(Neg), ty, span }` for the operand type (integer-only at this site) |
+| `Unary { Not, e }` | `equate(e, bool)`; result `bool`. **No Primitive obligation** |
+| `Unary { BitNot, e }` | type of `e`; enqueue `Obligation::Primitive { site: Un(BitNot), ty, span }` for the operand type (integer-only at this site) |
+| `Binary { arith/bitwise, l, r }` where op ∈ {Add, Sub, Mul, Div, Rem, BitAnd, BitOr, BitXor} | `equate(l, r)`; enqueue `Obligation::Primitive { site: Bin(op), ty, span }` for the equated type (integer-only at this site); result = equated type |
+| `Binary { cmp, l, r }` where op ∈ {Eq, Ne, Lt, Le, Gt, Ge} | `equate(l, r)`; enqueue `Obligation::Primitive { site: Bin(op), ty, span }` for the equated type; result = `bool`. **Discharge accepts integer or `bool` for `Eq`/`Ne`; integer only for `Lt`/`Le`/`Gt`/`Ge`.** |
+| `Binary { logical, l, r }` where op ∈ {And, Or} | `equate(l, bool)` + `equate(r, bool)`; result = `bool`. **No Primitive obligation** — Bool is the required type here |
+| `Binary { shift, l, r }` where op ∈ {Shl, Shr} | **No `equate`** — shift amount may be a different integer width. Enqueue *two* `Obligation::Primitive { site: Bin(op), .. }` entries (one per operand at its own span; integer-only at this site). Result = `lt` |
+| `Assign { Eq, target, rhs }` | `subtype(rhs, target)` (directional — pointer-mut subtype applies); mut check on target (E0263 if `Const`); result = `Unit`. **No Primitive obligation** — plain `=` works for any type |
+| `Assign { compound arith/bitwise, target, rhs }` where op ∈ {Add, Sub, Mul, Div, Rem, BitAnd, BitOr, BitXor} | `subtype(rhs, target)`; mut check; enqueue `Obligation::Primitive { site: Assign(op), ty: target_ty, span }` (integer-only at this site); result = `Unit` |
+| `Assign { compound shift, target, rhs }` where op ∈ {Shl, Shr} | **No subtype between sides** (Rust permits mixed widths); mut check on target; enqueue *two* `Obligation::Primitive { site: Assign(op), .. }` entries (target_ty at target span, rhs_ty at rhs span; integer-only at this site); result = `Unit` |
 | `Call { callee, args }` | callee must be `Fn(...)`; arity + per-arg `subtype` check; result = sig ret |
 | `Field { base, name }` | recurse on `base`; if its type is `Adt(aid)`, look up `name` → field type. `Adt` with no such field → E0261 `NoFieldOnAdt`. Non-ADT base → E0262 `TypeNotFieldable`. See spec/08_ADT.md. |
 | `Index { base, index }` | `Error`; emit `UnsupportedFeature` (E0255). Real typing rule (auto-deref through `Ptr<Array>`) is deferred per spec/09_ARRAY.md "Phase A Step 4/5". |
@@ -285,29 +285,35 @@ Three obligation kinds today:
   Enqueued during HirTy resolution at decl phase
   (param/return/field) and at `infer_let` (let-binding) /
   `Unary { Deref, _ }` (deref).
-- **`Integer { site: IntegerSite, ty: TyId, span }`** — every
-  operand position the codegen assumes is integer must resolve to
-  an integer `Prim` here. The `site` discriminator records what
+- **`Primitive { site: PrimitiveSite, ty: TyId, span }`** — every
+  operand position whose codegen assumes a primitive type must
+  resolve to a primitive admitted at the site. The admitted set is
+  *site-dependent*: `Bin(Eq | Ne)` accepts integer or `bool`; every
+  other site is integer-only. The `site` discriminator records what
   kind of expression enqueued the obligation, so the discharge can
   render help text appropriate to the syntactic form:
 
   ```rust
-  pub(super) enum IntegerSite {
+  pub(super) enum PrimitiveSite {
       /// Binary op except `And`/`Or` (covered by `equate(_, bool)`).
+      /// `Eq` / `Ne` admit `bool`; every other binop is integer-only.
       Bin(BinOp),
-      /// Unary `-x` or `~x`. (`!x` is bool and uses equate.)
+      /// Unary `-x` or `~x`. (`!x` is bool and uses equate.) Integer-only.
       Un(UnOp),
-      /// Compound assignment except plain `Eq`.
+      /// Compound assignment except plain `Eq`. Integer-only.
       Assign(AssignOp),
   }
   ```
 
   Discharge dispatches on `resolved_kind(ty)`:
-  - `Prim(p)` with `p.is_integer()` (i.e. not Bool) → ok.
-  - `Prim(Bool)`, `Adt(_)`, `Fn(..)`, `Array(..)`, `Unit`, `Never`,
-    `Param(_)` → emit `NonIntegerOperand { site, found: ty, span }`
-    (E0280, new). The reporter renders site-aware help text — e.g.
-    cmp on Bool suggests `&&`/`||`/`!`; arith on Bool says
+  - `Prim(p)` with `p.is_integer()` → ok at every site.
+  - `Prim(Bool)` with `site == Bin(Eq | Ne)` → ok (codegen lowers to
+    `icmp eq/ne i1`).
+  - `Prim(Bool)` (at any other site), `Adt(_)`, `Fn(..)`, `Array(..)`,
+    `Unit`, `Never`, `Param(_)` → emit
+    `NonIntegerOperand { site, found: ty, span }` (E0280). The
+    reporter renders site-aware help text — e.g. ordering cmp on
+    Bool suggests `as i32` or branching; arith on Bool says
     "boolean arithmetic isn't defined"; unary `-` on a struct says
     "negation is integer-only".
   - `Ptr(..)` →
@@ -404,15 +410,15 @@ pub enum TypeError {
     // E0277 — LayoutUnknown (deferred; see spec/17_LAYOUT.md)
     // E0278 — DivergentMonomorphization (mono; see spec/16_GENERIC.md)
     PointerComparison         { op: BinOp, span: Span },                                  // E0279 — use ox_ptr_eq
-    NonIntegerOperand         { site: IntegerSite, found: TyId, span: Span },             // E0280 — generic "expected integer" for binop/unary/compound-assign positions
+    NonIntegerOperand         { site: PrimitiveSite, found: TyId, span: Span },           // E0280 — generic "expected integer" for binop/unary/compound-assign positions (only fires at integer-only sites; `Bin(Eq | Ne)` admits bool at discharge)
 }
 ```
 
 Code namespace: typeck owns **E0250–E0299**. Mono carves out
 E0276 / E0277 / E0278 (declared inline above for cross-spec
-discoverability). `BinOp`, `UnOp`, `AssignOp`, and `IntegerSite`
+discoverability). `BinOp`, `UnOp`, `AssignOp`, and `PrimitiveSite`
 are re-exported from typeck for the error variants that carry
-them; `IntegerSite` lives in `check::obligation`.
+them; `PrimitiveSite` lives in `check::obligation`.
 
 `from_typeck_error(err, file, &TyArena)` lives in
 `src/reporter/from_typeck.rs` and needs the arena to render type names

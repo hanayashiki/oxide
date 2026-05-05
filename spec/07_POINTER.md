@@ -434,7 +434,7 @@ let x: i32 = null;   // ERROR: cannot unify *mut α with i32
   runtime UB.
 - **Pointer ordering** (`p < q`, `p <= q`, `p > q`, `p >= q`).
   Undefined for v0 pointers (no provenance model). Reject in
-  typeck per spec/05 `Obligation::Integer` (cmp arm → E0279
+  typeck per spec/05 `Obligation::Primitive` (cmp arm → E0279
   `PointerComparison`). Pointer **equality** is supported via
   `ox_ptr_eq` — see §"Pointer equality (`ox_ptr_eq`)" below.
 - **Optional / `Option<*const T>` modeling.** We use raw nullable
@@ -444,7 +444,7 @@ let x: i32 = null;   // ERROR: cannot unify *mut α with i32
 ## Pointer equality (`ox_ptr_eq`)
 
 Direct `==` / `!=` on pointer values is rejected in typeck (E0279
-`PointerComparison`, spec/05 `Obligation::Integer`). The replacement
+`PointerComparison`, spec/05 `Obligation::Primitive`). The replacement
 is `ox_ptr_eq`, modelled on Rust's `core::ptr::eq`. Making the call
 explicit signals intent (the alternative — letting `==` mean
 "address equality" implicitly — looks plausible but invites the

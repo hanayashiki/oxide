@@ -1,0 +1,4 @@
+Module
+  Fn main() -> i32
+    Block
+      tail: Binary(Sub, If(…), Int(1))
