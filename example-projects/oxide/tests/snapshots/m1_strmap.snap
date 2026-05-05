@@ -1,0 +1,14 @@
+empty: len=0 cap=0
+insert new flags: 1 1 1  len=3 cap=16
+get alpha: hit=1 val=1
+get beta: hit=1 val=2
+get gamma: hit=1 val=3
+get delta: hit=0 (out unchanged=0)
+contains beta=1 gamma=1 zeta=0
+after update: was_new=0 v=100 len=3
+after remove beta: removed=1 hit=0 len=2
+remove unknown: 0
+re-insert beta: was_new=1 v=222 len=3
+after 50 inserts: len=53 cap=128
+verify: found=50 sum=1225 (expected 50, 1225)
+after free: cap=0 len=0

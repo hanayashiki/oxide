@@ -1,0 +1,10 @@
+empty: len=0 is_empty=1
+ids: 0 1 2  len=3
+n0 label=100 parent=0 weight=7
+n1 label=200 parent=0 weight=14
+n2 label=300 parent=1 weight=21
+after set id1: label=999 parent=99 weight=42
+after ptr write id2.weight: 12345
+after bulk: len=103
+sample[50]: label=47 weight=47
+after free: len=0

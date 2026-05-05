@@ -1,0 +1,4 @@
+io_print: hi
+io_print_cstr: also hi
+io_print_strbuf: number -42 hex beef
+(eprint paths exercised below; output suppressed)

@@ -1,0 +1,11 @@
+example-projects/oxide/util/vec.ox: fns=16 adts=1 locals=29 exprs=231 errors=16
+example-projects/oxide/util/strbuf.ox: fns=18 adts=1 locals=45 exprs=333 errors=18
+example-projects/oxide/util/strmap.ox: fns=16 adts=2 locals=75 exprs=796 errors=22
+example-projects/oxide/util/arena.ox: fns=9 adts=1 locals=15 exprs=58 errors=10
+example-projects/oxide/util/io.ox: fns=9 adts=0 locals=11 exprs=50 errors=6
+example-projects/oxide/lexer.ox: fns=111 adts=2 locals=111 exprs=2209 errors=19
+example-projects/oxide/ast.ox: fns=83 adts=11 locals=1 exprs=171 errors=15
+example-projects/oxide/parser.ox: fns=47 adts=1 locals=285 exprs=4218 errors=453
+example-projects/oxide/ast_pretty.ox: fns=11 adts=0 locals=88 exprs=2804 errors=348
+example-projects/oxide/hir.ox: fns=65 adts=13 locals=2 exprs=201 errors=19
+example-projects/oxide/hir_lower.ox: fns=43 adts=2 locals=365 exprs=4275 errors=349

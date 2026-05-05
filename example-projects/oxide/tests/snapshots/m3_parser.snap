@@ -1,0 +1,290 @@
+=== hello-world ===
+(fn main () -> i32
+  (block
+    (int 42)
+  ))
+=== import + extern ===
+(import "stdio.ox")
+(extern "C"
+  (fn puts (s: *const [u8]) -> i32 (no-body))
+)
+(fn main () -> i32
+  (block
+    (call
+      (id puts)
+      (str "hi")
+    ) ;
+    (int 0)
+  ))
+=== struct + generic struct ===
+(struct Point
+  x: i32
+  y: i32
+)
+(struct Vec<T>
+  data: *mut [T]
+  len: usize
+)
+=== generic fn + turbofish call ===
+(fn id<T> (x: T) -> T
+  (block
+    (id x)
+  ))
+(fn main () -> i32
+  (block
+    (call::<i32>
+      (id id::<i32>)
+      (int 42)
+    )
+  ))
+=== arithmetic precedence ===
+(fn f () -> i32
+  (block
+    (binary -
+      (binary +
+        (int 1)
+        (binary *
+          (int 2)
+          (int 3)
+        )
+      )
+      (binary %
+        (binary /
+          (int 4)
+          (int 2)
+        )
+        (int 5)
+      )
+    )
+  ))
+=== short-circuit + comparisons ===
+(fn f (a: i32, b: i32) -> bool
+  (block
+    (binary ||
+      (binary &&
+        (binary <
+          (id a)
+          (id b)
+        )
+        (binary !=
+          (binary +
+            (id a)
+            (int 1)
+          )
+          (id b)
+        )
+      )
+      (binary ==
+        (id a)
+        (int 0)
+      )
+    )
+  ))
+=== bitwise + shifts ===
+(fn f (a: u32, b: u32) -> u32
+  (block
+    (binary |
+      (paren
+        (binary &
+          (id a)
+          (id b)
+        )
+      )
+      (binary <<
+        (paren
+          (binary ^
+            (id a)
+            (id b)
+          )
+        )
+        (int 2)
+      )
+    )
+  ))
+=== if/else expression ===
+(fn f (x: i32) -> i32
+  (block
+    (if
+      (cond
+        (binary >
+          (id x)
+          (int 0)
+        )
+      )
+      (block
+        (id x)
+      )
+      (else
+        (if
+          (cond
+            (binary ==
+              (id x)
+              (int 0)
+            )
+          )
+          (block
+            (int 0)
+          )
+          (else
+            (block
+              (unary neg
+                (id x)
+              )
+            )
+          )
+        )
+      )
+    )
+  ))
+=== while + for + loop + break/continue ===
+(fn f () -> i32
+  (block
+    (let mut i: i32
+      (int 0)
+    ) ;
+    (while
+      (binary <
+        (id i)
+        (int 10)
+      )
+      (block
+        (assign =
+          (id i)
+          (binary +
+            (id i)
+            (int 1)
+          )
+        ) ;
+      )
+    )
+    (for
+      (init
+        (let mut j: i32
+          (int 0)
+        )
+      )
+      (cond
+        (binary <
+          (id j)
+          (int 4)
+        )
+      )
+      (update
+        (assign =
+          (id j)
+          (binary +
+            (id j)
+            (int 1)
+          )
+        )
+      )
+      (block
+        (if
+          (cond
+            (binary ==
+              (id j)
+              (int 2)
+            )
+          )
+          (block
+            (continue) ;
+          )
+        )
+      )
+    )
+    (loop
+      (block
+        (break
+          (int 7)
+        ) ;
+      )
+    )
+  ))
+=== address-of, deref, cast ===
+(fn f (p: *mut i32) -> i32
+  (block
+    (assign =
+      (unary deref
+        (id p)
+      )
+      (int 1)
+    ) ;
+    (let q: *const i32
+      (cast *const i32
+        (addr-of mut
+          (unary deref
+            (id p)
+          )
+        )
+      )
+    ) ;
+    (unary deref
+      (id q)
+    )
+  ))
+=== array literal + repeat + index ===
+(fn f () -> i32
+  (block
+    (let a: [i32; 3]
+      (array-lit
+        (int 1)
+        (int 2)
+        (int 3)
+      )
+    ) ;
+    (let b: [u8; 4]
+      (array-rpt
+        (int 0)
+        (int 4)
+      )
+    ) ;
+    (binary +
+      (index
+        (id a)
+        (int 0)
+      )
+      (paren
+        (cast i32
+          (index
+            (id b)
+            (int 1)
+          )
+        )
+      )
+    )
+  ))
+=== struct literal + field ===
+(struct P
+  x: i32
+  y: i32
+)
+(fn f () -> i32
+  (block
+    (let p
+      (struct-lit P
+        (.x
+          (int 1))
+        (.y
+          (int 2))
+      )
+    ) ;
+    (binary +
+      (field .x
+        (id p)
+      )
+      (field .y
+        (id p)
+      )
+    )
+  ))
+=== variadic extern ===
+(extern "C"
+  (fn printf (fmt: *const [u8], ...) -> i32 (no-body))
+)
+=== error: stray token ===
+(fn f () -> i32
+  (block
+    (poison)
+  ))
+(error kind=0 span=16..17)
+(1 parse errors)

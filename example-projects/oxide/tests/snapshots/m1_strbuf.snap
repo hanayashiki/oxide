@@ -1,0 +1,10 @@
+empty: len=0 is_empty=1
+after push_byte hi: len=2
+after push_str: len=9
+after push_cstr: len=10
+contents: hi, world!
+u64 fmt: 0 1 42 18446744073709551615
+i64 fmt: 0 42 -7 9223372036854775807 -9223372036854775808
+hex fmt: 0 ff 1000 ffffffffffffffff
+eq abc=1 eq abd=0 eq abcd=0
+after clear: len=0

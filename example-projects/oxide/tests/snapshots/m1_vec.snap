@@ -1,0 +1,10 @@
+empty: len=0 cap=0
+after 3 pushes: len=3 cap=4
+v[0]=10 v[1]=20 v[2]=30
+after 5 pushes: len=5 cap=8 v[4]=50
+after set v[2]=999: v[2]=999
+popped=50 len=4
+after reserve(100): len=4 cap>=100
+after clear: len=0 is_empty=1
+with_capacity(8): len=0 cap=8
+after free: cap=0

@@ -1,0 +1,12 @@
+example-projects/oxide/util/vec.ox: tcerrs=16 calls=3
+example-projects/oxide/util/strbuf.ox: tcerrs=34 calls=0
+example-projects/oxide/util/strmap.ox: tcerrs=22 calls=8
+example-projects/oxide/util/arena.ox: tcerrs=20 calls=0
+example-projects/oxide/util/io.ox: tcerrs=8 calls=0
+example-projects/oxide/lexer.ox: tcerrs=46 calls=0
+example-projects/oxide/ast.ox: tcerrs=32 calls=0
+example-projects/oxide/parser.ox: tcerrs=1080 calls=0
+example-projects/oxide/ast_pretty.ox: tcerrs=517 calls=0
+example-projects/oxide/hir.ox: tcerrs=45 calls=0
+example-projects/oxide/hir_lower.ox: tcerrs=1168 calls=0
+example-projects/oxide/typeck.ox: tcerrs=591 calls=0

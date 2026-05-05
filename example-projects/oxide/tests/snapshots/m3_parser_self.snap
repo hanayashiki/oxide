@@ -1,0 +1,9 @@
+example-projects/oxide/util/vec.ox: items=20  exprs=228  blocks=28  types=128  errors=0
+example-projects/oxide/util/strbuf.ox: items=24  exprs=324  blocks=33  types=119  errors=0
+example-projects/oxide/util/strmap.ox: items=21  exprs=782  blocks=61  types=240  errors=0
+example-projects/oxide/util/arena.ox: items=11  exprs=58  blocks=9  types=55  errors=0
+example-projects/oxide/util/io.ox: items=12  exprs=50  blocks=8  types=32  errors=0
+example-projects/oxide/lexer.ox: items=119  exprs=2182  blocks=271  types=277  errors=0
+example-projects/oxide/ast.ox: items=98  exprs=171  blocks=83  types=189  errors=0
+example-projects/oxide/parser.ox: items=56  exprs=4193  blocks=220  types=481  errors=0
+example-projects/oxide/ast_pretty.ox: items=18  exprs=2753  blocks=138  types=152  errors=0
