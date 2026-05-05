@@ -1,0 +1,5 @@
+== diagnostics ==
+== types ==
+Const[0] SIZE: u32 = Int(256)
+Fn[0] use_size() -> u32
+  HExprId(0) : u32

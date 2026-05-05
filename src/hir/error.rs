@@ -10,6 +10,16 @@ pub enum HirError {
         first: Span,
         dup: Span,
     },
+    /// A symbol in the value namespace is declared more than once when at
+    /// least one declaration is a `const`. Covers const-vs-const and
+    /// fn-vs-const collisions. The fn-vs-fn case keeps using
+    /// `DuplicateFn` for diagnostic backward-compat. See
+    /// spec/18_CONST.md.
+    DuplicateValueSymbol {
+        name: String,
+        first: Span,
+        dup: Span,
+    },
     /// Given a build root, more than two items share the same name.
     DuplicateGlobalSymbol {
         name: String,
@@ -91,6 +101,7 @@ impl HirError {
             | Self::GenericExternFn { span, .. }
             | Self::TypeParamWithArgs { span, .. } => span,
             Self::DuplicateFn { dup, .. }
+            | Self::DuplicateValueSymbol { dup, .. }
             | Self::DuplicateAdt { dup, .. }
             | Self::DuplicateField { dup, .. }
             | Self::DuplicateGlobalSymbol { dup, .. } => dup,

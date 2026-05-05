@@ -1,0 +1,8 @@
+== diagnostics ==
+== types ==
+Const[0] HELLO: *const [u8; 6] = Str("hello")
+Fn[0] puts(s[Local(0)]: *const [u8]) -> i32
+Fn[1] say() -> i32
+  HExprId(0) : fn(*const [u8]) -> i32
+  HExprId(1) : *const [u8; 6]
+  HExprId(2) : i32

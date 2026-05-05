@@ -1,0 +1,3 @@
+== diagnostics ==
+== types ==
+Const[0] X: *const [u8] = Str("hello")

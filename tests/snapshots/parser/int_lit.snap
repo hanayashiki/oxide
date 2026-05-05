@@ -1,0 +1,7 @@
+Module
+  Fn f()
+    Block
+      Let zero = Int(0)
+      Let negative = Unary(Neg, Int(1))
+      Let i64_max = Int(9223372036854775807)
+      Let i64_min = Unary(Neg, Int(9223372036854775808))

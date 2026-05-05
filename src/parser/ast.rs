@@ -48,17 +48,23 @@ pub enum ItemKind {
     /// loader and `lower_program` land; until then HIR lowering skips
     /// it. See spec/14_MODULES.md.
     Import(ImportItem),
+    /// `const Name: Type = LITERAL;` — top-level named literal. RHS
+    /// is restricted to a single literal token (`IntLit | BoolLit |
+    /// CharLit | StrLit`); no const-expression evaluator in v0. See
+    /// spec/18_CONST.md.
+    Const(ConstDecl),
 }
 
 impl ItemKind {
     /// Short human label for diagnostics ("fn" / "struct" / "import" /
-    /// "extern block").
+    /// "extern block" / "const").
     pub fn label(&self) -> &'static str {
         match self {
             ItemKind::Fn(_) => "fn",
             ItemKind::ExternBlock(_) => "extern block",
             ItemKind::Struct(_) => "struct",
             ItemKind::Import(_) => "import",
+            ItemKind::Const(_) => "const",
         }
     }
 }
@@ -69,6 +75,18 @@ pub struct ImportItem {
     /// loader is responsible for resolving this against the importing
     /// file's directory and the stdlib hardcode table.
     pub path: String,
+    pub span: Span,
+}
+
+/// `const Name: Type = LITERAL;`. The parser pins `value` to one of
+/// `ExprKind::IntLit | BoolLit | CharLit | StrLit`; no other
+/// expression shapes can land here in v0. The annotation is
+/// mandatory (no inference). See spec/18_CONST.md.
+#[derive(Clone, Debug)]
+pub struct ConstDecl {
+    pub name: Ident,
+    pub ty: TypeId,
+    pub value: ExprId,
     pub span: Span,
 }
 

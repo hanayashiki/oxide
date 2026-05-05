@@ -59,21 +59,20 @@ enum Mode {
 }
 
 /// Threaded through the shared `relate_with_ctx` body. Bundles the
-/// diagnostic context, the structural-relaxation flag, and the
-/// relation mode. Private to this module.
-///
-/// `pointee` is sticky: set to `true` when the Ptr-Ptr arm recurses
-/// into pointer inners. Length erasure (`Array(T, Some(_)) ~ Array(T,
-/// None)`) is silent only when `pointee == true`, `mode == Subtype`,
-/// and only in the forward direction (found `Some`, expected `None`).
+/// diagnostic context and the relation mode. Private to this module.
 ///
 /// Span is *not* bundled here — it's `Clone` (not `Copy`) and gets
 /// `.clone()`d at recursion sites; folding it into a `Copy` struct
 /// would force unnecessary clones at every call.
+///
+/// The under-Ptr "pointee" flag formerly lived here, used to gate
+/// array length erasure. That responsibility moved to
+/// [`discharge_subtype`] (which carries its own `pointee` parameter)
+/// when shape-error reporting was centralized in discharge — see
+/// spec/05_TYPE_CHECKER.md §Obligations.
 #[derive(Clone, Copy)]
 struct UnifyContext {
     mismatch: MismatchCtx,
-    pointee: bool,
     mode: Mode,
 }
 
@@ -81,28 +80,19 @@ impl UnifyContext {
     fn equate_default() -> Self {
         Self {
             mismatch: MismatchCtx::Default,
-            pointee: false,
             mode: Mode::Equate,
         }
     }
     fn equate_with_mismatch(mismatch: MismatchCtx) -> Self {
         Self {
             mismatch,
-            pointee: false,
             mode: Mode::Equate,
         }
     }
     fn subtype_default() -> Self {
         Self {
             mismatch: MismatchCtx::Default,
-            pointee: false,
             mode: Mode::Subtype,
-        }
-    }
-    fn under_ptr(self) -> Self {
-        Self {
-            pointee: true,
-            ..self
         }
     }
 }
@@ -139,7 +129,14 @@ fn build_mismatch(ctx: MismatchCtx, expected: TyId, found: TyId, span: Span) -> 
 /// against `Never` is a mismatch — the "`!` flows into any context"
 /// rule lives in [`subtype`], not here.
 pub(super) fn equate(cx: &mut Checker, inf: &mut Inferer, found: TyId, expected: TyId, span: Span) {
-    relate_with_ctx(cx, inf, found, expected, span, UnifyContext::equate_default());
+    relate_with_ctx(
+        cx,
+        inf,
+        found,
+        expected,
+        span,
+        UnifyContext::equate_default(),
+    );
 }
 
 /// `equate` with a [`MismatchCtx`] that controls how the terminal-
@@ -236,8 +233,13 @@ fn relate_with_ctx(
         (TyKind::Unit, TyKind::Unit) => {}
         (TyKind::Fn(params_f, ret_f, var_f), TyKind::Fn(params_e, ret_e, var_e)) => {
             if params_f.len() != params_e.len() || var_f != var_e {
-                inf.errors
-                    .push(build_mismatch(ctx.mismatch, expected, found, span));
+                // Equate mode emits eagerly; Subtype mode defers to
+                // `discharge_subtype` so the same diagnostic doesn't
+                // fire twice. See spec/05_TYPE_CHECKER.md §Obligations.
+                if ctx.mode == Mode::Equate {
+                    inf.errors
+                        .push(build_mismatch(ctx.mismatch, expected, found, span));
+                }
                 return;
             }
             for (pf, pe) in params_f.iter().zip(&params_e) {
@@ -253,16 +255,15 @@ fn relate_with_ctx(
         //   directional rule fires at discharge over fully-resolved
         //   types via `discharge_subtype`).
         //
-        // Recurse with `under_ptr`. In Equate mode the pointee flag
-        // is meaningless but cheap to set; the Array-Array arm gates
-        // length erasure on mode regardless.
+        // Recurse with the same ctx — discharge handles the under-Ptr
+        // length-erasure relaxation; eager just walks for Infer-binding.
         (TyKind::Ptr(fi, fm), TyKind::Ptr(ei, em)) => {
             if ctx.mode == Mode::Equate && fm != em {
                 inf.errors
                     .push(build_mismatch(ctx.mismatch, expected, found, span));
                 return;
             }
-            relate_with_ctx(cx, inf, fi, ei, span, ctx.under_ptr());
+            relate_with_ctx(cx, inf, fi, ei, span, ctx);
         }
         // Adt-Adt: nominal identity (same `AdtId`) plus structural
         // recursion over args. The arity is fixed by AdtId, so length
@@ -271,8 +272,11 @@ fn relate_with_ctx(
         // (extension).
         (TyKind::Adt(af, args_f), TyKind::Adt(ae, args_e)) => {
             if af != ae {
-                inf.errors
-                    .push(build_mismatch(ctx.mismatch, expected, found, span));
+                // Equate-only emit; Subtype defers to discharge.
+                if ctx.mode == Mode::Equate {
+                    inf.errors
+                        .push(build_mismatch(ctx.mismatch, expected, found, span));
+                }
                 return;
             }
             debug_assert_eq!(
@@ -293,35 +297,31 @@ fn relate_with_ctx(
         //   expected `None`). Otherwise rejected.
         (TyKind::Array(fe, fc), TyKind::Array(ee, ec)) => {
             relate_with_ctx(cx, inf, fe, ee, span.clone(), ctx);
-            match (fc, ec) {
-                (None, None) => {}
-                (Some(c1), Some(c2)) if c1 == c2 => {}
-                (Some(_), Some(_)) => {
-                    inf.errors.push(TypeError::ArrayLengthMismatch {
-                        expected,
-                        found,
-                        span,
-                    });
-                }
-                // Forward erasure is a Subtype-only relaxation,
-                // gated to under-Ptr position.
-                (Some(_), None) if ctx.pointee && ctx.mode == Mode::Subtype => {}
-                (Some(_), None) | (None, Some(_)) => {
-                    inf.errors.push(TypeError::ArrayLengthMismatch {
-                        expected,
-                        found,
-                        span,
-                    });
+            // Length errors: Equate emits eagerly; Subtype defers
+            // to `discharge_subtype` (which knows about the
+            // pointee gate too).
+            if ctx.mode == Mode::Equate {
+                match (fc, ec) {
+                    (None, None) => {}
+                    (Some(c1), Some(c2)) if c1 == c2 => {}
+                    _ => {
+                        inf.errors.push(TypeError::ArrayLengthMismatch {
+                            expected,
+                            found,
+                            span,
+                        });
+                    }
                 }
             }
         }
         _ => {
-            // Catch-all mismatch. Includes Adt-vs-Adt with unequal
-            // `AdtId` (ADTs equate by pure nominal identity — see
-            // spec/08_ADT.md "Unification"; equal ADTs are absorbed
-            // by the `found == expected` short-circuit above).
-            inf.errors
-                .push(build_mismatch(ctx.mismatch, expected, found, span));
+            // Catch-all cross-kind mismatch. Equate emits eagerly;
+            // Subtype defers to `discharge_subtype`. See
+            // spec/05_TYPE_CHECKER.md §Obligations.
+            if ctx.mode == Mode::Equate {
+                inf.errors
+                    .push(build_mismatch(ctx.mismatch, expected, found, span));
+            }
         }
     }
 }
@@ -347,7 +347,7 @@ fn bind_infer_checked(
 
     expected: TyId,
     found: TyId,
-    
+
     ctx: UnifyContext,
     span: Span,
 ) {
@@ -359,16 +359,19 @@ fn bind_infer_checked(
             _ => false,
         };
         if !allowed {
-            inf.errors
-                .push(build_mismatch(ctx.mismatch, expected, found, span));
+            // Equate emits eagerly; Subtype defers to
+            // `discharge_subtype` so we don't double-report the same
+            // mismatch (the Coerce obligation pushed by
+            // `subtype()` will rediscover this once `α` is defaulted
+            // to `i32`).
+            if ctx.mode == Mode::Equate {
+                inf.errors
+                    .push(build_mismatch(ctx.mismatch, expected, found, span));
+            }
             // Bind to i32 (the int-flagged var's natural default)
-            // rather than `error`. The mismatch is already pushed;
-            // binding to the default lets the captured
-            // `Infer(id)` (still in `expected`/`found` of the pushed
-            // error) resolve to `i32` for the renderer, and lets
-            // sibling expressions typed by this infer var surface as
-            // `i32` in the types table — which matches what the user
-            // wrote.
+            // rather than `error`. The mismatch will surface from
+            // discharge after defaulting; binding to i32 keeps
+            // sibling expressions typed by this infer var coherent.
             inf.bind(id, cx.tys.i32);
             return;
         }
@@ -414,8 +417,7 @@ fn occurs_in(cx: &Checker, inf: &Inferer, id: InferId, ty: TyId) -> bool {
         TyKind::Ptr(pointee, _) => occurs_in(cx, inf, id, pointee),
         TyKind::Array(elem, _) => occurs_in(cx, inf, id, elem),
         TyKind::Fn(params, ret, _) => {
-            params.iter().any(|p| occurs_in(cx, inf, id, *p))
-                || occurs_in(cx, inf, id, ret)
+            params.iter().any(|p| occurs_in(cx, inf, id, *p)) || occurs_in(cx, inf, id, ret)
         }
         // Adt is nominal-leaf (identity-only); Prim/Unit/Never/Error
         // are leaves with no Infer inside.
@@ -430,26 +432,44 @@ fn occurs_in(cx: &Checker, inf: &Inferer, id: InferId, ty: TyId) -> bool {
 // passed in. Pure observation: never unifies, never binds.
 
 /// Recursive structural discharge of a `subtype(actual, expected)`
-/// obligation. Top-level Ptr-Ptr allows `Mut ≤ Const` outer; inner
-/// positions and aggregate-buried Ptrs require strict mut equality
-/// via [`discharge_eq`]. Walks into Array elements and Fn params/ret
-/// so a Ptr buried in an aggregate gets the same soundness treatment
-/// as a top-level one (e.g. `[*const T; 3]` flowing into
-/// `[*mut T; 3]`). See spec/07_POINTER.md / spec/05_TYPE_CHECKER.md.
-///
-/// Length mismatches and shape mismatches were already filed by the
-/// eager body — this walk only emits mut-direction errors.
-pub(super) fn discharge_subtype(
+/// obligation. Single source of truth for subtype validation: walks
+/// the structure, fires `PointerMutabilityMismatch` on outer Ptr
+/// mut-direction violations, fires `ArrayLengthMismatch` on length
+/// mismatches outside the Subtype-under-Ptr erasure case, and fires
+/// `TypeMismatch` on Prim-Prim mismatches and cross-kind mismatches.
+/// Inner Ptr / Fn positions defer to [`discharge_eq`] for strict
+/// equality. See spec/07_POINTER.md / spec/05_TYPE_CHECKER.md.
+pub(super) fn discharge_subtype(cx: &mut Checker, actual: TyId, expected: TyId, span: Span) {
+    discharge_subtype_inner(cx, actual, expected, span, false);
+}
+
+fn discharge_subtype_inner(
     cx: &mut Checker,
     actual: TyId,
     expected: TyId,
     span: Span,
+    pointee: bool,
 ) {
+    if actual == expected {
+        return;
+    }
     let ka = cx.tys.kind(actual).clone();
     let ke = cx.tys.kind(expected).clone();
+    // `Error` and (actual=)`Never` absorb without further reporting.
+    if matches!(ka, TyKind::Error | TyKind::Never) || matches!(ke, TyKind::Error) {
+        return;
+    }
     match (ka, ke) {
         (TyKind::Ptr(a_pt, a_mut), TyKind::Ptr(e_pt, e_mut)) => {
-            if a_mut > e_mut {
+            // Outer-Ptr (pointee=false): mut is directional —
+            // `*mut → *const` allowed (`a_mut <= e_mut` after the
+            // strict-greater rejection above). Inner-Ptr (pointee=true):
+            // strict equality. Recurse with pointee=true so the inner
+            // pointee continues the subtype walk under-Ptr semantics
+            // (length erasure stays allowed; mut becomes strict via
+            // the next iteration's `pointee=true` check).
+            let mut_ok = if pointee { a_mut == e_mut } else { a_mut <= e_mut };
+            if !mut_ok {
                 cx.errors.push(TypeError::PointerMutabilityMismatch {
                     expected,
                     actual,
@@ -457,21 +477,83 @@ pub(super) fn discharge_subtype(
                 });
                 return;
             }
-            discharge_eq(cx, a_pt, e_pt, span);
+            discharge_subtype_inner(cx, a_pt, e_pt, span, true);
         }
-        (TyKind::Array(a_elem, _), TyKind::Array(e_elem, _)) => {
-            discharge_subtype(cx, a_elem, e_elem, span);
-        }
-        (TyKind::Fn(a_params, a_ret, _), TyKind::Fn(e_params, e_ret, _)) => {
-            if a_params.len() == e_params.len() {
-                for (ap, ep) in a_params.iter().zip(&e_params) {
-                    discharge_eq(cx, *ap, *ep, span.clone());
+        (TyKind::Array(a_elem, a_len), TyKind::Array(e_elem, e_len)) => {
+            match (a_len, e_len) {
+                (Some(c1), Some(c2)) if c1 == c2 => {}
+                (None, None) => {}
+                // Forward erasure `[T; N] → [T]` allowed only under Ptr
+                // (matches `relate_with_ctx`'s subtype-pointee rule).
+                (Some(_), None) if pointee => {}
+                _ => {
+                    cx.errors.push(TypeError::ArrayLengthMismatch {
+                        expected,
+                        found: actual,
+                        span: span.clone(),
+                    });
+                    return;
                 }
+            }
+            // Reset `pointee` for the element recursion: forward
+            // length erasure is gated to *directly* under a Ptr, not
+            // "anywhere under a Ptr at any depth". Without the reset,
+            // `*[[i32; 2]; 3]` would erroneously coerce to
+            // `*[[i32]; 3]` (the outer array layer separates the
+            // inner `[i32; 2]` from the Ptr, so erasure should be
+            // forbidden). Spec/09_ARRAY.md "Forward erasure is a
+            // Subtype-only relaxation, gated to under-Ptr position."
+            discharge_subtype_inner(cx, a_elem, e_elem, span, false);
+        }
+        (TyKind::Fn(a_params, a_ret, a_var), TyKind::Fn(e_params, e_ret, e_var)) => {
+            if a_params.len() != e_params.len() || a_var != e_var {
+                cx.errors.push(TypeError::TypeMismatch {
+                    expected,
+                    found: actual,
+                    span,
+                });
+                return;
+            }
+            for (ap, ep) in a_params.iter().zip(&e_params) {
+                discharge_eq(cx, *ap, *ep, span.clone());
             }
             discharge_eq(cx, a_ret, e_ret, span);
         }
-        _ => {}
+        (TyKind::Adt(a_aid, a_args), TyKind::Adt(e_aid, e_args)) => {
+            if a_aid != e_aid {
+                cx.errors.push(TypeError::TypeMismatch {
+                    expected,
+                    found: actual,
+                    span,
+                });
+                return;
+            }
+            debug_assert_eq!(a_args.len(), e_args.len());
+            for (aa, ea) in a_args.iter().zip(&e_args) {
+                discharge_eq(cx, *aa, *ea, span.clone());
+            }
+        }
+        // Primitive mismatch (different `Prim` variants — equal
+        // primitives intern to the same TyId and were caught by the
+        // identity short-circuit at the top).
+        (TyKind::Prim(_), TyKind::Prim(_)) => {
+            cx.errors.push(TypeError::TypeMismatch {
+                expected,
+                found: actual,
+                span,
+            });
+        }
+        (TyKind::Unit, TyKind::Unit) => {}
+        // Cross-kind catch-all: `Prim` vs `Ptr`, `Adt` vs `Ptr`, etc.
+        _ => {
+            cx.errors.push(TypeError::TypeMismatch {
+                expected,
+                found: actual,
+                span,
+            });
+        }
     }
+    let _ = pointee; // silence unused on the no-recurse arms
 }
 
 /// Strict-equality counterpart to [`discharge_subtype`]. Used at
@@ -510,22 +592,34 @@ fn discharge_eq(cx: &mut Checker, a: TyId, b: TyId, span: Span) {
 
 /// Recursive Sized check. Walks `Array(_, Some(_))` element types so
 /// nested unsized inside a sized outer (e.g. `[[u8]; 3]`) is
-/// rejected — closes the codegen ICE described in B008. Stops at
-/// `Ptr` (the pointer is sized; the pointee can be unsized — that's
-/// the canonical DST-behind-pointer shape). Doesn't descend into
+/// rejected — closes the codegen ICE described in B008. The Ptr arm
+/// implements the canonical DST-behind-pointer relaxation
+/// (`*const [T]` is fine — the pointer carries the length at
+/// runtime), but only one layer deep: a *sized* array pointee
+/// (`*const [T; N]`) must still have a sized element type, otherwise
+/// we'd have a sized container of unknown-stride elements (e.g.
+/// `*const [[T]; 3]`) which is ill-formed. Doesn't descend into
 /// `Adt` because each field carries its own decl-phase Sized
 /// obligation; recursing here would double-report.
 pub(super) fn discharge_sized(cx: &mut Checker, ty: TyId, pos: SizedPos, span: Span) {
     match cx.tys.kind(ty).clone() {
         TyKind::Array(_, None) => {
-            cx.errors
-                .push(TypeError::UnsizedArrayAsValue { pos, span });
+            cx.errors.push(TypeError::UnsizedArrayAsValue { pos, span });
         }
         TyKind::Array(elem, Some(_)) => {
             discharge_sized(cx, elem, pos, span);
         }
-        // Ptr stops descent; everything else is sized in v0.
+        TyKind::Ptr(pointee, _) => {
+            // Allow `*const [T]` (DST). Reject `*const [[T]; N]`
+            // by recursing only when the pointee is a *sized* array
+            // — its element type must itself be sized. Other pointee
+            // shapes (Prim, Ptr, Adt, …) are already sized; further
+            // Ptr layers handle their own pointee at the next call.
+            if let TyKind::Array(elem, Some(_)) = cx.tys.kind(pointee).clone() {
+                discharge_sized(cx, elem, pos, span);
+            }
+        }
+        // Everything else is sized in v0.
         _ => {}
     }
 }
-

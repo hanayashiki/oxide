@@ -1,0 +1,10 @@
+== diagnostics ==
+[E0265] Error: array length mismatch: expected `[u8; 5]`, found `[u8; 6]`
+   ╭─[ error_const_str_annotated_sized.ox:1:10 ]
+   │
+ 1 │ const X: *const [u8; 5] = "hello"; // NULL-terminated
+   │          ───────┬──────  
+   │                 ╰──────── length mismatch
+───╯
+== types ==
+Const[0] X: *const [u8; 5] = Str("hello")

@@ -22,12 +22,12 @@
 
 use index_vec::IndexVec;
 
-use crate::hir::HAdtId;
+use crate::hir::{HAdtId, HirConstValue};
 use crate::reporter::Span;
 
 use super::super::error::{ParamOrReturn, SizedPos, TypeError};
 use super::super::ty::{
-    AdtDef, AdtId, FieldDef, FnSig, ParamId, TyId, TyKind, VariantDef, subst_from,
+    AdtDef, AdtId, FieldDef, FnSig, ParamId, PrimTy, TyId, TyKind, VariantDef, subst_from,
 };
 use super::Checker;
 use super::obligation::Obligation;
@@ -37,6 +37,7 @@ pub(super) fn resolve_decls(cx: &mut Checker<'_>) {
     resolve_adt_fields(cx);
     check_recursive_adts(cx);
     resolve_fn_sigs(cx);
+    resolve_consts(cx);
 }
 
 /// Phase 0 — push an `AdtDef` stub per HIR adt, allocate `ParamId`s
@@ -343,5 +344,74 @@ fn resolve_fn_sigs(cx: &mut Checker<'_>) {
             partial: false,
             c_variadic: hir_fn.is_variadic,
         };
+    }
+}
+
+/// Phase 1.5 — resolve `const NAME: Type = LITERAL;` items.
+///
+/// For each const in `hir.consts`:
+/// 1. Lower the annotation into a `TyId` via `Checker::resolve_ty`.
+/// 2. Verify the literal's kind matches the annotation (E0250 type
+///    mismatch on miss). Int → any integer prim; Bool → bool; Char
+///    → u8; Str → `*const [u8; N+1]`. The shape mirrors
+///    `infer_expr`'s literal arms (`StrLit` in particular). For
+///    `Int`, the annotation pins the width — there's no inference
+///    variable since consts have no body.
+/// 3. Push a `Sized` obligation so unsized annotations (`[u8]`)
+///    fire E0269 at decl time.
+///
+/// Writes the annotation TyId into `cx.const_tys[cid]` regardless of
+/// the literal-vs-annotation match — downstream `infer_expr` reads
+/// this for `HirExprKind::Const(cid)`. See spec/18_CONST.md.
+fn resolve_consts(cx: &mut Checker<'_>) {
+    for raw in 0..cx.hir.consts.len() {
+        let cid = crate::hir::ConstId::from_raw(raw as u32);
+        let hc = &cx.hir.consts[cid];
+        let ann_span = hc.ty.span.clone();
+        // Clone to release the borrow on hir before calling resolve_ty.
+        let hir_ty = hc.ty.clone();
+        let value = hc.value.clone();
+        let annotated = Checker::resolve_ty(&mut cx.tys, &mut cx.errors, &hir_ty);
+        cx.const_tys[cid] = annotated;
+
+        // Sized obligation — pushed even if the type-check below
+        // fails, so unsized annotations are flagged consistently
+        // (matches the field/param posture).
+        cx.decl_obligations.push(Obligation::Sized {
+            ty: annotated,
+            pos: SizedPos::LetBinding,
+            span: ann_span.clone(),
+        });
+
+        // Build the literal's "intrinsic" type so we can equate.
+        let lit_ty: TyId = match &value {
+            HirConstValue::Int(_) => {
+                // Any integer primitive matches an integer literal.
+                // We don't materialize an Infer here (consts are
+                // decl-phase, no Inferer yet); instead we accept any
+                // annotation that resolves to an integer Prim and
+                // bail with E0250 otherwise.
+                if matches!(
+                    cx.tys.kind(annotated),
+                    TyKind::Prim(p) if p.is_integer()
+                ) {
+                    annotated
+                } else {
+                    // Use i32 as a stand-in "what would have fit" for
+                    // the diagnostic. Same posture as infer_expr's
+                    // int-default rule.
+                    cx.tys.i32
+                }
+            }
+            HirConstValue::Bool(_) => cx.tys.bool,
+            HirConstValue::Char(_) => cx.tys.u8,
+            HirConstValue::Str(s) => cx.tys.intern_str_lit(s),
+        };
+
+        cx.decl_obligations.push(Obligation::Coerce {
+            actual: lit_ty,
+            expected: annotated,
+            span: hc.ty.span.clone(),
+        });
     }
 }

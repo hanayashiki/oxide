@@ -18,8 +18,8 @@ use inkwell::values::{
 };
 
 use crate::hir::{
-    FieldIdx, FnId, HBlockId, HElseArm, HExprId, HirArrayLit, HirConst, HirExprKind, HirProgram,
-    LocalId, VariantIdx,
+    ConstId, FieldIdx, FnId, HBlockId, HElseArm, HExprId, HirArrayLit, HirConst, HirConstValue,
+    HirExprKind, HirProgram, LocalId, VariantIdx,
 };
 use crate::mono::{InstId, InstanceOperation, MonoResults};
 use crate::parser::ast::{AssignOp, BinOp, UnOp};
@@ -169,6 +169,7 @@ pub fn codegen<'ctx>(
         inst_decls,
         adt_ll,
         str_counter: Cell::new(0),
+        str_lit_cache: HashMap::new(),
         llvm_trap: Cell::new(None),
     };
 
@@ -250,6 +251,12 @@ struct Codegen<'a, 'ctx> {
     /// `@.str.1`, …). Inkwell uses interior mutability everywhere so the
     /// rest of `Codegen` lives behind `&self`; we do the same here.
     str_counter: Cell<u32>,
+    /// Content-addressed dedup for `emit_str_lit`. Maps the raw
+    /// (pre-NUL) source string to its `@.str.N` global pointer. Two
+    /// `"hi"` literals — including those reached via `const HELLO =
+    /// "hi";` use sites — share one global. See spec/18_CONST.md
+    /// "Side fix".
+    str_lit_cache: HashMap<String, PointerValue<'ctx>>,
     /// Cached `declare void @llvm.trap()` so each module emits the
     /// declaration at most once. Populated lazily by
     /// `get_or_declare_trap` on the first bounds-check site.
@@ -881,6 +888,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
                 self.emit_continue(fx);
                 None
             }
+            HirExprKind::Const(cid) => Some(self.emit_const(cid)),
         }
     }
 
@@ -888,7 +896,17 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     /// terminator and return a pointer to its first byte. The value's
     /// type is opaque `ptr` (LLVM 15+); no GEP needed since the global
     /// itself is already a pointer.
+    ///
+    /// Cached by content (`str_lit_cache`): two `"hi"` literals — from
+    /// regular code or from `const HELLO = "hi";` use sites — share a
+    /// single `@.str.N` global. Without caching, two source-level
+    /// `"hi"`s would produce two distinct pointers, breaking pointer-
+    /// equality reasoning. See spec/18_CONST.md "Side fix".
     fn emit_str_lit(&mut self, s: &str) -> Operand<'ctx> {
+        if let Some(ptr) = self.str_lit_cache.get(s) {
+            return Operand::Value((*ptr).into());
+        }
+
         let mut bytes: Vec<u8> = s.as_bytes().to_vec();
         bytes.push(0); // C-style NUL terminator (see spec/07_POINTER.md).
         let i8_ty = self.ctx.i8_type();
@@ -910,7 +928,40 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         global.set_unnamed_address(UnnamedAddress::Global);
         global.set_initializer(&const_arr);
 
-        Operand::Value(global.as_pointer_value().into())
+        let ptr = global.as_pointer_value();
+        self.str_lit_cache.insert(s.to_string(), ptr);
+        Operand::Value(ptr.into())
+    }
+
+    /// Materialize a `const` item's value at a use site. Dispatches on
+    /// the `HirConstValue` variant and reuses the existing literal
+    /// emitters: `Int` reads its width from `typeck.const_tys[cid]`
+    /// (analogous to how `emit_int_lit` reads from `expr_tys[eid]`);
+    /// `Bool`/`Char` are inlined as `const_int`; `Str` goes through
+    /// the cached `emit_str_lit`. No per-`ConstId` cache needed —
+    /// LLVM dedups identical `const_int` materializations, and Str
+    /// dedup is already handled by `emit_str_lit`'s content cache.
+    /// See spec/18_CONST.md.
+    fn emit_const(&mut self, cid: ConstId) -> Operand<'ctx> {
+        let hc = &self.hir.consts[cid];
+        match hc.value.clone() {
+            HirConstValue::Int(n) => {
+                let ty = self.typeck_results.const_tys[cid];
+                match self.typeck_results.tys().kind(ty) {
+                    TyKind::Prim(p) => {
+                        Operand::Value(lower_prim(self.ctx, *p).const_int(n, false).into())
+                    }
+                    other => panic!("const Int had non-prim annotation {:?}", other),
+                }
+            }
+            HirConstValue::Bool(b) => Operand::Value(
+                self.ctx.bool_type().const_int(b as u64, false).into(),
+            ),
+            HirConstValue::Char(c) => Operand::Value(
+                self.ctx.i8_type().const_int(c as u64, false).into(),
+            ),
+            HirConstValue::Str(s) => self.emit_str_lit(&s),
+        }
     }
 
     fn emit_int_lit(&mut self, fx: &FnCodegenContext<'ctx>, eid: HExprId, n: u64) -> Operand<'ctx> {

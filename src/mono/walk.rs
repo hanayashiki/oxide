@@ -203,7 +203,10 @@ fn walk_expr(
             HirArrayLit::Repeat { init, .. } => walk_expr(cx, parent, init, subst),
         },
 
-        // Atoms — no recursion.
+        // Atoms — no recursion. `Const(_)` is an atom: its RHS lives
+        // in `HirProgram.consts[cid].value` (a `HirConstValue`, not
+        // an HExprId), so there's nothing for mono to walk into.
+        // See spec/18_CONST.md.
         HirExprKind::IntLit(_)
         | HirExprKind::BoolLit(_)
         | HirExprKind::CharLit(_)
@@ -211,6 +214,7 @@ fn walk_expr(
         | HirExprKind::Null
         | HirExprKind::Local(_)
         | HirExprKind::Fn(_)
+        | HirExprKind::Const(_)
         | HirExprKind::Unresolved(_)
         | HirExprKind::Continue
         | HirExprKind::Poison => {}

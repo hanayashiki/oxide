@@ -1,0 +1,7 @@
+== diagnostics ==
+== types ==
+Const[0] SIZE: i32 = Int(10)
+Fn[0] double() -> i32
+  HExprId(0) : i32
+  HExprId(1) : i32
+  HExprId(2) : i32

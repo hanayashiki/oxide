@@ -1,0 +1,20 @@
+HirProgram
+  Module error_const_duplicate.ox (root)
+    Const[0] X: i32 = Int(1)
+    Const[1] X: i32 = Int(2)
+== diagnostics ==
+[E0214] Error: the value symbol `X` is defined multiple times
+   ╭─[ error_const_duplicate.ox:2:1 ]
+   │
+ 2 │ const X: i32 = 2;
+   │ ────────┬────────  
+   │         ╰────────── duplicate definition
+   │
+   ├─[ error_const_duplicate.ox:2:1 ]
+   │
+ 1 │ const X: i32 = 1;
+   │ ────────┬────────  
+   │         ╰────────── first defined here
+   │ 
+   │ Help: fns and `const` items share the same value namespace; rename one of them
+───╯

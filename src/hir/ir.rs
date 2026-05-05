@@ -15,6 +15,7 @@ index_vec::define_index_type! { pub struct HAdtId      = u32; }
 index_vec::define_index_type! { pub struct VariantIdx  = u32; }
 index_vec::define_index_type! { pub struct FieldIdx    = u32; }
 index_vec::define_index_type! { pub struct HTyParamId   = u32; }
+index_vec::define_index_type! { pub struct ConstId     = u32; }
 
 /// Top-level HIR. Owns globally-unique arenas — every `FnId` /
 /// `HAdtId` / `LocalId` / `HExprId` / `HBlockId` is unique program-
@@ -25,6 +26,10 @@ index_vec::define_index_type! { pub struct HTyParamId   = u32; }
 pub struct HirProgram {
     pub fns: IndexVec<FnId, HirFn>,
     pub adts: IndexVec<HAdtId, HirAdt>,
+    /// All `const` items in the program. Allocated at scanner prescan;
+    /// referenced from use sites via `HirExprKind::Const(ConstId)`. See
+    /// spec/18_CONST.md.
+    pub consts: IndexVec<ConstId, HirConstItem>,
     pub locals: IndexVec<LocalId, HirLocal>,
     pub exprs: IndexVec<HExprId, HirExpr>,
     pub blocks: IndexVec<HBlockId, HirBlock>,
@@ -52,6 +57,11 @@ impl HirProgram {
     pub fn root_adts(&self) -> &[HAdtId] {
         &self.modules[self.root].root_adts
     }
+
+    /// Convenience: top-level consts of the root module.
+    pub fn root_consts(&self) -> &[ConstId] {
+        &self.modules[self.root].root_consts
+    }
 }
 
 /// Per-file HIR metadata. Records which globally-allocated IDs belong
@@ -65,11 +75,16 @@ pub struct HirModule {
     pub fns: Vec<FnId>,
     /// Every `HAdtId` declared in this file.
     pub adts: Vec<HAdtId>,
+    /// Every `ConstId` declared in this file.
+    pub consts: Vec<ConstId>,
     /// Top-level fns in source order. Today this equals `fns`; the
     /// distinction is reserved for nested item shapes.
     pub root_fns: Vec<FnId>,
     /// Top-level ADTs in source order.
     pub root_adts: Vec<HAdtId>,
+    /// Top-level consts in source order. v0: equals `consts` since
+    /// const items are top-level only. See spec/18_CONST.md.
+    pub root_consts: Vec<ConstId>,
     pub span: Span,
 }
 
@@ -212,6 +227,33 @@ pub struct HBlockItem {
     pub has_semi: bool,
 }
 
+/// A `const` item: name, type annotation, literal value. Per
+/// spec/18_CONST.md, the RHS is one of `IntLit`/`BoolLit`/`CharLit`/
+/// `StrLit`; the parser pins this and `HirConstValue` mirrors it.
+/// Annotation is mandatory (no inference); typeck verifies that the
+/// literal kind matches.
+#[derive(Clone, Debug)]
+pub struct HirConstItem {
+    pub name: String,
+    pub ty: HirTy,
+    pub value: HirConstValue,
+    pub span: Span,
+}
+
+/// Literal RHS of a const item. Variants line up 1:1 with the four
+/// allowed `ExprKind`/`HirExprKind` literal kinds. `Char(u8)` matches
+/// `HirExprKind::CharLit(u8)` — chars are bytes in v0; out-of-range
+/// chars never reach here because the lowering path for a const RHS
+/// runs after the same `lower_char_lit` rejection used for body
+/// expressions.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum HirConstValue {
+    Int(u64),
+    Bool(bool),
+    Char(u8),
+    Str(String),
+}
+
 #[derive(Clone, Debug)]
 pub struct HirExpr {
     pub kind: HirExprKind,
@@ -252,6 +294,11 @@ pub enum HirExprKind {
     Local(LocalId),
     /// Resolved use of a module-level function.
     Fn(FnId),
+    /// Resolved use of a module-level `const` item. The value lives in
+    /// `HirProgram.consts[cid].value`. Not a place — codegen
+    /// materializes the literal inline at every use site. See
+    /// spec/18_CONST.md.
+    Const(ConstId),
     /// Name lookup failed; preserved as a string for diagnostics.
     Unresolved(String),
     Unary {

@@ -558,6 +558,28 @@ fn write_typeck_signatures(
     hir: &oxide::hir::HirProgram,
     results: &oxide::typeck::TypeckResults,
 ) {
+    // Const items first, in `ConstId` (= source) order. Renders the
+    // resolved annotation type from `const_tys[cid]` plus the value
+    // variant — matches the HIR pretty-printer convention. See
+    // spec/18_CONST.md.
+    for (cid, hc) in hir.consts.iter_enumerated() {
+        let ty = results.tys.render(results.const_tys[cid]);
+        let value = match &hc.value {
+            oxide::hir::HirConstValue::Int(n) => format!("Int({n})"),
+            oxide::hir::HirConstValue::Bool(b) => format!("Bool({b})"),
+            oxide::hir::HirConstValue::Char(c) => format!("Char({c})"),
+            oxide::hir::HirConstValue::Str(s) => format!("Str({s:?})"),
+        };
+        writeln!(
+            out,
+            "Const[{}] {}: {} = {}",
+            cid.raw(),
+            hc.name,
+            ty,
+            value,
+        )
+        .unwrap();
+    }
     for (fid, sig) in results.fn_sigs.iter_enumerated() {
         let f = &hir.fns[fid];
         let generic_params: Vec<String> = sig
@@ -660,6 +682,7 @@ fn collect_expr(
         | HirExprKind::Null
         | HirExprKind::Local(_)
         | HirExprKind::Fn(_)
+        | HirExprKind::Const(_)
         | HirExprKind::Unresolved(_)
         | HirExprKind::Continue
         | HirExprKind::Poison => {}

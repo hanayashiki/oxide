@@ -1,0 +1,10 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `i32`, found `*const [u8; 6]`
+   ╭─[ error_const_str_annotated_int.ox:1:10 ]
+   │
+ 1 │ const X: i32 = "hello";
+   │          ─┬─  
+   │           ╰─── type mismatch here
+───╯
+== types ==
+Const[0] X: i32 = Str("hello")

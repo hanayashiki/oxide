@@ -1,0 +1,2 @@
+Module
+  Const NUL: u8 = Char('\0')

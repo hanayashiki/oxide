@@ -1,4 +1,13 @@
 == diagnostics ==
+[E0256] Error: could not infer a type
+   ╭─[ error_null_into_non_pointer_slot.ox:2:18 ]
+   │
+ 2 │     let x: i32 = null;
+   │                  ──┬─  
+   │                    ╰─── ambiguous type
+   │ 
+   │ Help: add a type annotation to disambiguate
+───╯
 [E0250] Error: type mismatch: expected `i32`, found `*mut {error}`
    ╭─[ error_null_into_non_pointer_slot.ox:2:18 ]
    │

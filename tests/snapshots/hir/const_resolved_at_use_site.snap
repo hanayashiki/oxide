@@ -1,0 +1,6 @@
+HirProgram
+  Module const_resolved_at_use_site.ox (root)
+    Const[0] TK_KW_FN: u8 = Int(10)
+    Fn[0] is_fn_kw(k[Local(0)]: u8) -> bool
+      Block
+        tail: Binary(Eq, Local(0, "k", place), Const(0, "TK_KW_FN"))

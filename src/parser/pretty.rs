@@ -108,7 +108,19 @@ impl<'a> Printer<'a> {
                 write!(self.out, "{:?}", i.path).unwrap();
                 self.end_line();
             }
+            ItemKind::Const(c) => self.print_const(c),
         }
+    }
+
+    fn print_const(&mut self, c: &ConstDecl) {
+        self.begin_line();
+        self.write("Const ");
+        self.write(&c.name.name);
+        self.write(": ");
+        self.write_type(c.ty);
+        self.write(" = ");
+        self.append_expr(c.value);
+        self.end_line();
     }
 
     fn print_struct(&mut self, s: &StructDecl) {

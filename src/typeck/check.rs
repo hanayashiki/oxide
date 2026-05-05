@@ -30,8 +30,8 @@ use std::collections::{HashMap, HashSet};
 use index_vec::IndexVec;
 
 use crate::hir::{
-    FnId, HBlockId, HElseArm, HExprId, HirArrayLit, HirConst, HirExpr, HirExprKind, HirLocal,
-    HirProgram, HirStructLitField, HirTy, HirTyKind, LocalId, VariantIdx,
+    ConstId, FnId, HBlockId, HElseArm, HExprId, HirArrayLit, HirConst, HirExpr, HirExprKind,
+    HirLocal, HirProgram, HirStructLitField, HirTy, HirTyKind, LocalId, VariantIdx,
 };
 use crate::parser::ast::{AssignOp, BinOp, Mutability, UnOp};
 use crate::reporter::Span;
@@ -54,6 +54,12 @@ pub struct TypeckResults {
     pub fn_sigs: IndexVec<FnId, FnSig>,
     pub local_tys: IndexVec<LocalId, TyId>,
     pub expr_tys: IndexVec<HExprId, TyId>,
+    /// Type of each `const` item. Resolved in `decl::resolve_decls`
+    /// from the const's annotation; the literal value is verified
+    /// against the annotation (see `decl::resolve_consts`). Codegen
+    /// reads this via `HirExprKind::Const(cid)` to pick the LLVM
+    /// type for `Int` consts. See spec/18_CONST.md.
+    pub const_tys: IndexVec<ConstId, TyId>,
     /// Resolved type-arguments for each *generic* call-expression in the
     /// program, keyed by the call's `HExprId`. Order parallels the
     /// callee's `FnSig.generic_params`. Non-generic calls have **no
@@ -156,14 +162,11 @@ pub fn cast_kind(tys: &TyArena, src: TyId, dst: TyId) -> CastKind {
             CastKind::IntToInt
         }
         // Bool → integer (zext i1).
-        (TyKind::Prim(PrimTy::Bool), TyKind::Prim(dp)) if dp.is_integer() => {
-            CastKind::BoolToInt
-        }
+        (TyKind::Prim(PrimTy::Bool), TyKind::Prim(dp)) if dp.is_integer() => CastKind::BoolToInt,
         // Ptr ↔ Ptr: same pointee shape, mut_le on outer mutability.
         // `mut_le(m1, m2)` iff NOT (m1 == Const && m2 == Mut).
         (TyKind::Ptr(t1, m1), TyKind::Ptr(t2, m2)) if *t1 == *t2 => {
-            let mut_le =
-                !matches!((*m1, *m2), (Mutability::Const, Mutability::Mut));
+            let mut_le = !matches!((*m1, *m2), (Mutability::Const, Mutability::Mut));
             if mut_le {
                 CastKind::PtrToPtr
             } else {
@@ -184,6 +187,9 @@ struct Checker<'hir> {
     fn_sigs: IndexVec<FnId, FnSig>,
     local_tys: IndexVec<LocalId, TyId>,
     expr_tys: IndexVec<HExprId, TyId>,
+    /// Type of each `const` item. Populated in `decl::resolve_consts`.
+    /// See spec/18_CONST.md.
+    const_tys: IndexVec<ConstId, TyId>,
     errors: Vec<TypeError>,
     /// Decl-phase Sized obligations (param / return / struct field).
     /// All have concrete TyIds — `resolve_ty` never produces `Infer`.
@@ -299,6 +305,8 @@ impl<'hir> Checker<'hir> {
         let local_tys: IndexVec<LocalId, TyId> =
             (0..hir.locals.len()).map(|_| placeholder).collect();
         let expr_tys: IndexVec<HExprId, TyId> = (0..hir.exprs.len()).map(|_| placeholder).collect();
+        let const_tys: IndexVec<ConstId, TyId> =
+            (0..hir.consts.len()).map(|_| placeholder).collect();
         let fn_sigs: IndexVec<FnId, FnSig> = (0..hir.fns.len())
             .map(|_| FnSig {
                 params: Vec::new(),
@@ -315,6 +323,7 @@ impl<'hir> Checker<'hir> {
             fn_sigs,
             local_tys,
             expr_tys,
+            const_tys,
             errors: Vec::new(),
             decl_obligations: Vec::new(),
             call_type_args: HashMap::new(),
@@ -528,8 +537,7 @@ impl<'hir> Checker<'hir> {
                     op @ (BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge),
                 ) = site
                 {
-                    self.errors
-                        .push(TypeError::PointerComparison { op, span });
+                    self.errors.push(TypeError::PointerComparison { op, span });
                 } else {
                     self.errors.push(TypeError::NonIntegerOperand {
                         site,
@@ -638,6 +646,7 @@ impl<'hir> Checker<'hir> {
                 fn_sigs: self.fn_sigs,
                 local_tys: self.local_tys,
                 expr_tys: self.expr_tys,
+                const_tys: self.const_tys,
                 call_type_args: self.call_type_args,
             },
             self.errors,
@@ -902,20 +911,7 @@ impl<'hir> Checker<'hir> {
             HirExprKind::IntLit(_) => self.fresh_infer(inf, true, span.clone()),
             HirExprKind::BoolLit(_) => self.tys.bool,
             HirExprKind::CharLit(_) => self.tys.u8,
-            HirExprKind::StrLit(s) => {
-                // C-style string literal: `*const [u8; N]` where
-                // `N = byte_len + 1` (the trailing NUL is appended by
-                // codegen and counted in the type, matching C
-                // `char[N]` for `"hello"` → `char[6]`). Pointer-to-
-                // sized-array form encodes immutability structurally
-                // via the outer `*const` (a bare `[u8; N]` place
-                // would let `let mut s = "hi";` mutate). See
-                // spec/07_POINTER.md §4.
-                let n = (s.as_bytes().len() + 1) as u64;
-                let u8_ty = self.tys.u8;
-                let arr_ty = self.tys.intern(TyKind::Array(u8_ty, Some(n)));
-                self.tys.intern(TyKind::Ptr(arr_ty, Mutability::Const))
-            }
+            HirExprKind::StrLit(s) => self.tys.intern_str_lit(&s),
             HirExprKind::Null => {
                 // Per spec/07_POINTER.md §Null literal "Typeck changes":
                 // fresh α (per `null` expression), wrap as `*mut α`. The
@@ -933,6 +929,7 @@ impl<'hir> Checker<'hir> {
                 self.tys
                     .intern(TyKind::Fn(sig.params, sig.ret, sig.c_variadic))
             }
+            HirExprKind::Const(cid) => self.const_tys[cid],
             HirExprKind::Unresolved(_) => self.tys.error,
             HirExprKind::Unary { op, expr: inner } => self.infer_unary(inf, op, inner, &span),
             HirExprKind::Binary { op, lhs, rhs } => self.infer_binary(inf, op, lhs, rhs, &span),
@@ -990,9 +987,7 @@ impl<'hir> Checker<'hir> {
                 let aid = AdtId::from_raw(adt.raw());
                 self.infer_struct_lit(inf, aid, &type_args, &fields, &span)
             }
-            HirExprKind::Cast { expr: inner, ty } => {
-                self.infer_cast(inf, inner, &ty, &span)
-            }
+            HirExprKind::Cast { expr: inner, ty } => self.infer_cast(inf, inner, &ty, &span),
             HirExprKind::AddrOf {
                 mutability,
                 expr: inner,

@@ -48,6 +48,11 @@ pub fn pretty_print(program: &HirProgram, source_map: &SourceMap) -> String {
             p.print_adt(haid);
             p.indent -= 1;
         }
+        for &cid in &module.root_consts {
+            p.indent += 1;
+            p.print_const(cid);
+            p.indent -= 1;
+        }
         for &fid in &module.root_fns {
             p.indent += 1;
             p.print_fn(fid);
@@ -71,6 +76,23 @@ impl<'a> Printer<'a> {
         }
         self.out.push_str(s);
         self.out.push('\n');
+    }
+
+    fn print_const(&mut self, cid: ConstId) {
+        let c = &self.m.consts[cid];
+        let value_str = match &c.value {
+            HirConstValue::Int(n) => format!("Int({n})"),
+            HirConstValue::Bool(b) => format!("Bool({b})"),
+            HirConstValue::Char(c) => format!("Char({c})"),
+            HirConstValue::Str(s) => format!("Str({s:?})"),
+        };
+        self.write_line(&format!(
+            "Const[{}] {}: {} = {}",
+            cid.raw(),
+            c.name,
+            ty_str(&c.ty),
+            value_str,
+        ));
     }
 
     fn print_adt(&mut self, haid: HAdtId) {
@@ -350,6 +372,10 @@ impl<'a> Printer<'a> {
                 let name = &self.m.fns[*fid].name;
                 vec![fid.raw().to_string(), format!("{name:?}")]
             }
+            HirExprKind::Const(cid) => {
+                let name = &self.m.consts[*cid].name;
+                vec![cid.raw().to_string(), format!("{name:?}")]
+            }
             HirExprKind::Unresolved(name) => vec![format!("{name:?}")],
             HirExprKind::Unary { op, expr: sub } => {
                 vec![format!("{op:?}"), self.render_expr(*sub)]
@@ -533,6 +559,7 @@ fn expr_name(kind: &HirExprKind) -> &'static str {
         HirExprKind::Null => "Null",
         HirExprKind::Local(_) => "Local",
         HirExprKind::Fn(_) => "Fn",
+        HirExprKind::Const(_) => "Const",
         HirExprKind::Unresolved(_) => "Unresolved",
         HirExprKind::Unary { .. } => "Unary",
         HirExprKind::Binary { .. } => "Binary",

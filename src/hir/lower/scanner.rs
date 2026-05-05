@@ -22,10 +22,19 @@ fn name_to_intrinsic(name: &str) -> Option<Intrinsic> {
     }
 }
 
+/// Identifier in the value namespace. Both `fn` items and `const`
+/// items occupy this namespace; lookup yields one of these. See
+/// spec/18_CONST.md.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ValueId {
+    Fn(FnId),
+    Const(ConstId),
+}
+
 #[derive(Default)]
 pub(super) struct ModuleScope {
     pub types: HashMap<String, HAdtId>,
-    pub values: HashMap<String, FnId>,
+    pub values: HashMap<String, ValueId>,
 }
 
 /// Per-file scoping.
@@ -44,7 +53,7 @@ pub(super) struct ModuleScopeCtx {
 
 impl ModuleScopeCtx {
     /// Resolve a value-namespace name. Local first, then import.
-    pub fn lookup_value(&self, name: &str) -> Option<FnId> {
+    pub fn lookup_value(&self, name: &str) -> Option<ValueId> {
         self.local_scope
             .values
             .get(name)
@@ -67,6 +76,10 @@ impl ModuleScopeCtx {
 pub(super) struct ProgramItems {
     pub adts: IndexVec<HAdtId, HirAdt>,
     pub fns: IndexVec<FnId, HirFn>,
+    /// All `const` items in the program. Allocated at scanner prescan;
+    /// used by typeck (`const_tys`) and codegen (`emit_expr` Const arm).
+    /// See spec/18_CONST.md.
+    pub consts: IndexVec<ConstId, HirConstItem>,
     /// All type parameters in the program, keyed by `HTyParamId`.
     /// Populated at prescan time so `lower_ty` can resolve `Named(T)`
     /// → `Param(tpid)` during body lowering. See spec/16_GENERIC.md §HIR.
@@ -83,6 +96,12 @@ struct Scanner {
     /// Per-ADT raw `FieldDecl`s captured during prescan; consumed by
     /// `seal_adts`. Parallels `items.adts` by `HAdtId`.
     adt_field_decls: IndexVec<HAdtId, Vec<ast::FieldDecl>>,
+    /// Per-const raw type-position AST id captured during prescan.
+    /// Lowered later (see `seal_consts`) once every ADT's name is
+    /// registered in its file's scope, so a const annotation can
+    /// reference a user-defined ADT declared later in source. See
+    /// spec/18_CONST.md.
+    const_ty_decls: IndexVec<ConstId, ast::TypeId>,
     errors: RefCell<Vec<HirError>>,
 }
 
@@ -125,6 +144,12 @@ pub(super) fn scan(files: &IndexVec<FileId, LoadedFile>) -> (ScanResult, Vec<Hir
     // Pass 4a: lower each ADT's field types under its origin file's scope.
     scanner.seal_adts(files);
 
+    // Pass 4b: lower each const's annotated type under its origin
+    // file's scope. Deferred from prescan so a const can name an ADT
+    // declared later in source. Empty TyParamScope (consts are not
+    // generic in v0). See spec/18_CONST.md.
+    scanner.seal_consts(files);
+
     (
         ScanResult {
             items: scanner.items,
@@ -142,6 +167,20 @@ impl Scanner {
 
     fn get_adt(&self, adt_id: HAdtId) -> &HirAdt {
         &self.items.adts[adt_id]
+    }
+
+    fn get_const(&self, cid: ConstId) -> &HirConstItem {
+        &self.items.consts[cid]
+    }
+
+    /// Span of a value-namespace entry — fn or const. Used by the
+    /// duplicate-detection arms to attribute "first defined here" /
+    /// "duplicate definition" labels uniformly. See spec/18_CONST.md.
+    fn value_span(&self, vid: ValueId) -> Span {
+        match vid {
+            ValueId::Fn(fid) => self.get_fn(fid).span.clone(),
+            ValueId::Const(cid) => self.get_const(cid).span.clone(),
+        }
     }
 
     fn get_scope_ctx_mut(&mut self, file: FileId) -> &mut ModuleScopeCtx {
@@ -232,17 +271,33 @@ impl Scanner {
                     // Insert and check in one shot. `HashMap.insert`
                     // returns the displaced (older) entry — that's
                     // the *first* definition; the one we just pushed
-                    // is the duplicate.
-                    if let Some(displaced_fn_id) = self
+                    // is the duplicate. fn-vs-fn keeps `DuplicateFn`
+                    // for diagnostic continuity; fn-vs-const routes
+                    // through `DuplicateValueSymbol` since consts and
+                    // fns share the value namespace. See
+                    // spec/18_CONST.md.
+                    if let Some(displaced) = self
                         .get_local_scope_mut(file.file)
                         .values
-                        .insert(name.clone(), fn_id)
+                        .insert(name.clone(), ValueId::Fn(fn_id))
                     {
-                        self.emit_error(HirError::DuplicateFn {
-                            name: name.clone(),
-                            first: self.get_fn(displaced_fn_id).span.clone(),
-                            dup: self.get_fn(fn_id).span.clone(),
-                        });
+                        let dup = self.get_fn(fn_id).span.clone();
+                        match displaced {
+                            ValueId::Fn(displaced_fn_id) => {
+                                self.emit_error(HirError::DuplicateFn {
+                                    name: name.clone(),
+                                    first: self.get_fn(displaced_fn_id).span.clone(),
+                                    dup,
+                                });
+                            }
+                            ValueId::Const(displaced_cid) => {
+                                self.emit_error(HirError::DuplicateValueSymbol {
+                                    name: name.clone(),
+                                    first: self.get_const(displaced_cid).span.clone(),
+                                    dup,
+                                });
+                            }
+                        }
                     }
 
                     if scan_ctx.in_extern_c {
@@ -345,6 +400,67 @@ impl Scanner {
                 ItemKind::Import(_) => {
                     // imports are resolved at the loader
                 }
+                ItemKind::Const(const_decl) => {
+                    let (name, span) = (&const_decl.name.name, item.span.clone());
+
+                    // Extract literal value. Parser pinned RHS to a
+                    // literal — anything else is unreachable. CharLit
+                    // gets the same out-of-range guard as
+                    // `lower_char_lit` in the body lowerer.
+                    let value = match &scan_ctx.ast.exprs[const_decl.value].kind {
+                        ast::ExprKind::IntLit(n) => HirConstValue::Int(*n),
+                        ast::ExprKind::BoolLit(b) => HirConstValue::Bool(*b),
+                        ast::ExprKind::CharLit(c) => {
+                            let v = *c as u32;
+                            if v <= u8::MAX as u32 {
+                                HirConstValue::Char(v as u8)
+                            } else {
+                                self.emit_error(HirError::CharOutOfRange {
+                                    ch: *c,
+                                    span: scan_ctx.ast.exprs[const_decl.value].span.clone(),
+                                });
+                                HirConstValue::Char(0)
+                            }
+                        }
+                        ast::ExprKind::StrLit(s) => HirConstValue::Str(s.clone()),
+                        other => unreachable!(
+                            "parser ensures const RHS is one of IntLit/BoolLit/CharLit/StrLit; got {other:?}"
+                        ),
+                    };
+
+                    // Push a stub with a placeholder `HirTy` (Error).
+                    // The real annotation is lowered in `seal_consts`
+                    // (Pass 4b), after every ADT's name has been
+                    // registered, so a const can name an ADT declared
+                    // later in source. Same shape as how ADT field
+                    // types are deferred to `seal_adts`. See
+                    // spec/18_CONST.md.
+                    let placeholder_ty = HirTy {
+                        kind: HirTyKind::Error,
+                        span: span.clone(),
+                    };
+                    let cid = self.items.consts.push(HirConstItem {
+                        name: name.clone(),
+                        ty: placeholder_ty,
+                        value,
+                        span: span.clone(),
+                    });
+                    self.const_ty_decls.push(const_decl.ty);
+
+                    if let Some(displaced) = self
+                        .get_local_scope_mut(file.file)
+                        .values
+                        .insert(name.clone(), ValueId::Const(cid))
+                    {
+                        let dup = self.get_const(cid).span.clone();
+                        let first = self.value_span(displaced);
+                        self.emit_error(HirError::DuplicateValueSymbol {
+                            name: name.clone(),
+                            first,
+                            dup,
+                        });
+                    }
+                }
             };
         }
     }
@@ -353,28 +469,45 @@ impl Scanner {
         for &import in &file.direct_imports {
             let imported_file = &files[import];
 
-            // Values namespace.
-            let imported_values = self
+            // Values namespace. Values are now `ValueId` (fn or const)
+            // — both kinds flow through the same import path. Cross-
+            // kind collisions route through `DuplicateValueSymbol`;
+            // fn-vs-fn keeps `DuplicateFn` for diagnostic continuity.
+            // See spec/18_CONST.md.
+            let imported_values: Vec<(String, ValueId)> = self
                 .get_local_scope(imported_file.file)
                 .into_iter()
                 .flat_map(|s| s.values.iter())
-                .map(|(name, &fn_id)| (name.clone(), fn_id))
-                .collect::<Vec<_>>();
-            for (imported_name, imported_fn_id) in imported_values {
+                .map(|(name, &vid)| (name.clone(), vid))
+                .collect();
+            for (imported_name, imported_vid) in imported_values {
                 if let Some(old) = self
                     .get_import_scope_mut(file.file)
                     .values
-                    .insert(imported_name.clone(), imported_fn_id)
+                    .insert(imported_name.clone(), imported_vid)
                     .or_else(|| {
                         self.get_local_scope(file.file)
                             .and_then(|s| s.values.get(&imported_name).copied())
                     })
                 {
-                    self.emit_error(HirError::DuplicateFn {
-                        name: imported_name,
-                        first: self.get_fn(old).span.clone(),
-                        dup: self.get_fn(imported_fn_id).span.clone(),
-                    });
+                    let first = self.value_span(old);
+                    let dup = self.value_span(imported_vid);
+                    match (old, imported_vid) {
+                        (ValueId::Fn(_), ValueId::Fn(_)) => {
+                            self.emit_error(HirError::DuplicateFn {
+                                name: imported_name,
+                                first,
+                                dup,
+                            });
+                        }
+                        _ => {
+                            self.emit_error(HirError::DuplicateValueSymbol {
+                                name: imported_name,
+                                first,
+                                dup,
+                            });
+                        }
+                    }
                 }
             }
 
@@ -406,25 +539,32 @@ impl Scanner {
     }
 
     fn check_global_conflicts(&mut self, files: &IndexVec<FileId, LoadedFile>) {
-        let mut seen_fn_id = HashMap::<&String, FnId>::default();
+        // Cross-file value-namespace dup check. Values are `ValueId`
+        // (fn or const); cross-kind collisions route through
+        // `DuplicateGlobalSymbol` just like the same-kind cases — the
+        // renderer doesn't distinguish, since the labels are the
+        // spans. See spec/18_CONST.md.
+        let mut seen_value: HashMap<&String, ValueId> = HashMap::default();
         let mut seen_adt_id = HashMap::<&String, HAdtId>::default();
 
         for file in files {
             // Values namespace.
-            for (name, &fn_id) in self
+            for (name, &vid) in self
                 .get_local_scope(file.file)
                 .iter()
                 .flat_map(|s| &s.values)
             {
-                if let Some(&first) = seen_fn_id.get(name) {
+                if let Some(&first) = seen_value.get(name) {
+                    let first_span = self.value_span(first);
+                    let dup_span = self.value_span(vid);
                     self.emit_error(HirError::DuplicateGlobalSymbol {
                         name: name.clone(),
-                        first: self.get_fn(first).span.clone(),
-                        dup: self.get_fn(fn_id).span.clone(),
+                        first: first_span,
+                        dup: dup_span,
                         root: file.file,
                     });
                 }
-                seen_fn_id.insert(name, fn_id);
+                seen_value.insert(name, vid);
             }
             // Types namespace.
             for (name, &haid) in self
@@ -513,6 +653,33 @@ impl Scanner {
                 fields,
                 span,
             });
+        }
+    }
+
+    /// Pass 4b: lower each const item's annotated type under its
+    /// origin file's resolution scope. Deferred from prescan so a
+    /// const can name an ADT declared later in source. Walks all
+    /// consts in `ConstId` (= prescan = source) order. Const items
+    /// are not generic in v0, so the type-param scope is empty.
+    /// See spec/18_CONST.md.
+    fn seal_consts(&mut self, files: &IndexVec<FileId, LoadedFile>) {
+        let const_ty_decls = std::mem::take(&mut self.const_ty_decls);
+        for (cid, ast_ty) in const_ty_decls.into_iter_enumerated() {
+            let origin = self.items.consts[cid].span.file;
+            let lf = &files[origin];
+            let scope = self
+                .scopes
+                .get(&origin)
+                .expect("file scope built in passes 1+2");
+            let empty_ty_params = ty::TyParamScope(&[]);
+            let lowered_ty = ty::lower_ty(
+                &lf.ast,
+                scope,
+                empty_ty_params,
+                &mut self.errors.borrow_mut(),
+                ast_ty,
+            );
+            self.items.consts[cid].ty = lowered_ty;
         }
     }
 }

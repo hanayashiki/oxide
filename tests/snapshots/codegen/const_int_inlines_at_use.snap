@@ -1,0 +1,14 @@
+; ModuleID = 'test'
+source_filename = "test"
+
+define i1 @is_fn_kw(i8 %k) {
+allocas:
+  %k.0.slot = alloca i8, align 1
+  br label %body
+
+body:                                             ; preds = %allocas
+  store i8 %k, ptr %k.0.slot, align 1
+  %load = load i8, ptr %k.0.slot, align 1
+  %eq = icmp eq i8 %load, 10
+  ret i1 %eq
+}

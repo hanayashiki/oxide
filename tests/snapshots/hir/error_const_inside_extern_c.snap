@@ -1,0 +1,12 @@
+HirProgram
+  Module error_const_inside_extern_c.ox (root)
+== diagnostics ==
+[E0211] Error: `const` items are not supported inside `extern "C"` blocks
+   ╭─[ error_const_inside_extern_c.ox:2:5 ]
+   │
+ 2 │     const X: i32 = 0;
+   │     ────────┬────────  
+   │             ╰────────── not allowed here
+   │ 
+   │ Help: v0 only accepts foreign `fn` declarations inside extern blocks
+───╯

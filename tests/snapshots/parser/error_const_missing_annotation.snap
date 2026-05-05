@@ -1,0 +1,11 @@
+Module
+== diagnostics ==
+[E0101] Error: unexpected token: found Eq
+   ╭─[ error_const_missing_annotation.ox:1:9 ]
+   │
+ 1 │ const X = 10;
+   │         ┬  
+   │         ╰── unexpected here
+   │ 
+   │ Note: expected: token
+───╯

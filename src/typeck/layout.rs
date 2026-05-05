@@ -144,6 +144,7 @@ mod tests {
             fn_sigs: IndexVec::new(),
             local_tys: IndexVec::new(),
             expr_tys: IndexVec::new(),
+            const_tys: IndexVec::new(),
             call_type_args: std::collections::HashMap::new(),
         }
     }

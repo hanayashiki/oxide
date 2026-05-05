@@ -1,0 +1,2 @@
+Module
+  Const DEBUG: bool = Bool(false)

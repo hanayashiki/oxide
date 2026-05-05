@@ -1,0 +1,22 @@
+HirProgram
+  Module error_const_shadows_fn.ox (root)
+    Const[0] FOO: i32 = Int(2)
+    Fn[0] FOO() -> i32
+      Block
+        tail: Int(1)
+== diagnostics ==
+[E0214] Error: the value symbol `FOO` is defined multiple times
+   ╭─[ error_const_shadows_fn.ox:2:1 ]
+   │
+ 2 │ const FOO: i32 = 2;
+   │ ─────────┬─────────  
+   │          ╰─────────── duplicate definition
+   │
+   ├─[ error_const_shadows_fn.ox:2:1 ]
+   │
+ 1 │ fn FOO() -> i32 { 1 }
+   │ ──────────┬──────────  
+   │           ╰──────────── first defined here
+   │ 
+   │ Help: fns and `const` items share the same value namespace; rename one of them
+───╯

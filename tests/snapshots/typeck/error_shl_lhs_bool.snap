@@ -1,13 +1,4 @@
 == diagnostics ==
-[E0250] Error: type mismatch: expected `u32`, found `bool`
-   ╭─[ error_shl_lhs_bool.ox:1:15 ]
-   │
- 1 │ ╭─▶ fn f() -> u32 {
-   ┆ ┆   
- 4 │ ├─▶ }
-   │ │       
-   │ ╰─────── type mismatch here
-───╯
 [E0280] Error: expected an integer operand, found `bool`
    ╭─[ error_shl_lhs_bool.ox:3:5 ]
    │
@@ -16,6 +7,15 @@
    │       ╰─── expected integer here
    │ 
    │ Help: boolean arithmetic / bitwise / shift isn't defined; use `&&`, `||`, `!` for logical combinations
+───╯
+[E0250] Error: type mismatch: expected `u32`, found `bool`
+   ╭─[ error_shl_lhs_bool.ox:1:15 ]
+   │
+ 1 │ ╭─▶ fn f() -> u32 {
+   ┆ ┆   
+ 4 │ ├─▶ }
+   │ │       
+   │ ╰─────── type mismatch here
 ───╯
 == types ==
 Fn[0] f() -> u32

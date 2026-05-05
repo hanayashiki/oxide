@@ -1,0 +1,10 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `bool`, found `i32`
+   ╭─[ error_const_int_overflow_into_bool.ox:4:12 ]
+   │
+ 4 │ const X: bool = 0;
+   │            ──┬─  
+   │              ╰─── type mismatch here
+───╯
+== types ==
+Const[0] X: bool = Int(0)

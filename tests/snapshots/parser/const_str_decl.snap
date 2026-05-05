@@ -1,0 +1,2 @@
+Module
+  Const GREETING: *const [u8; Int(6)] = Str("hello")

@@ -1,0 +1,13 @@
+== diagnostics ==
+[E0269] Error: unsized array `[T]` cannot appear by value at a function parameter
+   ╭─[ error_sized_pointer_to_sized_array_of_unsized.ox:7:11 ]
+   │
+ 7 │ fn want(p: *const [[i32]; 3]) -> i32 {
+   │           ──────────┬─────────  
+   │                     ╰─────────── unsized type at value position
+   │ 
+   │ Help: use a pointer (`*const [T]` / `*mut [T]`) for runtime-sized buffers, or a sized array `[T; N]` if the length is known at compile time
+───╯
+== types ==
+Fn[0] want(p[Local(0)]: *const [[i32]; 3]) -> i32
+  HExprId(0) : i32

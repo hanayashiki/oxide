@@ -1,0 +1,12 @@
+== diagnostics ==
+[E0257] Error: pointer mutability mismatch: expected `*mut [u8; 6]`, found `*const [u8; 6]`
+   ╭─[ error_const_str_to_mut_ptr.ox:4:12 ]
+   │
+ 4 │ const X: *mut [u8; 6] = "hello";
+   │            ──────┬─────  
+   │                  ╰─────── incompatible pointer
+   │ 
+   │ Help: only `*mut T` → `*const T` is allowed at the outer layer; inner positions must match exactly
+───╯
+== types ==
+Const[0] X: *mut [u8; 6] = Str("hello")

@@ -326,14 +326,28 @@ impl TyArena {
         id
     }
 
+    /// C-style string literal: `*const [u8; N]` where
+    /// `N = byte_len + 1` (the trailing NUL is appended by
+    /// codegen and counted in the type, matching C
+    /// `char[N]` for `"hello"` → `char[6]`). Pointer-to-
+    /// sized-array form encodes immutability structurally
+    /// via the outer `*const` (a bare `[u8; N]` place
+    /// would let `let mut s = "hi";` mutate). See
+    pub fn intern_str_lit(&mut self, s: &String) -> TyId {
+        // spec/07_POINTER.md §4.
+        let n = (s.as_bytes().len() + 1) as u64;
+        let u8_ty = self.u8;
+        let arr_ty = self.intern(TyKind::Array(u8_ty, Some(n)));
+
+        self.intern(TyKind::Ptr(arr_ty, Mutability::Const))
+    }
+
     /// Look up the `TyKind` for a given `TyId`. The returned reference
     /// borrows from the arena; callers that want to recurse-and-intern
     /// (e.g. `substitute_ty`) must `.clone()` first to release the
     /// borrow before the next `&mut self` call.
     pub fn kind(&self, id: TyId) -> &TyKind {
-        self.arena
-            .get(id)
-            .expect("TyId out of range for TyArena")
+        self.arena.get(id).expect("TyId out of range for TyArena")
     }
 
     /// Substitute `Param(_)` leaves in `ty` through the `subst` map,
@@ -385,10 +399,8 @@ impl TyArena {
             // (extension).
             TyKind::Adt(_, ref args) if args.is_empty() => ty,
             TyKind::Adt(aid, args) => {
-                let new_args: Vec<TyId> = args
-                    .iter()
-                    .map(|&a| self.substitute_ty(a, subst))
-                    .collect();
+                let new_args: Vec<TyId> =
+                    args.iter().map(|&a| self.substitute_ty(a, subst)).collect();
                 self.intern(TyKind::Adt(aid, new_args))
             }
             // Signatures never carry Infer (decl phase resolves them to
@@ -456,8 +468,7 @@ impl TyArena {
                 if args.is_empty() {
                     format!("Adt({})", aid.raw())
                 } else {
-                    let rendered: Vec<String> =
-                        args.iter().map(|&a| self.render(a)).collect();
+                    let rendered: Vec<String> = args.iter().map(|&a| self.render(a)).collect();
                     format!("Adt({}, [{}])", aid.raw(), rendered.join(", "))
                 }
             }

@@ -1222,8 +1222,47 @@ where
             extern_block_parser(item.clone()),
             struct_item_parser(),
             fn_item_parser(),
+            const_item_parser(),
         ))
     })
+}
+
+/// `const Name: Type = LITERAL;`. The RHS slot accepts exactly one
+/// literal token — `IntLit | BoolLit | CharLit | StrLit`. No
+/// expressions, casts, parens, or const-eval. Same posture as the
+/// array-length slot's `int_lit_length_parser`. See
+/// spec/18_CONST.md.
+fn const_item_parser<'a, I>() -> impl Parser<'a, I, ItemId, Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+{
+    let expr = expr_parser();
+    let ty = type_parser(expr);
+    let literal = choice((
+        int_lit_parser(),
+        bool_lit_parser(),
+        char_lit_parser(),
+        str_lit_parser(),
+    ))
+    .labelled("const literal");
+
+    just(TokenKind::KwConst)
+        .ignore_then(ident_parser())
+        .then_ignore(just(TokenKind::Colon))
+        .then(ty)
+        .then_ignore(just(TokenKind::Eq))
+        .then(literal)
+        .then_ignore(just(TokenKind::Semi))
+        .map_with(|((name, ty), value), e| {
+            let span = e.lex_span();
+            e.push_item(ItemKind::Const(ConstDecl {
+                name,
+                ty,
+                value,
+                span,
+            }))
+        })
+        .labelled("const item")
 }
 
 pub(super) fn module_parser<'a, I>() -> impl Parser<'a, I, Vec<ItemId>, Extra<'a>>

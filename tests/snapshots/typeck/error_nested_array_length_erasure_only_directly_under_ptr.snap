@@ -1,0 +1,24 @@
+== diagnostics ==
+[E0265] Error: array length mismatch: expected `[i32]`, found `[i32; 2]`
+   ╭─[ error_nested_array_length_erasure_only_directly_under_ptr.ox:8:12 ]
+   │
+ 8 │     want(q)
+   │            ┬  
+   │            ╰── length mismatch
+───╯
+[E0269] Error: unsized array `[T]` cannot appear by value at a function parameter
+   ╭─[ error_nested_array_length_erasure_only_directly_under_ptr.ox:5:11 ]
+   │
+ 5 │ fn want(p: *const [[i32]; 3]) -> i32 { 0 }
+   │           ──────────┬─────────  
+   │                     ╰─────────── unsized type at value position
+   │ 
+   │ Help: use a pointer (`*const [T]` / `*mut [T]`) for runtime-sized buffers, or a sized array `[T; N]` if the length is known at compile time
+───╯
+== types ==
+Fn[0] want(p[Local(0)]: *const [[i32]; 3]) -> i32
+  HExprId(0) : i32
+Fn[1] caller(q[Local(1)]: *const [[i32; 2]; 3]) -> i32
+  HExprId(1) : fn(*const [[i32]; 3]) -> i32
+  HExprId(2) : *const [[i32; 2]; 3]
+  HExprId(3) : i32

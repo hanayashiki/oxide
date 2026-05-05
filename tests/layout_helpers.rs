@@ -46,6 +46,7 @@ fn empty_typeck() -> TypeckResults {
         fn_sigs: index_vec::IndexVec::new(),
         local_tys: index_vec::IndexVec::new(),
         expr_tys: index_vec::IndexVec::new(),
+        const_tys: index_vec::IndexVec::new(),
         call_type_args: std::collections::HashMap::new(),
     }
 }

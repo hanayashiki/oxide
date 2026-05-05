@@ -1,0 +1,2 @@
+Module
+  Const TK_KW_FN: u8 = Int(10)

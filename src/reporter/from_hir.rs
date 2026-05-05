@@ -19,6 +19,16 @@ pub fn from_hir_error(err: &HirError) -> Diagnostic {
                 .with_label(Label::primary(dup.file, dup.clone(), "duplicate definition"))
                 .with_label(Label::secondary(first.file, first.clone(), "first defined here"))
         }
+        HirError::DuplicateValueSymbol { name, first, dup } => Diagnostic::error(
+            "E0214",
+            format!("the value symbol `{name}` is defined multiple times"),
+        )
+        .with_label(Label::primary(dup.file, dup.clone(), "duplicate definition"))
+        .with_label(Label::secondary(first.file, first.clone(), "first defined here"))
+        .with_help(
+            "fns and `const` items share the same value namespace; \
+             rename one of them",
+        ),
         HirError::CharOutOfRange { ch, span } => Diagnostic::error(
             "E0203",
             format!("char literal `{ch:?}` does not fit in a byte (`u8`)"),

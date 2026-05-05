@@ -1,0 +1,11 @@
+Module
+== diagnostics ==
+[E0101] Error: unexpected token: found Plus
+   ╭─[ error_const_non_literal_rhs.ox:1:18 ]
+   │
+ 1 │ const X: i32 = 1 + 2;
+   │                  ┬  
+   │                  ╰── unexpected here
+   │ 
+   │ Note: expected: token
+───╯

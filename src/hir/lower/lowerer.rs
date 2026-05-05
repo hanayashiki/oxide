@@ -137,6 +137,7 @@ impl<'a> Lowerer<'a> {
         let n_files = self.files.len();
         let mut module_fns: Vec<Vec<FnId>> = vec![Vec::new(); n_files];
         let mut module_adts: Vec<Vec<HAdtId>> = vec![Vec::new(); n_files];
+        let mut module_consts: Vec<Vec<ConstId>> = vec![Vec::new(); n_files];
 
         // `iter_enumerated` over the program-wide arenas yields stubs in
         // prescan (= source) order; bucketing by `span.file` recovers
@@ -151,17 +152,29 @@ impl<'a> Lowerer<'a> {
                 slot.push(haid);
             }
         }
+        for (cid, hir_const) in self.scan.items.consts.iter_enumerated() {
+            if let Some(slot) = module_consts.get_mut(hir_const.span.file.0 as usize) {
+                slot.push(cid);
+            }
+        }
 
         let mut modules: IndexVec<FileId, HirModule> = IndexVec::with_capacity(n_files);
-        for (i, (fns, adts)) in module_fns.into_iter().zip(module_adts.into_iter()).enumerate() {
+        for (i, ((fns, adts), consts)) in module_fns
+            .into_iter()
+            .zip(module_adts.into_iter())
+            .zip(module_consts.into_iter())
+            .enumerate()
+        {
             let file = FileId(i as u32);
             let span = self.files[file].ast.span.clone();
             modules.push(HirModule {
                 file,
                 root_fns: fns.clone(),
                 root_adts: adts.clone(),
+                root_consts: consts.clone(),
                 fns,
                 adts,
+                consts,
                 span,
             });
         }
@@ -169,6 +182,7 @@ impl<'a> Lowerer<'a> {
         HirProgram {
             fns: self.scan.items.fns,
             adts: self.scan.items.adts,
+            consts: self.scan.items.consts,
             locals: self.locals,
             exprs: self.exprs,
             blocks: self.blocks,
@@ -640,15 +654,20 @@ impl<'a> BodyCtx<'a> {
 
     /// Look up `name` innermost-scope-first, then file scope. Emits
     /// `UnresolvedName` on miss and returns `Unresolved(name)` so typeck
-    /// has something to walk.
+    /// has something to walk. Both `fn` items and `const` items live
+    /// in the value namespace; the `ValueId` discriminator picks the
+    /// right `HirExprKind` variant. See spec/18_CONST.md.
     fn resolve_ident(&mut self, id: &ast::Ident) -> HirExprKind {
         for scope in self.scopes.iter().rev() {
             if let Some(&lid) = scope.get(&id.name) {
                 return HirExprKind::Local(lid);
             }
         }
-        if let Some(fid) = self.scope().lookup_value(&id.name) {
-            return HirExprKind::Fn(fid);
+        if let Some(vid) = self.scope().lookup_value(&id.name) {
+            return match vid {
+                scanner::ValueId::Fn(fid) => HirExprKind::Fn(fid),
+                scanner::ValueId::Const(cid) => HirExprKind::Const(cid),
+            };
         }
         self.errors.push(HirError::UnresolvedName {
             name: id.name.clone(),

@@ -1,0 +1,10 @@
+== diagnostics ==
+[E0250] Error: type mismatch: expected `u8`, found `[u8; 6]`
+   ╭─[ error_const_str_pointee_shape_mismatch.ox:6:12 ]
+   │
+ 6 │ const X: *const u8 = "hello";
+   │            ────┬────  
+   │                ╰────── type mismatch here
+───╯
+== types ==
+Const[0] X: *const u8 = Str("hello")
