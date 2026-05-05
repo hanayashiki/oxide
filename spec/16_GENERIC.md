@@ -125,11 +125,24 @@ pub struct Instance {
     pub origin: InstanceOrigin,
 }
 
-pub enum InstanceOrigin {
-    /// Seeded directly (e.g., `main`, any reachable non-generic fn).
-    EntryPoint,
-    /// Discovered while walking `parent`'s body at this call site.
-    InstantiatedAt { parent: InstId, call_span: Span },
+/// Bookkeeping for the call-site that produced this generic
+/// instance. Used by the depth check in `instantiate` and by
+/// E0278 chain rendering in `walk_origin_chain`.
+pub struct InstanceOrigin {
+    pub parent: InstanceParent,
+    /// Span of the call that triggered this instantiation — the
+    /// cascade-edge span, not the parent fn's decl span.
+    pub call_span: Span,
+}
+
+pub enum InstanceParent {
+    /// Cascade hop from another generic instance.
+    Inst(InstId),
+    /// Cascade entry from a non-generic body. The non-generic fn
+    /// itself is **not** an Instance: codegen emits non-generic
+    /// fns directly from `hir.fns` and dispatches calls to them
+    /// via `fn_decls[fid]`.
+    Fn(FnId),
 }
 
 /// Top-level entry; mirrors `check(hir) -> (TypeckResults, Vec<TypeError>)`.
@@ -195,28 +208,21 @@ fn instantiate(
     type_args: Vec<TyId>,
     origin: InstanceOrigin,
 ) -> Option<InstId> {
+    debug_assert!(!type_args.is_empty(), "instantiate is generic-only");
     if let Some(&id) = cx.instance_map.get(&(fid, type_args.clone())) {
         return Some(id);                        // dedup → terminates the cascade
     }
-    let depth = match &origin {
-        InstanceOrigin::EntryPoint => 0,
-        InstanceOrigin::InstantiatedAt { parent, .. } => cx.instances[*parent].depth + 1,
+    // Depth counts cascade hops including the initial Fn → generic
+    // entry. The first generic from a non-generic root is depth 1
+    // — preserves `recursion_limit = N` user-visible boundary.
+    let depth = match origin.parent {
+        InstanceParent::Inst(p) => cx.instances[p].depth + 1,
+        InstanceParent::Fn(_) => 1,
     };
     if depth > cx.depth_limit {
-        // Only InstantiatedAt can reach this branch — EntryPoint's depth
-        // is 0 by construction and 0 > limit (limit ≥ 1) is false.
-        // The match makes that invariant explicit at the call site rather
-        // than hiding it behind an `origin.span()` helper that would have
-        // to lie about EntryPoint.
-        let span = match &origin {
-            InstanceOrigin::InstantiatedAt { call_span, .. } => call_span.clone(),
-            InstanceOrigin::EntryPoint => unreachable!(
-                "EntryPoint cannot exceed depth_limit (depth = 0)"
-            ),
-        };
         cx.errors.push(MonoError::DivergentMonomorphization {
             chain: cx.walk_origin_chain(&origin),
-            span,
+            span: origin.call_span.clone(),
         });
         return None;                            // failure admitted in the type
     }
@@ -250,15 +256,19 @@ This keeps the `Instance` lean and the responsibility clear: `Instance.params` /
 
 ### Algorithm
 
-1. **Seed** (`seed_entry_points`): for each non-generic fn with a body (`main` and any reachable non-generic fn), call `instantiate(cx, fid, vec![], InstanceOrigin::EntryPoint)`.
-2. **Drain** (`walk_body`): pop an `InstId` from `work_queue`. Build a local `subst` map for this instance from `(callee_sig.generic_params, instance.type_args)`. Walk the body's call exprs. For each call to a generic fn:
-   a. **Invariant check**: assert `!hir.fns[callee_fid].is_extern` (or equivalently, `callee_sig.generic_params.is_empty() || !is_extern`). The contract from §HIR ("clean HIR → `is_extern ⇒ generic_params.is_empty()`") guarantees this; if it fails here, the driver let dirty HIR through, and mono panics. No graceful recovery.
-   b. Read `TypeckResults.call_type_args[call_eid]` (the typeck-recorded type-args for this call).
-   c. Substitute the local `subst` into those type-args via `substitute_ty` (handles `T` → concrete chains in cascading calls).
-   d. Call `instantiate(cx, callee_fid, resolved_args, InstanceOrigin::InstantiatedAt { parent: inst_id, call_span })`.
-   e. If `instantiate` returned `Some(id)`, record `call_targets[call_eid] = id`. If it returned `None` (depth-overflow; error already pushed to `cx.errors`), skip the insertion and continue with the next call — we want to surface as many errors as possible per build, not bail on the first one.
+**Mono only tracks generic instantiations.** Non-generic non-extern fns are walked at root for cascade discovery but no `Instance` is created for them — codegen emits them directly from `hir.fns`.
 
-For calls to **non-generic** callees (extern or otherwise), `walk_body` does not invoke `instantiate` and does not insert into `call_targets`. Codegen's `emit_call` falls back to `fn_decls[fid]` for these — see §Codegen.
+1. **Seed** (`seed_entry_points`): for each non-generic non-extern fn with a body, call `walk_body(cx, InstanceParent::Fn(fid))`. NO `instantiate` call, NO `Instance` for the non-generic fn itself.
+2. **Walk** (`walk_body(cx, parent: InstanceParent)`): given the cascade-entry `parent` (`Inst(id)` for generic instances, `Fn(fid)` for non-generic roots), build the local `subst` map (empty for `Fn(_)`; from `(sig.generic_params, instance.type_args)` for `Inst(_)`). Walk the body's call exprs. For each call to a generic fn:
+   a. **Invariant check**: assert `!hir.fns[callee_fid].is_extern` (extern + generic is HIR-rejected by E0212).
+   b. Read `TypeckResults.call_type_args[call_eid]`.
+   c. Substitute the local `subst` into those type-args via `substitute_ty`.
+   d. Call `instantiate(cx, callee_fid, resolved_args, InstanceOrigin { parent, call_span })`.
+   e. `instantiate` populates `instance_map` as a side effect; codegen re-resolves through `mono.instance_map[(fid, resolved_args)]` at emit time. There is no `call_targets` table.
+3. **Drain**: pop an `InstId` from `work_queue` and call `walk_body(cx, InstanceParent::Inst(inst_id))`.
+4. Repeat until `work_queue` is empty.
+
+For calls to **non-generic** callees (extern or otherwise), `walk_body` does not invoke `instantiate`. Codegen's `emit_call` dispatches non-generic / extern calls through `fn_decls[fid]` (FnId-keyed) — see §Codegen. `instance_map` is purely for generic-call dispatch; its keys are always non-empty.
 3. Repeat until `work_queue` is empty.
 4. **Mangling** runs at `instantiate` time and stores the result on `Instance.mangled` — see §Mangling below.
 

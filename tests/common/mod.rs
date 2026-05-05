@@ -366,9 +366,11 @@ pub fn render_codegen(file_name: &str, src: &str) -> String {
 ///     section header is always emitted so error vs no-error is
 ///     visible at a glance.
 ///   `== instances ==` — one line per `InstId`:
-///     `Inst[N] mangled=<m> depth=<d> origin=<EntryPoint|Inst[parent]>`
-///     The origin chain captures cascade structure (which parent
-///     instantiated which child); no separate per-call-site dump.
+///     `Inst[N] mangled=<m> depth=<d> parent=<Inst(N)|Fn(N)>`
+///     The parent chain captures cascade structure: `Inst(p)` for a
+///     hop from another generic instance, `Fn(fid)` for a cascade
+///     entry from a non-generic body (the non-generic fn itself is
+///     not an Instance).
 ///   `== sig ==` — per instance: `params=[<ty>...] ret=<ty>` from
 ///     `inst.params` / `inst.ret` (the substituted shape).
 pub fn render_mono(file_name: &str, src: &str) -> String {
@@ -415,19 +417,17 @@ pub fn render_mono(file_name: &str, src: &str) -> String {
 
     out.push_str("== instances ==\n");
     for (iid, inst) in mono.instances.iter_enumerated() {
-        let origin = match &inst.origin {
-            oxide::mono::InstanceOrigin::EntryPoint => "EntryPoint".to_string(),
-            oxide::mono::InstanceOrigin::InstantiatedAt { parent, .. } => {
-                format!("Inst[{}]", parent.raw())
-            }
+        let parent = match &inst.origin.parent {
+            oxide::mono::InstanceParent::Inst(p) => format!("Inst({})", p.raw()),
+            oxide::mono::InstanceParent::Fn(fid) => format!("Fn({})", fid.raw()),
         };
         writeln!(
             out,
-            "Inst[{}] mangled={} depth={} origin={}",
+            "Inst[{}] mangled={} depth={} parent={}",
             iid.raw(),
             inst.mangled,
             inst.depth,
-            origin,
+            parent,
         )
         .unwrap();
     }

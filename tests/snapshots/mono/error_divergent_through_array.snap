@@ -19,15 +19,14 @@
    │       each step discovers a strictly-larger type — dedup never converges. Restructure the recursion to use a fixed type parameter or factor through a non-generic helper.
 ───╯
 == instances ==
-Inst[0] mangled=main depth=0 origin=EntryPoint
-Inst[1] mangled=f__$i32 depth=1 origin=Inst[0]
-Inst[2] mangled=f__$array_$i32_$n2 depth=2 origin=Inst[1]
-Inst[3] mangled=f__$array_$array_$i32_$n2_$n2 depth=3 origin=Inst[2]
-Inst[4] mangled=f__$array_$array_$array_$i32_$n2_$n2_$n2 depth=4 origin=Inst[3]
-Inst[5] mangled=f__$array_$array_$array_$array_$i32_$n2_$n2_$n2_$n2 depth=5 origin=Inst[4]
-Inst[6] mangled=f__$array_$array_$array_$array_$array_$i32_$n2_$n2_$n2_$n2_$n2 depth=6 origin=Inst[5]
-Inst[7] mangled=f__$array_$array_$array_$array_$array_$array_$i32_$n2_$n2_$n2_$n2_$n2_$n2 depth=7 origin=Inst[6]
-Inst[8] mangled=f__$array_$array_$array_$array_$array_$array_$array_$i32_$n2_$n2_$n2_$n2_$n2_$n2_$n2 depth=8 origin=Inst[7]
+Inst[0] mangled=f__$i32 depth=1 parent=Fn(1)
+Inst[1] mangled=f__$array_$i32_$n2 depth=2 parent=Inst(0)
+Inst[2] mangled=f__$array_$array_$i32_$n2_$n2 depth=3 parent=Inst(1)
+Inst[3] mangled=f__$array_$array_$array_$i32_$n2_$n2_$n2 depth=4 parent=Inst(2)
+Inst[4] mangled=f__$array_$array_$array_$array_$i32_$n2_$n2_$n2_$n2 depth=5 parent=Inst(3)
+Inst[5] mangled=f__$array_$array_$array_$array_$array_$i32_$n2_$n2_$n2_$n2_$n2 depth=6 parent=Inst(4)
+Inst[6] mangled=f__$array_$array_$array_$array_$array_$array_$i32_$n2_$n2_$n2_$n2_$n2_$n2 depth=7 parent=Inst(5)
+Inst[7] mangled=f__$array_$array_$array_$array_$array_$array_$array_$i32_$n2_$n2_$n2_$n2_$n2_$n2_$n2 depth=8 parent=Inst(6)
 == sig ==
 Inst[0] params=[] ret=()
 Inst[1] params=[] ret=()
@@ -37,4 +36,3 @@ Inst[4] params=[] ret=()
 Inst[5] params=[] ret=()
 Inst[6] params=[] ret=()
 Inst[7] params=[] ret=()
-Inst[8] params=[] ret=()

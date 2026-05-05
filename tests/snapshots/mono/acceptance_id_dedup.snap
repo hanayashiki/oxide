@@ -1,7 +1,5 @@
 == diagnostics ==
 == instances ==
-Inst[0] mangled=main depth=0 origin=EntryPoint
-Inst[1] mangled=id__$i32 depth=1 origin=Inst[0]
+Inst[0] mangled=id__$i32 depth=1 parent=Fn(1)
 == sig ==
-Inst[0] params=[] ret=i32
-Inst[1] params=[i32] ret=i32
+Inst[0] params=[i32] ret=i32

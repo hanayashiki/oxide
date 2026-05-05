@@ -227,7 +227,7 @@ id(1);          // ✅ inferred, same as above
 id::<[i32]>(x); // ❌ `T` must have a known size
 ```
 
-In the body, only copying is allowed if the value is generically typed:
+In the body, only copying is allowed if the value is of generic type:
 
 ```rust
 // ✅ can be assigned
@@ -242,7 +242,7 @@ fn eat<T>(x: T) {
     eat(x);
 }
 
-// ❌ because we do not know `T` supports comparison
+// ❌ because we do not know whether `T` supports comparison
 fn compare(a: T, b: T) {
     a < b
 }

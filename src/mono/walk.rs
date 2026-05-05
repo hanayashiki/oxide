@@ -18,35 +18,40 @@
 use std::collections::HashMap;
 
 use crate::hir::{HBlockId, HElseArm, HExprId, HirArrayLit, HirExprKind};
-use crate::typeck::{ParamId, TyId};
+use crate::typeck::{ParamId, TyId, subst_from};
 
-use super::{InstId, InstanceOrigin, MonoCtx, instantiate};
+use super::{InstanceOrigin, InstanceParent, MonoCtx, instantiate};
 
-pub(super) fn walk_body(cx: &mut MonoCtx, inst_id: InstId) {
-    let fid = cx.instances[inst_id].fid;
+/// Walk a fn body for generic-call discovery. `parent` names the
+/// cascade entry — `Inst(id)` when walking a generic instance's body,
+/// `Fn(fid)` when walking a non-generic root. The cascade site uses
+/// `parent` directly as the `InstanceOrigin.parent` for any generic
+/// callee discovered in this body.
+pub(super) fn walk_body(cx: &mut MonoCtx, parent: InstanceParent) {
+    let (fid, subst) = match parent {
+        InstanceParent::Fn(fid) => (fid, HashMap::new()),
+        InstanceParent::Inst(id) => {
+            let inst_fid = cx.instances[id].fid;
+            // Borrow-zip — no clone of type_args. cx.instances and
+            // cx.typeck are disjoint fields so the two `&` reads coexist.
+            let subst = subst_from(
+                &cx.typeck.fn_sig(inst_fid).generic_params,
+                &cx.instances[id].type_args,
+            );
+            (inst_fid, subst)
+        }
+    };
     let body_id = match cx.hir.fns[fid].body {
         Some(b) => b,
         None => return, // foreign fn — nothing to walk
     };
 
-    // Local subst for THIS instance's body. Empty for non-generic.
-    // Borrow-zip — no clone of type_args. cx.instances and cx.typeck
-    // are disjoint fields so the two `&` reads coexist.
-    let subst: HashMap<ParamId, TyId> = cx
-        .typeck
-        .fn_sig(fid)
-        .generic_params
-        .iter()
-        .copied()
-        .zip(cx.instances[inst_id].type_args.iter().copied())
-        .collect();
-
-    walk_block(cx, inst_id, body_id, &subst);
+    walk_block(cx, parent, body_id, &subst);
 }
 
 fn walk_block(
     cx: &mut MonoCtx,
-    inst_id: InstId,
+    parent: InstanceParent,
     bid: HBlockId,
     subst: &HashMap<ParamId, TyId>,
 ) {
@@ -58,13 +63,13 @@ fn walk_block(
         .map(|it| it.expr)
         .collect();
     for eid in items {
-        walk_expr(cx, inst_id, eid, subst);
+        walk_expr(cx, parent, eid, subst);
     }
 }
 
 fn walk_expr(
     cx: &mut MonoCtx,
-    inst_id: InstId,
+    parent: InstanceParent,
     eid: HExprId,
     subst: &HashMap<ParamId, TyId>,
 ) {
@@ -105,33 +110,30 @@ fn walk_expr(
                         cx,
                         callee_fid,
                         resolved_args,
-                        InstanceOrigin::InstantiatedAt {
-                            parent: inst_id,
-                            call_span,
-                        },
+                        InstanceOrigin { parent, call_span },
                     );
                 }
             }
-            walk_expr(cx, inst_id, callee, subst);
+            walk_expr(cx, parent, callee, subst);
             for a in args {
-                walk_expr(cx, inst_id, a, subst);
+                walk_expr(cx, parent, a, subst);
             }
         }
 
         // Structural recursion. Variant names match HirExprKind in
         // src/hir/ir.rs. Atoms (IntLit, BoolLit, CharLit, StrLit, Null,
         // Local, Fn, Unresolved, Continue, Poison) are no-ops.
-        HirExprKind::Block(bid) => walk_block(cx, inst_id, bid, subst),
+        HirExprKind::Block(bid) => walk_block(cx, parent, bid, subst),
         HirExprKind::If {
             cond,
             then_block,
             else_arm,
         } => {
-            walk_expr(cx, inst_id, cond, subst);
-            walk_block(cx, inst_id, then_block, subst);
+            walk_expr(cx, parent, cond, subst);
+            walk_block(cx, parent, then_block, subst);
             match else_arm {
-                Some(HElseArm::Block(bid)) => walk_block(cx, inst_id, bid, subst),
-                Some(HElseArm::If(eid)) => walk_expr(cx, inst_id, eid, subst),
+                Some(HElseArm::Block(bid)) => walk_block(cx, parent, bid, subst),
+                Some(HElseArm::If(eid)) => walk_expr(cx, parent, eid, subst),
                 None => {}
             }
         }
@@ -146,59 +148,59 @@ fn walk_expr(
             ..
         } => {
             if let Some(e) = init {
-                walk_expr(cx, inst_id, e, subst);
+                walk_expr(cx, parent, e, subst);
             }
             if let Some(e) = cond {
-                walk_expr(cx, inst_id, e, subst);
+                walk_expr(cx, parent, e, subst);
             }
             if let Some(e) = update {
-                walk_expr(cx, inst_id, e, subst);
+                walk_expr(cx, parent, e, subst);
             }
-            walk_block(cx, inst_id, body, subst);
+            walk_block(cx, parent, body, subst);
         }
         HirExprKind::Let { init, .. } => {
             if let Some(init) = init {
-                walk_expr(cx, inst_id, init, subst);
+                walk_expr(cx, parent, init, subst);
             }
         }
         HirExprKind::Return(value) => {
             if let Some(v) = value {
-                walk_expr(cx, inst_id, v, subst);
+                walk_expr(cx, parent, v, subst);
             }
         }
         HirExprKind::Break { expr } => {
             if let Some(e) = expr {
-                walk_expr(cx, inst_id, e, subst);
+                walk_expr(cx, parent, e, subst);
             }
         }
-        HirExprKind::Unary { expr, .. } => walk_expr(cx, inst_id, expr, subst),
+        HirExprKind::Unary { expr, .. } => walk_expr(cx, parent, expr, subst),
         HirExprKind::Binary { lhs, rhs, .. } => {
-            walk_expr(cx, inst_id, lhs, subst);
-            walk_expr(cx, inst_id, rhs, subst);
+            walk_expr(cx, parent, lhs, subst);
+            walk_expr(cx, parent, rhs, subst);
         }
         HirExprKind::Assign { target, rhs, .. } => {
-            walk_expr(cx, inst_id, target, subst);
-            walk_expr(cx, inst_id, rhs, subst);
+            walk_expr(cx, parent, target, subst);
+            walk_expr(cx, parent, rhs, subst);
         }
-        HirExprKind::Field { base, .. } => walk_expr(cx, inst_id, base, subst),
+        HirExprKind::Field { base, .. } => walk_expr(cx, parent, base, subst),
         HirExprKind::Index { base, index } => {
-            walk_expr(cx, inst_id, base, subst);
-            walk_expr(cx, inst_id, index, subst);
+            walk_expr(cx, parent, base, subst);
+            walk_expr(cx, parent, index, subst);
         }
         HirExprKind::StructLit { fields, .. } => {
             for f in fields {
-                walk_expr(cx, inst_id, f.value, subst);
+                walk_expr(cx, parent, f.value, subst);
             }
         }
-        HirExprKind::AddrOf { expr, .. } => walk_expr(cx, inst_id, expr, subst),
-        HirExprKind::Cast { expr, .. } => walk_expr(cx, inst_id, expr, subst),
+        HirExprKind::AddrOf { expr, .. } => walk_expr(cx, parent, expr, subst),
+        HirExprKind::Cast { expr, .. } => walk_expr(cx, parent, expr, subst),
         HirExprKind::ArrayLit(lit) => match lit {
             HirArrayLit::Elems(elems) => {
                 for e in elems {
-                    walk_expr(cx, inst_id, e, subst);
+                    walk_expr(cx, parent, e, subst);
                 }
             }
-            HirArrayLit::Repeat { init, .. } => walk_expr(cx, inst_id, init, subst),
+            HirArrayLit::Repeat { init, .. } => walk_expr(cx, parent, init, subst),
         },
 
         // Atoms — no recursion.

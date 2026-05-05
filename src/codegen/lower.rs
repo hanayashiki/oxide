@@ -31,27 +31,26 @@ use super::ty::{
 };
 
 /// Lower an entire `HirProgram` to an LLVM `Module`. Consumes mono's
-/// `MonoResults` to drive instance-keyed declarations and per-instance
-/// body emission. Verifies before returning; verifier failures panic.
+/// `MonoResults` to drive generic-instance declarations + body
+/// emission. Verifies before returning; verifier failures panic.
 ///
 /// Phase 1 (declare) runs two lookup tables side by side:
 ///   - `fn_decls: IndexVec<FnId, Option<FunctionValue>>` — the
 ///     FnId-keyed table consulted by `emit_call`'s non-generic /
-///     extern dispatch path. Populated for extern fns (Pass A) and
-///     for non-generic non-extern fns (the same FunctionValue created
-///     in Pass B is also stored here under the FnId).
+///     extern dispatch path. Populated for extern fns and for
+///     non-generic non-extern fns directly from `hir.fns` (Pass A).
 ///   - `inst_decls: IndexVec<InstId, FunctionValue>` — the InstId-
 ///     keyed table consulted by `emit_call`'s generic dispatch path.
-///     Populated for every `Instance` mono produced (Pass B).
+///     Populated for every generic `Instance` mono produced (Pass B).
 ///
-/// Pass A walks `hir.fns` for `is_extern` fns and adds one declaration
-/// per extern (verbatim source name).
+/// Pass A walks `hir.fns` and adds one declaration per non-generic fn
+/// (extern keeps its verbatim source name; non-generic non-extern uses
+/// the source name as the LLVM symbol — `mangle_inst(_, _, &[])`
+/// short-circuits to the source name, so no mangling is necessary
+/// here).
 ///
-/// Pass B walks `mono.instances` and adds one declaration per instance
-/// (mangled name). When the instance is non-generic non-extern, the
-/// same `FunctionValue` is also stored in `fn_decls[inst.fid]` so
-/// `emit_call` can resolve `Fn(fid)`-callees that have no
-/// `typeck.call_type_args` entry.
+/// Pass B walks `mono.instances` (now generic-only) and adds one
+/// declaration per instance (mangled name).
 ///
 /// After Phase 1, every reachable LLVM symbol exists. Phase 2 emits
 /// each instance's body — including self-recursive ones — without
@@ -72,44 +71,58 @@ pub fn codegen<'ctx>(
     // args))` call interns the LLVM type on first encounter.
     let mut adt_ll: AdtLlTypes<'ctx> = AdtLlTypes::new();
 
-    // Phase 1 Pass A — extern fns. Declared with their verbatim source
-    // names (the linker resolves these against external object files).
-    // `fn_decls` uses `Option` because generic fns produce no FnId-keyed
-    // entry — they're keyed by instance via `inst_decls` instead.
-    // Pass B fills in `fn_decls` for non-generic non-extern fns when it
-    // creates their FunctionValue.
+    // Phase 1 Pass A — every non-generic fn (extern + non-extern with
+    // body). Declared with their verbatim source names: extern fns
+    // resolve against external object files; non-generic non-extern
+    // fns share the source name as the LLVM symbol because
+    // `mangle_inst(_, _, &[])` collapses to the source name. `fn_decls`
+    // uses `Option` because generic fns produce no FnId-keyed entry —
+    // they're keyed by instance via `inst_decls` instead (Pass B).
+    //
+    // Snapshot signatures into an owned `Vec` first: the emission loop
+    // calls `lower_fn_type(ctx, typeck_results, ...)` which needs
+    // `&mut typeck_results`, conflicting with the `&FnSig` read borrow
+    // that `typeck_results.fn_sig(fid)` would hand out inline.
     let mut fn_decls: IndexVec<FnId, Option<FunctionValue<'ctx>>> =
         (0..hir.fns.len()).map(|_| None).collect();
-    // Snapshot extern fn signatures into an owned `Vec` first: the
-    // emission loop calls `lower_fn_type(ctx, typeck_results, ...)`
-    // which needs `&mut typeck_results`, so it can't coexist with the
-    // `&FnSig` borrow that `typeck_results.fn_sig(fid)` would hand out
-    // inline. Same shape as the `typeck_args_opt` clone at the call-
-    // dispatch site below.
-    let extern_fns: Vec<(FnId, Vec<TyId>, TyId, bool)> = hir
+    let non_generic_fns: Vec<(FnId, Vec<TyId>, TyId, bool)> = hir
         .fns
         .iter_enumerated()
-        .filter(|(_, h)| h.is_extern)
+        .filter(|(fid, h)| {
+            // Non-extern fns must have a body to be declared here; bodyless
+            // non-extern fns are HIR-rejected upstream.
+            if !h.is_extern && h.body.is_none() {
+                return false;
+            }
+            // Drop generic non-extern (handled by Pass B). Generic externs
+            // are typeck-rejected (E0212) so they wouldn't reach codegen,
+            // but the filter is symmetric for clarity.
+            typeck_results.fn_sig(*fid).generic_params.is_empty()
+        })
         .map(|(fid, _)| {
             let sig = typeck_results.fn_sig(fid);
             (fid, sig.params.clone(), sig.ret, sig.c_variadic)
         })
         .collect();
-    for (fid, params, ret, c_variadic) in extern_fns {
+    for (fid, params, ret, c_variadic) in non_generic_fns {
         let hir_fn = &hir.fns[fid];
         let fn_ty = lower_fn_type(ctx, typeck_results, &mut adt_ll, &params, ret, c_variadic);
         let fnv = module.add_function(&hir_fn.name, fn_ty, None);
+        // Attach LLVM param names for non-extern fns (debug-friendly).
+        if !hir_fn.is_extern {
+            for (i, pv) in fnv.get_param_iter().enumerate() {
+                let lid = hir_fn.params[i];
+                pv.set_name(&hir.locals[lid].name);
+            }
+        }
         fn_decls[fid] = Some(fnv);
     }
 
-    // Phase 1 Pass B — instances. Each `Instance` from mono produces
-    // one declaration with its mangled name and substituted signature.
-    // The FunctionValue lands in `inst_decls[inst_id]` for the generic
-    // dispatch path. For a non-generic non-extern instance (the
-    // dominant case in v0 programs that don't use generics), the same
-    // FunctionValue is also recorded under `fn_decls[inst.fid]` so
-    // `emit_call`'s non-generic dispatch path can resolve it by FnId
-    // without consulting the instance map.
+    // Phase 1 Pass B — generic instances. Each `Instance` from mono
+    // produces one declaration with its mangled name and substituted
+    // signature. The FunctionValue lands in `inst_decls[inst_id]` for
+    // the generic dispatch path at `emit_call`. Non-generic fns are
+    // **not** in mono.instances under the redesigned model.
     let mut inst_decls: IndexVec<InstId, FunctionValue<'ctx>> =
         IndexVec::with_capacity(mono.instances.len());
     for (_inst_id, inst) in mono.instances.iter_enumerated() {
@@ -129,12 +142,6 @@ pub fn codegen<'ctx>(
             pv.set_name(&hir.locals[lid].name);
         }
         inst_decls.push(fnv);
-        // Non-generic non-extern instance: also publish the
-        // FunctionValue in `fn_decls[inst.fid]` so `emit_call`'s
-        // FnId-keyed fallback path resolves it.
-        if inst.type_args.is_empty() && !hir.fns[inst.fid].is_extern {
-            fn_decls[inst.fid] = Some(fnv);
-        }
     }
 
     let mut cg = Codegen {
@@ -151,16 +158,28 @@ pub fn codegen<'ctx>(
         llvm_trap: Cell::new(None),
     };
 
-    // Pass 2 — define. Iterate mono.instances rather than hir.fns:
-    // generic fns produce multiple instances, each with its own body
-    // emission under a distinct subst; non-generic fns produce exactly
-    // one instance. Foreign fns are never instantiated (mono skips
-    // them in seed_entry_points), so `lower_fn` only sees body-having
-    // bodies.
-    for (inst_id, inst) in cg.mono.instances.iter_enumerated() {
-        if cg.hir.fns[inst.fid].body.is_some() {
-            cg.lower_fn(inst_id);
-        }
+    // Pass 2 — define. Two iteration sources under the redesigned model:
+    //   1. Non-generic non-extern fns from `hir.fns` (no Instance to
+    //      look up; the body is emitted with empty subst).
+    //   2. Generic instances from `mono.instances` (each with its own
+    //      `inst.type_args`-derived subst).
+    // Extern fns are never defined here (no body).
+    let non_generic_targets: Vec<FnId> = cg
+        .hir
+        .fns
+        .iter_enumerated()
+        .filter(|(fid, h)| {
+            !h.is_extern
+                && h.body.is_some()
+                && cg.typeck_results.fn_sig(*fid).generic_params.is_empty()
+        })
+        .map(|(fid, _)| fid)
+        .collect();
+    for fid in non_generic_targets {
+        cg.lower_fn(LowerTarget::NonGeneric(fid));
+    }
+    for (inst_id, _inst) in cg.mono.instances.iter_enumerated() {
+        cg.lower_fn(LowerTarget::Generic(inst_id));
     }
 
     if let Err(msg) = cg.module.verify() {
@@ -218,16 +237,27 @@ struct Codegen<'a, 'ctx> {
 /// instance's body — created in `lower_fn` and threaded as a `&mut`
 /// parameter through the emit methods. Plain data; no methods of its
 /// own.
+/// Drives `lower_fn`'s body emission. Two cases:
+///   - `NonGeneric(fid)`: emit a non-generic non-extern fn directly
+///     from HIR (no Instance, empty subst).
+///   - `Generic(inst_id)`: emit one body per generic instance from
+///     mono (subst built from `inst.type_args`).
+#[derive(Clone, Copy, Debug)]
+enum LowerTarget {
+    NonGeneric(FnId),
+    Generic(InstId),
+}
+
 struct FnCodegenContext<'ctx> {
-    /// Pointer back to this body's `Instance`. The instance carries
-    /// fid, type_args, params, ret. `fn_id` is recoverable as
-    /// `mono.instances[inst_id].fid` so it's not stored separately.
-    inst_id: InstId,
+    /// Substituted return type of this body. For non-generic fns this
+    /// is `sig.ret` (no Param leaves); for generic instances it's
+    /// `inst.ret` (already substituted by mono). Read at the implicit-
+    /// return path in `emit_return`.
+    ret_ty: TyId,
     /// Per-body type-parameter substitution. Built once at body-entry
     /// from `sig.generic_params` zipped with `inst.type_args`. Empty
-    /// for non-generic instances (in which case `substitute_ty` is
-    /// identity through interning, so the same code path works
-    /// uniformly).
+    /// for non-generic fns (in which case `substitute_ty` is identity
+    /// through interning, so the same code path works uniformly).
     subst: HashMap<ParamId, TyId>,
     fn_value: FunctionValue<'ctx>,
     /// Dedicated alloca block for this fn. `allocas:` is the entry block
@@ -547,17 +577,31 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
 
     // ---------- per-fn entry ----------
 
-    fn lower_fn(&mut self, inst_id: InstId) {
-        let fid = self.mono.instances[inst_id].fid;
-        let fnv = self.inst_decls[inst_id];
-
-        // Build per-body subst. self.typeck_results.fn_sig and
-        // self.mono.instances are disjoint sub-objects of self, so the
-        // two `&` reads coexist.
-        let subst = subst_from(
-            &self.typeck_results.fn_sig(fid).generic_params,
-            &self.mono.instances[inst_id].type_args,
-        );
+    fn lower_fn(&mut self, target: LowerTarget) {
+        // Extract (fid, ret, subst, fnv) from either the HIR-driven
+        // non-generic path or the mono-driven generic path. The rest of
+        // the body is target-agnostic.
+        let (fid, ret, subst, fnv) = match target {
+            LowerTarget::NonGeneric(fid) => {
+                let sig = self.typeck_results.fn_sig(fid);
+                let fnv = self
+                    .fn_decls[fid]
+                    .expect("non-generic fn must have a fn_decls entry from Pass A");
+                (fid, sig.ret, HashMap::new(), fnv)
+            }
+            LowerTarget::Generic(inst_id) => {
+                // self.typeck_results.fn_sig and self.mono.instances are
+                // disjoint sub-objects of self, so the two `&` reads
+                // coexist.
+                let inst_fid = self.mono.instances[inst_id].fid;
+                let inst_ret = self.mono.instances[inst_id].ret;
+                let subst = subst_from(
+                    &self.typeck_results.fn_sig(inst_fid).generic_params,
+                    &self.mono.instances[inst_id].type_args,
+                );
+                (inst_fid, inst_ret, subst, self.inst_decls[inst_id])
+            }
+        };
 
         // Two blocks at start: `allocas:` (the entry block) holds only
         // alloca instructions and falls through to `body:` via an
@@ -569,7 +613,7 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         self.builder.position_at_end(body_bb);
 
         let mut fx = FnCodegenContext {
-            inst_id,
+            ret_ty: ret,
             subst,
             fn_value: fnv,
             allocas_bb,
@@ -607,10 +651,10 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
         let body_val = self.emit_block(&mut fx, body_id);
 
         if !self.is_terminated() {
-            // Use the instance's already-substituted ret type, not the
-            // raw FnSig's (which may contain Param leaves for generic
-            // fns). For non-generic instances, inst.ret == sig.ret.
-            let ret_ty = self.mono.instances[inst_id].ret;
+            // `fx.ret_ty` is the substituted return type (set at body
+            // entry). For non-generic fns it equals `sig.ret`; for
+            // generic instances it's `inst.ret` from mono.
+            let ret_ty = fx.ret_ty;
             if is_void_ret(self.typeck_results.tys(), ret_ty) {
                 self.builder.build_return(None).unwrap();
             } else {
@@ -2041,10 +2085,10 @@ impl<'a, 'ctx> Codegen<'a, 'ctx> {
     // ---------- return ----------
 
     fn emit_return(&mut self, fx: &mut FnCodegenContext<'ctx>, val: Option<HExprId>) {
-        // Use the instance's substituted ret type, not the raw FnSig's
-        // (which carries Param leaves for generic fns). For non-generic
-        // instances, inst.ret == sig.ret.
-        let ret_ty = self.mono.instances[fx.inst_id].ret;
+        // `fx.ret_ty` is the substituted return type (set at body
+        // entry). For non-generic fns it equals `sig.ret`; for generic
+        // instances it's `inst.ret` from mono.
+        let ret_ty = fx.ret_ty;
         if is_void_ret(self.typeck_results.tys(), ret_ty) {
             // Either `return;` or `return e` where e itself is divergent.
             if let Some(v_eid) = val {

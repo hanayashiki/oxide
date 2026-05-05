@@ -6,15 +6,25 @@
 //! Architectural commitments (see spec/16_GENERIC.md §Monomorphization
 //! and the post-review plan):
 //!
+//! - **Mono only tracks generic instantiations.** Non-generic non-extern
+//!   fns are walked at root by `seed_entry_points` to discover the first
+//!   generic calls (cascade roots), but **no Instance is created** for
+//!   them. Codegen emits non-generic fns directly from `hir.fns` and
+//!   dispatches calls to them via `fn_decls[fid]`.
+//!
 //! - **Discovery walk**: `walk_body` is a structural HIR visitor that
 //!   dispatches at `Call(Fn(callee_fid), args)`. When the callee is
 //!   generic, it substitutes `typeck.call_type_args[parent_eid]` through
 //!   the caller's `subst` to produce ground type-args, then cascades
-//!   into `instantiate`.
+//!   into `instantiate`. The walker carries an `InstanceParent` that
+//!   names the cascade entry: `Inst(p)` when walking another generic
+//!   instance's body, `Fn(fid)` when walking a non-generic root.
 //!
 //! - **Cascade termination**: `instance_map` is populated *before* a
 //!   body is walked, so self-recursive calls (`fn rec<T>(x:T)->T { rec(x) }`)
-//!   hit the cache and terminate.
+//!   hit the cache and terminate. Keys are always non-empty —
+//!   non-generic dedup is unnecessary because non-generic fns aren't
+//!   instantiated by mono.
 //!
 //! - **Signature substitution at instantiation**: `Instance.params` and
 //!   `Instance.ret` are computed once at `instantiate` time. Body-internal
@@ -43,7 +53,7 @@ use index_vec::IndexVec;
 
 use crate::hir::{FnId, HirProgram};
 use crate::reporter::Span;
-use crate::typeck::{ParamId, TyId, TypeckResults};
+use crate::typeck::{TyId, TypeckResults, subst_from};
 
 pub use mangle::mangle_inst;
 
@@ -57,12 +67,12 @@ const DEFAULT_DEPTH_LIMIT: u32 = 256;
 #[derive(Debug)]
 pub struct MonoResults {
     pub instances: IndexVec<InstId, Instance>,
-    /// `(fid, ground type_args) → InstId`. Written by mono's `instantiate`,
-    /// read by codegen's `emit_call`: codegen takes the call site's
-    /// `typeck.call_type_args[parent_eid]`, substitutes through the caller's
-    /// `fx.subst` to ground them, and looks up the instance here. The same
-    /// call site under different parents (`outer<i32>` vs `outer<i64>`)
-    /// resolves to different instances.
+    /// `(fid, ground_type_args) → InstId`, populated by `mono::instantiate`.
+    /// Each **generic** call site plus its containing instantiation
+    /// corresponds to one entry. Keys are always non-empty: non-generic
+    /// fns are not Instances under this model; codegen dispatches them
+    /// through `fn_decls[fid]` instead. See spec/16_GENERIC.md
+    /// §Monomorphization.
     pub instance_map: HashMap<(FnId, Vec<TyId>), InstId>,
 }
 
@@ -80,13 +90,33 @@ pub struct Instance {
     pub origin: InstanceOrigin,
 }
 
+/// Bookkeeping for the call-site that produced an `Instance`. Used by
+/// the depth check (`instantiate`) and E0278 chain rendering
+/// (`walk_origin_chain`).
+///
+/// `parent` distinguishes the two cascade entry shapes:
+///  - `Inst(p)`: we're inside another generic instance's body when the
+///    call fired. Depth = `p.depth + 1`. Chain walk continues at `p`.
+///  - `Fn(fid)`: we're inside a non-generic body (the cascade root).
+///    Depth = 0. Chain walk terminates here, pushing `(fid, vec![],
+///    call_span)` so the diagnostic still names the source non-generic
+///    fn.
 #[derive(Clone, Debug)]
-pub enum InstanceOrigin {
-    /// Seeded by `seed_entry_points` — a non-generic non-extern fn with
-    /// a body. Depth = 0.
-    EntryPoint,
-    /// Pushed via cascade from `parent`'s body. Depth = parent.depth + 1.
-    InstantiatedAt { parent: InstId, call_span: Span },
+pub struct InstanceOrigin {
+    pub parent: InstanceParent,
+    /// Span of the call expression that triggered this instantiation —
+    /// the cascade-edge span, **not** the parent fn's decl span.
+    pub call_span: Span,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum InstanceParent {
+    /// Cascade hop from another generic instance.
+    Inst(InstId),
+    /// Cascade entry from a non-generic body. The non-generic fn itself
+    /// is not an Instance under this model — codegen emits it directly
+    /// from `hir.fns` and dispatches via `fn_decls[fid]`.
+    Fn(FnId),
 }
 
 #[derive(Debug)]
@@ -105,13 +135,9 @@ pub enum MonoError {
     },
 }
 
-/// Module entry. Walks HIR per-instance starting from non-generic
-/// entry points; produces MonoResults. Uses the default depth limit
-/// (`DEFAULT_DEPTH_LIMIT`).
-pub fn monomorphize(
-    hir: &HirProgram,
-    typeck: &mut TypeckResults,
-) -> (MonoResults, Vec<MonoError>) {
+/// Walks HIR per-instance starting from non-generic
+/// entry points; produces MonoResults.
+pub fn monomorphize(hir: &HirProgram, typeck: &mut TypeckResults) -> (MonoResults, Vec<MonoError>) {
     monomorphize_with_limit(hir, typeck, DEFAULT_DEPTH_LIMIT)
 }
 
@@ -128,7 +154,7 @@ pub fn monomorphize_with_limit(
     cx.depth_limit = depth_limit;
     cx.seed_entry_points();
     while let Some(inst_id) = cx.work_queue.pop_front() {
-        walk::walk_body(&mut cx, inst_id);
+        walk::walk_body(&mut cx, InstanceParent::Inst(inst_id));
     }
     cx.finish()
 }
@@ -158,33 +184,40 @@ impl<'a> MonoCtx<'a> {
         }
     }
 
-    /// Seed the work queue with one `EntryPoint` instance per non-generic,
-    /// non-extern, body-having fn. Generic non-extern fns enter the
-    /// instance set only via cascade. Externs are never seeded.
-    ///
-    /// V0 over-approximation: every reachable non-generic fn is seeded,
-    /// not just `main`-reachable. Dead-code elimination is a future pass
-    /// that can prune mono's complete instance graph; mono itself owns
-    /// the full graph regardless.
+    /// Walk every non-generic non-extern body to discover the first
+    /// generic calls (cascade roots). No Instance is created for the
+    /// non-generic fn itself — codegen will emit it directly from
+    /// `hir.fns`. Each generic call discovered seeds the cascade with
+    /// `parent: Fn(non_generic_fid)`.
     fn seed_entry_points(&mut self) {
-        for (fid, hir_fn) in self.hir.fns.iter_enumerated() {
-            if hir_fn.is_extern {
-                continue;
-            }
-            if hir_fn.body.is_none() {
-                continue;
-            }
-            let sig = self.typeck.fn_sig(fid);
-            if !sig.generic_params.is_empty() {
-                continue;
-            }
-            instantiate(self, fid, Vec::new(), InstanceOrigin::EntryPoint);
+        // Snapshot the eligible fids first to release the `&self.hir`
+        // borrow before `walk_body` (which needs `&mut self`).
+        let roots: Vec<FnId> = self
+            .hir
+            .fns
+            .iter_enumerated()
+            .filter_map(|(fid, h)| {
+                if h.is_extern || h.body.is_none() {
+                    return None;
+                }
+                if !self.typeck.fn_sig(fid).generic_params.is_empty() {
+                    return None;
+                }
+                Some(fid)
+            })
+            .collect();
+        for fid in roots {
+            walk::walk_body(self, InstanceParent::Fn(fid));
         }
     }
 
-    /// Walk parent pointers from the offending origin back to the root
-    /// EntryPoint. Each chain entry is `(FnId, Vec<TyId>, Span)`.
-    /// Output is in root → tip order.
+    /// Walk parent pointers from the offending origin back to the
+    /// non-generic source fn. Each chain entry is `(FnId, Vec<TyId>,
+    /// Span)`. Output is in root → tip order.
+    ///
+    /// `Fn(fid)` terminates the walk and pushes `(fid, vec![],
+    /// call_span)` so the chain still names the non-generic source.
+    /// `Inst(p)` pushes `p`'s identity and continues at `p.origin`.
     pub(crate) fn walk_origin_chain(
         &self,
         origin: &InstanceOrigin,
@@ -193,12 +226,15 @@ impl<'a> MonoCtx<'a> {
         let mut tip_to_root: Vec<(FnId, Vec<TyId>, Span)> = Vec::new();
         let mut cur = origin.clone();
         loop {
-            match cur {
-                InstanceOrigin::EntryPoint => break,
-                InstanceOrigin::InstantiatedAt { parent, call_span } => {
-                    let p = &self.instances[parent];
-                    tip_to_root.push((p.fid, p.type_args.clone(), call_span));
-                    cur = p.origin.clone();
+            match cur.parent {
+                InstanceParent::Inst(p) => {
+                    let inst = &self.instances[p];
+                    tip_to_root.push((inst.fid, inst.type_args.clone(), cur.call_span));
+                    cur = inst.origin.clone();
+                }
+                InstanceParent::Fn(fid) => {
+                    tip_to_root.push((fid, Vec::new(), cur.call_span));
+                    break;
                 }
             }
         }
@@ -221,31 +257,39 @@ impl<'a> MonoCtx<'a> {
 /// `InstId` on cache hit (terminates self-recursion), pushes a new
 /// instance + work-queue entry on miss, or returns `None` and records
 /// a `DivergentMonomorphization` error on overflow.
+///
+/// **Invariant**: `fn_type_args` is always non-empty. Non-generic fns
+/// don't reach this function under the redesigned model — they're
+/// walked at root by `seed_entry_points` without producing an Instance.
 pub(crate) fn instantiate(
     cx: &mut MonoCtx,
-    fid: FnId,
-    type_args: Vec<TyId>,
+    fn_id: FnId,
+    fn_type_args: Vec<TyId>,
     origin: InstanceOrigin,
 ) -> Option<InstId> {
-    // Probe by reference. The `(fid, type_args.clone())` clone is the
-    // cost of using `(FnId, Vec<TyId>)` as a HashMap key without the
-    // `raw_entry` API or a `Box<[TyId]>` wrapper. Acceptable for v0;
-    // revisit if monomorphization is ever a hot path.
-    if let Some(&id) = cx.instance_map.get(&(fid, type_args.clone())) {
+    debug_assert!(
+        !fn_type_args.is_empty(),
+        "instantiate is for generic instances only; non-generic fns are HIR passthroughs"
+    );
+
+    // Check if there is already an instance for this `(fn_id, fn_type_args)`; if so, return it.
+    // This is the cache hit that terminates self-recursive calls.
+    if let Some(&id) = cx.instance_map.get(&(fn_id, fn_type_args.clone())) {
         return Some(id);
     }
 
-    let depth = match &origin {
-        InstanceOrigin::EntryPoint => 0,
-        InstanceOrigin::InstantiatedAt { parent, .. } => cx.instances[*parent].depth + 1,
+    // Depth counts cascade hops including the initial Fn → generic
+    // entry. The first generic from a non-generic root is depth 1
+    // (matching today's behavior where the EntryPoint Instance was
+    // depth 0 and its first cascaded child was depth 1) — preserves
+    // the `recursion_limit = N` user-visible boundary across this
+    // refactor.
+    let depth = match origin.parent {
+        InstanceParent::Inst(p) => cx.instances[p].depth + 1,
+        InstanceParent::Fn(_) => 1,
     };
     if depth > cx.depth_limit {
-        let span = match &origin {
-            InstanceOrigin::InstantiatedAt { call_span, .. } => call_span.clone(),
-            InstanceOrigin::EntryPoint => unreachable!(
-                "EntryPoint cannot exceed depth_limit (depth = 0)"
-            ),
-        };
+        let span = origin.call_span.clone();
         cx.errors.push(MonoError::DivergentMonomorphization {
             chain: cx.walk_origin_chain(&origin),
             span,
@@ -256,14 +300,9 @@ pub(crate) fn instantiate(
 
     // Snapshot sig pieces by value so the subsequent `&mut typeck`
     // substitution doesn't fight with the `&FnSig` read borrow.
-    let (params_in, ret_in, subst): (Vec<TyId>, TyId, HashMap<ParamId, TyId>) = {
-        let sig = cx.typeck.fn_sig(fid);
-        let subst = sig
-            .generic_params
-            .iter()
-            .copied()
-            .zip(type_args.iter().copied())
-            .collect();
+    let (params_in, ret_in, subst) = {
+        let sig = cx.typeck.fn_sig(fn_id);
+        let subst = subst_from(&sig.generic_params, &fn_type_args);
         (sig.params.clone(), sig.ret, subst)
     };
     let params: Vec<TyId> = params_in
@@ -271,14 +310,14 @@ pub(crate) fn instantiate(
         .map(|&p| cx.typeck.substitute_ty(p, &subst))
         .collect();
     let ret = cx.typeck.substitute_ty(ret_in, &subst);
-    let mangled = mangle_inst(cx.hir, fid, &type_args, &cx.typeck.tys);
+    let mangled = mangle_inst(cx.hir, fn_id, &fn_type_args, &cx.typeck.tys);
 
     // Push the instance moving `type_args` into Instance, then re-borrow
     // it from cx.instances[id].type_args for the instance_map insert
     // key — second clone avoided.
     let id = cx.instances.push(Instance {
-        fid,
-        type_args,
+        fid: fn_id,
+        type_args: fn_type_args,
         params,
         ret,
         mangled,
@@ -286,7 +325,7 @@ pub(crate) fn instantiate(
         origin,
     });
     let key_args = cx.instances[id].type_args.clone();
-    cx.instance_map.insert((fid, key_args), id);
+    cx.instance_map.insert((fn_id, key_args), id);
     cx.work_queue.push_back(id);
     Some(id)
 }
