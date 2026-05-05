@@ -1,4 +1,8 @@
 Module
   Fn main() -> i32
     Block
-      tail: Binary(Sub, If(…), Int(1))
+      If Bool(true)
+        then:
+          Block
+            tail: Bool(true)
+      tail: Unary(Neg, Int(1))

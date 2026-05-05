@@ -608,8 +608,12 @@ where
     I: OValueInput<'a>,
     P: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
 {
-    recursive(move |_block| {
-        let item = block_item_parser(expr.clone());
+    recursive(move |block| {
+        // Hand the recursive `block` handle to `block_item_parser` so it
+        // can build a non-Pratt `block_like` alternative
+        // (`if`/`while`/`for`/`loop`/bare-`{…}`) for statement-position
+        // block items. See `block_item_parser`.
+        let item = block_item_parser(expr.clone(), block.clone());
         item.repeated()
             .collect::<Vec<_>>()
             .delimited_by(just(TokenKind::LBrace), just(TokenKind::RBrace))
@@ -639,18 +643,32 @@ where
 /// Parse one block item, returning `Option<BlockItem>`:
 ///
 /// - `let_form` (always carries `;`) → `Some(BlockItem { has_semi: true })`
-/// - `expr_item` (any expression incl. `if`/`block`, with optional trailing
-///   `;`) → `Some(BlockItem { has_semi: <was `;` present?> })`
+/// - `block_like` (`if`/`while`/`for`/`loop`/bare-`{…}` at statement
+///   position, optional trailing `;`) → `Some(BlockItem { has_semi: <…> })`
+/// - `expr_item` (any other expression, with optional trailing `;`) →
+///   `Some(BlockItem { has_semi: <was `;` present?> })`
 /// - `bare_semi` (a `;` with no preceding expression) → `None`
+///
+/// The `block_like` alternative is tried *before* `expr_item` so that
+/// `if true { … } -1` parses as two block items (the `if`, then `-1` via
+/// unary `Neg`) rather than `Binary(Sub, If(…), Int(1))`. This mirrors
+/// Rust's `Restrictions::STMT_EXPR` rule (`expr_is_complete()` returns
+/// true for `If`/`Match`/`Block`/`While`/`Loop`/`ForLoop`, halting the
+/// operator-parsing loop). The restriction lives at the block-item level
+/// only — when these forms appear in expression position (e.g. RHS of
+/// `+`), they go through `expr_parser`'s atom alternation as usual and
+/// participate in the full Pratt tower. See spec/03_PARSER.md grammar.
 ///
 /// `let` is intentionally only parseable here, never inside `expr_parser`,
 /// so `1 + let x = 5` stays a parse error.
-fn block_item_parser<'a, I, PE>(
+fn block_item_parser<'a, I, PE, PB>(
     expr: PE,
+    block: PB,
 ) -> impl Parser<'a, I, Option<BlockItem>, Extra<'a>> + Clone
 where
     I: OValueInput<'a>,
     PE: Parser<'a, I, ExprId, Extra<'a>> + Clone + 'a,
+    PB: Parser<'a, I, BlockId, Extra<'a>> + Clone + 'a,
 {
     // Block-item `let` is `let_form_no_semi` followed by a mandatory `;`.
     // The grammar of the let itself is shared with `for_parser`'s init
@@ -664,10 +682,31 @@ where
             })
         });
 
-    // Any expression (incl. `if`/`block` via `expr_parser`'s atom alternation)
-    // followed by an optional `;`. The `has_semi` flag captures whether the
-    // user wrote one — typeck uses it to decide which item produces the
-    // block's value.
+    // Block-form statement: one of `if`/`while`/`for`/`loop`/bare-`{…}`
+    // with no Pratt continuation. After the block-like expression ends,
+    // the parser returns to `block_parser_inner`'s repeat loop and the
+    // next token (e.g. `-`) starts a fresh item — `Minus` then enters
+    // the next item's Pratt as prefix-13 `Neg`. Mirrors Rust's
+    // `STMT_EXPR` restriction; see the doc comment above and
+    // spec/03_PARSER.md grammar (`BlockItem ::= … | IfExpr | BlockExpr | …`).
+    let block_like = choice((
+        if_parser(expr.clone(), block.clone()),
+        while_parser(expr.clone(), block.clone()),
+        for_parser(expr.clone(), block.clone()),
+        loop_parser(block.clone()),
+        block_expr_parser(block.clone()),
+    ))
+    .then(just(TokenKind::Semi).or_not())
+    .map(|(eid, semi)| {
+        Some(BlockItem {
+            expr: eid,
+            has_semi: semi.is_some(),
+        })
+    });
+
+    // Any other expression followed by an optional `;`. The `has_semi`
+    // flag captures whether the user wrote one — typeck uses it to
+    // decide which item produces the block's value.
     let expr_item = expr
         .clone()
         .then(just(TokenKind::Semi).or_not())
@@ -682,7 +721,7 @@ where
     // `{ ;; let x = 1; ;; x }` and we mirror that.
     let bare_semi = just(TokenKind::Semi).map(|_| None);
 
-    choice((let_form, expr_item, bare_semi)).labelled("block item")
+    choice((let_form, block_like, expr_item, bare_semi)).labelled("block item")
 }
 
 /// Parses `let [mut] name (: ty)? (= init)?` — **no trailing `;`**. The
