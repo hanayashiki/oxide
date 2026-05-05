@@ -1,0 +1,4 @@
+Module
+  Fn main()
+    Block
+      Let b: bool = Binary(Ge, Int(1), Int(2))

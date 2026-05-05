@@ -1,0 +1,51 @@
+HirProgram
+  Module turbofish_nested_generic_lowers.ox (root)
+    Struct[0] Node
+      v: Param(0)
+    Fn[0] alloc_node<T[TyParam(1)]>() -> *mut Adt(0, [Param(1)])
+      Block
+        tail: Call(Fn(2, "ox_alloc"), ::<Adt(0, [Param(1)])>)
+    Fn[1] main() -> i32
+      Block
+        Let(0, "p", Call(Fn(0, "alloc_node"), ::<i32>))
+        ExprStmt Call(Fn(4, "ox_dealloc"), ::<Adt(0, [i32])>, Local(0, "p", place))
+        tail: Int(0)
+  Module mem.ox
+    Fn[2] ox_alloc<T[TyParam(2)]>() -> *mut Param(2)
+      Block
+        tail: Call(Fn(7, "ox_transmute"), Call(Fn(9, "malloc"), Call(Fn(8, "ox_size_of"), ::<Param(2)>)))
+    Fn[3] ox_alloc_zeroed<T[TyParam(3)]>() -> *mut Param(3)
+      Block
+        tail: Call(Fn(7, "ox_transmute"), Call(Fn(10, "calloc"), Int(1), Call(Fn(8, "ox_size_of"), ::<Param(3)>)))
+    Fn[4] ox_dealloc<T[TyParam(4)]>(p[Local(1)]: *mut Param(4))
+      Block
+        tail: Call(Fn(12, "free"), Call(Fn(7, "ox_transmute"), Local(1, "p", place)))
+    Fn[5] ox_realloc<T[TyParam(5)]>(p[Local(2)]: *mut Param(5), n[Local(3)]: usize) -> *mut Param(5)
+      Block
+        tail: Call(Fn(7, "ox_transmute"), Call(Fn(11, "realloc"), Call(Fn(7, "ox_transmute"), Local(2, "p", place)), Binary(Mul, Local(3, "n", place), Call(Fn(8, "ox_size_of"), ::<Param(5)>))))
+    Fn[6] ox_ptr_eq<T[TyParam(6)]>(a[Local(4)]: *const Param(6), b[Local(5)]: *const Param(6)) -> bool
+      Block
+        Let(6, "ai", :usize, Call(Fn(7, "ox_transmute"), Local(4, "a", place)))
+        Let(7, "bi", :usize, Call(Fn(7, "ox_transmute"), Local(5, "b", place)))
+        tail: Binary(Eq, Local(6, "ai", place), Local(7, "bi", place))
+  Module intrinsics.ox
+    IntrinsicFn[7, Transmute] ox_transmute<Src[TyParam(7)], Dst[TyParam(8)]>(x[Local(8)]: Param(7)) -> Param(8)
+    IntrinsicFn[8, SizeOf] ox_size_of<T[TyParam(9)]>() -> usize
+  Module stdlib.ox
+    ExternFn[9] malloc(size[Local(9)]: usize) -> *mut u8
+    ExternFn[10] calloc(count[Local(10)]: usize, size[Local(11)]: usize) -> *mut u8
+    ExternFn[11] realloc(ptr[Local(12)]: *mut u8, size[Local(13)]: usize) -> *mut u8
+    ExternFn[12] free(ptr[Local(14)]: *mut u8)
+    ExternFn[13] aligned_alloc(alignment[Local(15)]: usize, size[Local(16)]: usize) -> *mut u8
+    ExternFn[14] exit(status[Local(17)]: i32)
+    ExternFn[15] _Exit(status[Local(18)]: i32)
+    ExternFn[16] quick_exit(status[Local(19)]: i32)
+    ExternFn[17] abort()
+    ExternFn[18] atoi(s[Local(20)]: *const [u8]) -> i32
+    ExternFn[19] atoll(s[Local(21)]: *const [u8]) -> i64
+    ExternFn[20] abs(x[Local(22)]: i32) -> i32
+    ExternFn[21] llabs(x[Local(23)]: i64) -> i64
+    ExternFn[22] rand() -> i32
+    ExternFn[23] srand(seed[Local(24)]: u32)
+    ExternFn[24] getenv(name[Local(25)]: *const [u8]) -> *const [u8]
+    ExternFn[25] system(cmd[Local(26)]: *const [u8]) -> i32

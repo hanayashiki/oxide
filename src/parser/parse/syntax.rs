@@ -22,17 +22,6 @@ macro_rules! binop_level {
         )
     };
 }
-macro_rules! assign_level {
-    ($($tok:expr => $op:expr),+ $(,)?) => {
-        infix(
-            right(1),
-            choice(($(just($tok).to($op),)+)),
-            |lhs, op: AssignOp, rhs, e: &mut OMapExtra<'_, '_, I>| {
-                e.push_expr(ExprKind::Assign { op, lhs, rhs })
-            },
-        )
-    };
-}
 macro_rules! prefix_level {
     ($prec:expr, $($tok:expr => $op:expr),+ $(,)?) => {
         prefix(
@@ -43,6 +32,19 @@ macro_rules! prefix_level {
             },
         )
     };
+}
+
+/// One closing `>` of a generic argument list. Accepts `Gt` (when the `>` is
+/// followed by whitespace/EOF) or `JointGt` (when it's joined to whatever
+/// comes next — typically another `>`, `=`, or a closing punctuator). Both
+/// variants close exactly one bracket, so `Foo<Bar<T>>`, `Foo<Bar<T> >`, and
+/// `Vec<Vec<i32>>=0` all parse without forcing a space. See spec/01_LEXER.md
+/// "Joint `>` rule" for the lexer side.
+fn gt_close<'a, I>() -> impl Parser<'a, I, (), Extra<'a>> + Clone
+where
+    I: OValueInput<'a>,
+{
+    choice((just(TokenKind::Gt), just(TokenKind::JointGt))).ignored()
 }
 
 pub(super) fn ident_parser<'a, I>() -> impl Parser<'a, I, Ident, Extra<'a>> + Clone
@@ -91,7 +93,7 @@ where
             .separated_by(just(TokenKind::Comma))
             .allow_trailing()
             .collect::<Vec<_>>()
-            .delimited_by(just(TokenKind::Lt), just(TokenKind::Gt))
+            .delimited_by(just(TokenKind::Lt), gt_close())
             .or_not()
             .map(|opt| opt.unwrap_or_default());
         let named = ident_parser()
@@ -241,18 +243,50 @@ where
                 TokenKind::Plus => BinOp::Add,
                 TokenKind::Minus => BinOp::Sub,
             ),
-            binop_level!(left(9),
-                TokenKind::Shl => BinOp::Shl,
-                TokenKind::Shr => BinOp::Shr,
+            // Level 9 — shift. `>>` is a multi-token sequence (`JointGt Gt`)
+            // because the lexer always splits `>` per character; we recombine
+            // here. Pratt's `Infix` rewinds on op-parser failure (chumsky
+            // 0.12 pratt.rs:611), so a partial `JointGt` consume that fails
+            // on the second token cleanly falls through to lower levels —
+            // important for `>=` (level 5) and `>>=` (level 1).
+            infix(
+                left(9),
+                choice((
+                    just(TokenKind::Shl).to(BinOp::Shl),
+                    just(TokenKind::JointGt)
+                        .then(just(TokenKind::Gt))
+                        .to(BinOp::Shr),
+                )),
+                |lhs, op: BinOp, rhs, e: &mut OMapExtra<'_, '_, I>| {
+                    e.push_expr(ExprKind::Binary { op, lhs, rhs })
+                },
             ),
             binop_level!(left(8), TokenKind::Amp => BinOp::BitAnd),
             binop_level!(left(7), TokenKind::Caret => BinOp::BitXor),
             binop_level!(left(6), TokenKind::Pipe => BinOp::BitOr),
-            binop_level!(left(5),
-                TokenKind::Lt => BinOp::Lt,
-                TokenKind::Le => BinOp::Le,
-                TokenKind::Gt => BinOp::Gt,
-                TokenKind::Ge => BinOp::Ge,
+            // Level 5 — comparison. `>=` is the multi-token sequence
+            // `JointGt Eq`. A plain `>` comparison accepts *either* `Gt`
+            // (the source `>` was followed by whitespace) *or* `JointGt`
+            // — so `id<i32>(7)` (no `::`) still parses as the comparison
+            // `(id<i32)>(7)` even though `>(`'s `>` lexes as `JointGt`.
+            // chumsky's `choice` atomically rewinds between branches
+            // (primitive.rs:957), so the `Ge` branch consuming `JointGt`
+            // and failing on a non-`Eq` next token cleanly falls through
+            // to the `Gt`/`JointGt` branches.
+            infix(
+                left(5),
+                choice((
+                    just(TokenKind::Lt).to(BinOp::Lt),
+                    just(TokenKind::Le).to(BinOp::Le),
+                    just(TokenKind::JointGt)
+                        .then(just(TokenKind::Eq))
+                        .to(BinOp::Ge),
+                    just(TokenKind::Gt).to(BinOp::Gt),
+                    just(TokenKind::JointGt).to(BinOp::Gt),
+                )),
+                |lhs, op: BinOp, rhs, e: &mut OMapExtra<'_, '_, I>| {
+                    e.push_expr(ExprKind::Binary { op, lhs, rhs })
+                },
             ),
             binop_level!(left(4),
                 TokenKind::EqEq => BinOp::Eq,
@@ -260,18 +294,31 @@ where
             ),
             binop_level!(left(3), TokenKind::AndAnd => BinOp::And),
             binop_level!(left(2), TokenKind::OrOr => BinOp::Or),
-            assign_level!(
-                TokenKind::Eq => AssignOp::Eq,
-                TokenKind::PlusEq => AssignOp::Add,
-                TokenKind::MinusEq => AssignOp::Sub,
-                TokenKind::StarEq => AssignOp::Mul,
-                TokenKind::SlashEq => AssignOp::Div,
-                TokenKind::PercentEq => AssignOp::Rem,
-                TokenKind::AmpEq => AssignOp::BitAnd,
-                TokenKind::PipeEq => AssignOp::BitOr,
-                TokenKind::CaretEq => AssignOp::BitXor,
-                TokenKind::ShlEq => AssignOp::Shl,
-                TokenKind::ShrEq => AssignOp::Shr,
+            // Level 1 — assignment. `>>=` is `JointGt JointGt Eq`; pratt's
+            // rewind covers a partial-match failure on the third token, so
+            // earlier `JointGt`-prefixed levels (5, 9) don't strand the
+            // cursor.
+            infix(
+                right(1),
+                choice((
+                    just(TokenKind::Eq).to(AssignOp::Eq),
+                    just(TokenKind::PlusEq).to(AssignOp::Add),
+                    just(TokenKind::MinusEq).to(AssignOp::Sub),
+                    just(TokenKind::StarEq).to(AssignOp::Mul),
+                    just(TokenKind::SlashEq).to(AssignOp::Div),
+                    just(TokenKind::PercentEq).to(AssignOp::Rem),
+                    just(TokenKind::AmpEq).to(AssignOp::BitAnd),
+                    just(TokenKind::PipeEq).to(AssignOp::BitOr),
+                    just(TokenKind::CaretEq).to(AssignOp::BitXor),
+                    just(TokenKind::ShlEq).to(AssignOp::Shl),
+                    just(TokenKind::JointGt)
+                        .then(just(TokenKind::JointGt))
+                        .then(just(TokenKind::Eq))
+                        .to(AssignOp::Shr),
+                )),
+                |lhs, op: AssignOp, rhs, e: &mut OMapExtra<'_, '_, I>| {
+                    e.push_expr(ExprKind::Assign { op, lhs, rhs })
+                },
             ),
         ));
 
@@ -411,7 +458,7 @@ where
             ty.separated_by(just(TokenKind::Comma))
                 .allow_trailing()
                 .collect::<Vec<_>>()
-                .delimited_by(just(TokenKind::Lt), just(TokenKind::Gt)),
+                .delimited_by(just(TokenKind::Lt), gt_close()),
         )
         .or_not()
         .map(|opt| opt.unwrap_or_default());
@@ -519,7 +566,7 @@ where
                 .separated_by(just(TokenKind::Comma))
                 .allow_trailing()
                 .collect::<Vec<_>>()
-                .delimited_by(just(TokenKind::Lt), just(TokenKind::Gt)),
+                .delimited_by(just(TokenKind::Lt), gt_close()),
         )
         .or_not()
         .map(|opt| opt.unwrap_or_default());
@@ -956,7 +1003,7 @@ where
         .separated_by(just(TokenKind::Comma))
         .allow_trailing()
         .collect::<Vec<_>>()
-        .delimited_by(just(TokenKind::Lt), just(TokenKind::Gt))
+        .delimited_by(just(TokenKind::Lt), gt_close())
         .or_not()
         .map(|opt| opt.unwrap_or_default());
 
@@ -1100,7 +1147,7 @@ where
         .separated_by(just(TokenKind::Comma))
         .allow_trailing()
         .collect::<Vec<_>>()
-        .delimited_by(just(TokenKind::Lt), just(TokenKind::Gt))
+        .delimited_by(just(TokenKind::Lt), gt_close())
         .or_not()
         .map(|opt| opt.unwrap_or_default());
 

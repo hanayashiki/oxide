@@ -1,0 +1,13 @@
+Module
+  Fn main()
+    Block
+== diagnostics ==
+[E0101] Error: unexpected token: found Gt
+   ╭─[ error_split_gt_gt_not_shift.ox:5:29 ]
+   │
+ 5 │ fn main() { let _ = 1 > > 2; }
+   │                             ┬  
+   │                             ╰── unexpected here
+   │ 
+   │ Note: expected: token, token, token, token, token, something, token, token, token, token, token, construct, token, token, construct
+───╯

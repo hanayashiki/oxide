@@ -1,0 +1,4 @@
+Module
+  Fn main()
+    Block
+      Let node = Ident("ox_alloc")::<Node<T>>()

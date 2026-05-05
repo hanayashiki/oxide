@@ -343,11 +343,11 @@ impl<'a> Lexer<'a> {
     fn scan_op_or_unexpected(&mut self, start: Mark, c: char) -> Token {
         use TokenKind::*;
 
-        // 3-char ops
+        // 3-char ops. NB: there is no `>>=` arm — every `>` is lexed as
+        // a single token (`Gt`/`JointGt`); the parser re-combines.
         if let (Some(c2), Some(c3)) = (self.peek2(), self.peek_at(2)) {
             let kind3 = match (c, c2, c3) {
                 ('<', '<', '=') => Some(ShlEq),
-                ('>', '>', '=') => Some(ShrEq),
                 ('.', '.', '.') => Some(DotDotDot),
                 _ => None,
             };
@@ -359,17 +359,15 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        // 2-char ops
+        // 2-char ops. NB: no `>=` or `>>` arms — see the `>` arm below.
         if let Some(c2) = self.peek2() {
             let kind2 = match (c, c2) {
                 ('=', '=') => Some(EqEq),
                 ('!', '=') => Some(Ne),
                 ('<', '=') => Some(Le),
-                ('>', '=') => Some(Ge),
                 ('&', '&') => Some(AndAnd),
                 ('|', '|') => Some(OrOr),
                 ('<', '<') => Some(Shl),
-                ('>', '>') => Some(Shr),
                 ('-', '>') => Some(Arrow),
                 (':', ':') => Some(ColonColon),
                 ('.', '.') => Some(DotDot),
@@ -388,6 +386,19 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 return Token { kind, span: self.span_from(start) };
             }
+        }
+
+        // `>` is special: emit `JointGt` if the next char is non-whitespace,
+        // `Gt` otherwise. The `Gt`/`JointGt` distinction is what lets the
+        // parser tell `Foo<Bar<T>>` (joint close, two brackets) apart from
+        // `1 > > 2` (whitespace, never a shift). See `spec/01_LEXER.md`.
+        if c == '>' {
+            self.bump();
+            let kind = match self.peek() {
+                Some(' ' | '\t' | '\r' | '\n') | None => Gt,
+                Some(_) => JointGt,
+            };
+            return Token { kind, span: self.span_from(start) };
         }
 
         // 1-char ops & punctuation
@@ -409,7 +420,6 @@ impl<'a> Lexer<'a> {
             '%' => Some(Percent),
             '=' => Some(Eq),
             '<' => Some(Lt),
-            '>' => Some(Gt),
             '!' => Some(Bang),
             '&' => Some(Amp),
             '|' => Some(Pipe),

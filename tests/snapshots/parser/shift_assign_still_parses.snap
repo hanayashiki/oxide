@@ -1,0 +1,5 @@
+Module
+  Fn main()
+    Block
+      Let mut x: i32 = Int(4)
+      ExprStmt Assign(Shr, Ident("x"), Int(1))

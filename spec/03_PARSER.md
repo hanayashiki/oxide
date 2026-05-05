@@ -208,15 +208,15 @@ one rung of the Pratt builder.
 
 | Lvl | Operators                                              | Notes                                                            |
 |----:|--------------------------------------------------------|------------------------------------------------------------------|
-|  1  | `=  +=  -=  *=  /=  %=  &=  \|=  ^=  <<=  >>=`         | right-assoc; LHS must be a place expression (validated post-parse) |
+|  1  | `=  +=  -=  *=  /=  %=  &=  \|=  ^=  <<=  >>=`         | right-assoc; LHS must be a place expression (validated post-parse). `>>=` is the multi-token sequence `JointGt JointGt Eq` — see "Joint `>` recombination". |
 |  2  | `\|\|`                                                 |                                                                  |
 |  3  | `&&`                                                   |                                                                  |
 |  4  | `==  !=`                                               | chains accepted; typeck may later reject                         |
-|  5  | `<  <=  >  >=`                                         |                                                                  |
+|  5  | `<  <=  >  >=`                                         | `>=` is `JointGt Eq`; plain `>` accepts `Gt` *or* `JointGt`.     |
 |  6  | `\|`                                                   | bitwise OR                                                       |
 |  7  | `^`                                                    | bitwise XOR                                                      |
 |  8  | `&`                                                    | binary bitwise AND (no `&` prefix in v0)                         |
-|  9  | `<<  >>`                                               |                                                                  |
+|  9  | `<<  >>`                                               | `>>` is `JointGt Gt`. `Shl` (`<<`) is one token; no joint variant on `<`. |
 | 10  | `+  -` (binary)                                        |                                                                  |
 | 11  | `*  /  %`                                              | binary `*` (no deref in v0)                                      |
 | 12  | `as`                                                   | postfix; `e as T as U` chains left                               |
@@ -233,6 +233,37 @@ time; the parser accepts any expression on the LHS, and HIR lower
 emits `InvalidAssignTarget` (E0207) when the lowered target's
 `is_place` bit is false. See spec/08_ADT.md "Place expressions and
 `is_place`".
+
+### Joint `>` recombination
+
+The lexer emits `>` as a single token per character (`Gt` if followed by
+whitespace/EOF, `JointGt` otherwise — see spec/01_LEXER.md "Joint `>`
+rule"). The parser recombines these at three Pratt levels and at every
+generic-close site:
+
+- **Generic close** (5 sites: type position, struct-lit turbofish,
+  call turbofish, fn-decl generic params, struct-decl generic params):
+  the closing delimiter is `gt_close()` = `Gt | JointGt`. Both close
+  exactly one bracket. So `Foo<Bar<T>>` (tokens `… JointGt Gt`),
+  `Foo<Bar<T> >` (tokens `… Gt Gt`), `ox_alloc::<Node<T>>()`, and
+  `Vec<Vec<i32>>=expr` all work without forcing a space.
+- **Level 5 (comparison)**: `Lt | Le | (JointGt then Eq → Ge) | Gt | JointGt`.
+  The plain `>` branch accepts both `Gt` and `JointGt` so expressions
+  like `id<i32>(7)` (no `::`, lexes the second `>` as `JointGt` because
+  it's followed by `(`) still parse as the comparison `(id<i32) > (7)`.
+- **Level 9 (shift)**: `Shl | (JointGt then Gt → Shr)`. The `Gt` after
+  `JointGt` only fits when the `>>` is followed by whitespace or
+  something that lexes the second `>` as plain `Gt`.
+- **Level 1 (assign)**: existing single-token assign-eqs plus
+  `(JointGt then JointGt then Eq → ShrEq)`.
+
+Atomicity for these multi-token branches comes free: chumsky's `choice`
+saves and rewinds between branches (`primitive.rs:957`), and chumsky's
+Pratt `Infix` rewinds on op-parser failure (`pratt.rs:611`). So a partial
+match (e.g. `JointGt then Gt` consuming `JointGt` then failing on a
+non-`Gt` second token) restores the cursor and lets the next level take
+over — `>=`, `>>=`, `1 > > 2` all dispatch correctly without explicit
+lookahead.
 
 ## API
 

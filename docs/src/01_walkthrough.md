@@ -269,7 +269,7 @@ oxide hello.ox -- --my-arg
 ## Memory management
 
 `mem.ox` ships typed wrappers around the C allocator: `ox_alloc<T>`,
-`ox_alloc_zeroed<T>`, `ox_dealloc<T>`, and `ox_realloc<T>`. Import it
+`ox_alloc_zeroed<T>`, `ox_dealloc<T>`, `ox_ptr_eq<T>`, and `ox_realloc<T>`. Import it
 like any other stdlib file.
 
 ```rust

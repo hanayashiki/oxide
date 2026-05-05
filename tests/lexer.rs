@@ -270,11 +270,16 @@ fn one_char_ops_and_punct() {
 #[test]
 fn two_char_ops() {
     use TokenKind::*;
+    // `>` is lexed per character with a joint flag based on the next char:
+    //   `>=` → `JointGt Eq`         (the `=` is non-whitespace)
+    //   `>>` (then space) → `JointGt Gt`
+    // The lexer never merges `>=`/`>>`/`>>=`; the parser recombines those
+    // sequences at Pratt levels 5/9/1. See `spec/01_LEXER.md` "Joint `>` rule".
     assert_eq!(
         kinds("== != <= >= && || << >> -> :: .. += -= *= /= %= &= |= ^="),
         vec![
-            EqEq, Ne, Le, Ge, AndAnd, OrOr, Shl, Shr, Arrow, ColonColon, DotDot, PlusEq, MinusEq,
-            StarEq, SlashEq, PercentEq, AmpEq, PipeEq, CaretEq, Eof,
+            EqEq, Ne, Le, JointGt, Eq, AndAnd, OrOr, Shl, JointGt, Gt, Arrow, ColonColon, DotDot,
+            PlusEq, MinusEq, StarEq, SlashEq, PercentEq, AmpEq, PipeEq, CaretEq, Eof,
         ],
     );
 }
@@ -282,7 +287,33 @@ fn two_char_ops() {
 #[test]
 fn three_char_ops() {
     use TokenKind::*;
-    assert_eq!(kinds("<<= >>="), vec![ShlEq, ShrEq, Eof]);
+    // `>>=` is now three tokens (`JointGt JointGt Eq`); `<<=` stays merged
+    // because there's no nested-generic-open ambiguity on the `<` side.
+    assert_eq!(
+        kinds("<<= >>="),
+        vec![ShlEq, JointGt, JointGt, Eq, Eof],
+    );
+}
+
+#[test]
+fn joint_gt_vs_gt_by_next_char() {
+    use TokenKind::*;
+    // `>` followed by whitespace → `Gt`; followed by anything else (here:
+    // `>`, `=`, `(`, `;`) → `JointGt`. This is the rule that lets nested
+    // generic close work without forcing a space.
+    assert_eq!(
+        kinds(">> > >= >( >;"),
+        vec![JointGt, Gt, Gt, JointGt, Eq, JointGt, LParen, JointGt, Semi, Eof],
+    );
+}
+
+#[test]
+fn whitespace_separated_gt_gt_is_two_plain_gt() {
+    use TokenKind::*;
+    // `> >` (with whitespace) must NOT collapse to a shift; both are plain
+    // `Gt`. Pratt level 9 only accepts `JointGt Gt`, so `1 > > 2` stays a
+    // parse error (matching Rust).
+    assert_eq!(kinds("> >"), vec![Gt, Gt, Eof]);
 }
 
 #[test]

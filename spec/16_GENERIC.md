@@ -62,6 +62,13 @@ The mono pass reads `HirProgram` + `TypeckResults`, walks reachable instances st
 - **Declaration**: `fn name<T, U, ...>(params) -> ret { body }`. Type params come between the fn name and the param list. Empty list `<>` is accepted (matches Rust) and is semantically equivalent to a non-generic fn — `fn name<>() {}` parses and behaves identically to `fn name() {}`. Same for turbofish: `name::<>(args)` is accepted and behaves identically to `name(args)`.
 - **Turbofish**: `name::<T, U>(args)` at call sites. The `::` is mandatory (matches Rust); `name<T, U>(args)` is parsed as a comparison expression.
 - **Type-param uses**: inside the body's type positions only, by name. No nested generic scopes.
+- **Nested generic close**: `Foo<Bar<T>>` (no space before the second `>`),
+  `ox_alloc::<Node<T>>()`, and `let s: Vec<Vec<i32>>=0;` (no space before
+  `=`) all parse. The lexer emits each `>` as a single token (`Gt` if
+  followed by whitespace, `JointGt` otherwise — see spec/01_LEXER.md
+  "Joint `>` rule"); the generic-close parser accepts either, so the
+  inner and outer brackets each consume one `>`-token regardless of how
+  the source spaces them.
 
 The parser is uniform — it accepts `<T, U>` on every fn item including extern declarations. Semantic rejection of generic externs happens at HIR (see Errors).
 

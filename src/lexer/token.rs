@@ -75,8 +75,17 @@ pub enum TokenKind {
     Ne,
     Lt,
     Le,
+    /// `>` followed by whitespace or EOF. Closes one generic bracket;
+    /// at expression Pratt level 5 it's the comparison operator `>`.
     Gt,
-    Ge,
+    /// `>` followed by *any non-whitespace* character (another `>`, `=`,
+    /// or a closing punctuator like `(`, `;`, `,`). Closes one generic
+    /// bracket just like `Gt`. The parser recombines multi-token forms:
+    /// `JointGt Eq` → `>=`, `JointGt Gt` → `>>`, `JointGt JointGt Eq` → `>>=`.
+    /// This per-character split lets `Foo<Bar<T>>`, `Vec<Vec<i32>>=0`,
+    /// and `ox_alloc::<Node<T>>()` all parse without forcing a space.
+    /// See `spec/01_LEXER.md` "Joint `>` rule".
+    JointGt,
     AndAnd,
     OrOr,
     Bang,
@@ -85,7 +94,6 @@ pub enum TokenKind {
     Caret,
     Tilde,
     Shl,
-    Shr,
     PlusEq,
     MinusEq,
     StarEq,
@@ -95,7 +103,6 @@ pub enum TokenKind {
     PipeEq,
     CaretEq,
     ShlEq,
-    ShrEq,
 
     // Trivia & control
     Eof,

@@ -76,11 +76,15 @@ This keeps the keyword set small and lets us add types without touching the lexe
 
 **Operators** (longest-match wins; e.g. `==` beats `=`)
 - Arithmetic: `+ - * / %`
-- Comparison: `== != < <= > >=`
+- Comparison: `== != < <=` and `>` (see "Joint `>` rule" below for `>` and `>=`)
 - Logical:    `&& || !`
-- Bitwise:    `& | ^ ~ << >>`
-- Assignment: `= += -= *= /= %= &= |= ^= <<= >>=`
+- Bitwise:    `& | ^ ~ <<` and `>>` (`>>` is *not* lexed as one token — see below)
+- Assignment: `= += -= *= /= %= &= |=  ^= <<=` and `>>=` (also not one token)
 - Address-of / deref share `&` and `*` with bitwise/arith; disambiguation is the parser's job.
+
+The `>=` / `>>` / `>>=` forms are sequences of single-`>` tokens (`Gt` /
+`JointGt`) plus `Eq`; the parser recombines them at the relevant Pratt
+level. See "Joint `>` rule".
 
 **Trivia & control**
 - `Eof`
@@ -130,6 +134,37 @@ Whitespace and comments are *consumed*, not emitted as tokens.
 ### Operator/punctuation lexing
 Maximal munch: at each position, try the longest operator that matches.
 Concretely the table is sorted by length descending; first match wins.
+
+### Joint `>` rule
+A single `>` always lexes as one token; the lexer **never** merges it with
+a following `=` or `>` into `Ge`/`Shr`/`ShrEq`. Which variant is emitted
+depends on the *next* character:
+
+| Next char                        | Emitted          |
+|----------------------------------|------------------|
+| whitespace (` ` `\t` `\r` `\n`) or EOF | `Gt`        |
+| anything else (`>`, `=`, `(`, `;`, …)  | `JointGt`   |
+
+Both `Gt` and `JointGt` close exactly one generic-argument bracket; the
+distinction only matters in expression position, where the parser
+recombines multi-token sequences:
+
+| Source | Tokens                  | Parser interprets as       |
+|--------|-------------------------|----------------------------|
+| `>`    | `Gt`                    | comparison `>`             |
+| `>=`   | `JointGt Eq`            | comparison `>=` (level 5)  |
+| `>>`   | `JointGt Gt`            | shift `>>` (level 9)       |
+| `>>=`  | `JointGt JointGt Eq`    | shift-assign `>>=` (level 1) |
+| `> >`  | `Gt Gt`                 | parse error (matches Rust) |
+
+This is what lets `Foo<Bar<T>>`, `ox_alloc::<Node<T>>()`, and
+`Vec<Vec<i32>>=expr` all parse without forcing a space — the inner and
+outer generic close each consume one `>`-token, regardless of whether the
+boundary lexes as `JointGt Gt` or `JointGt JointGt`.
+
+`<` does **not** have a joint variant. Generic *open* never has adjacent
+`<<` (there's always an identifier between, e.g. `Foo<Bar<T>>`), so `Shl`
+(`<<`), `Le` (`<=`), and `ShlEq` (`<<=`) stay as merged tokens.
 
 ## Errors
 

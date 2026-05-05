@@ -1,0 +1,4 @@
+Module
+  Fn main()
+    Block
+      Let x: i32 = Binary(Shr, Int(1), Int(2))
