@@ -164,10 +164,8 @@ pub fn cast_kind(tys: &TyArena, src: TyId, dst: TyId) -> CastKind {
         // Bool → integer (zext i1).
         (TyKind::Prim(PrimTy::Bool), TyKind::Prim(dp)) if dp.is_integer() => CastKind::BoolToInt,
         // Ptr ↔ Ptr: same pointee shape, mut_le on outer mutability.
-        // `mut_le(m1, m2)` iff NOT (m1 == Const && m2 == Mut).
         (TyKind::Ptr(t1, m1), TyKind::Ptr(t2, m2)) if *t1 == *t2 => {
-            let mut_le = !matches!((*m1, *m2), (Mutability::Const, Mutability::Mut));
-            if mut_le {
+            if m1 <= m2 {
                 CastKind::PtrToPtr
             } else {
                 CastKind::Reject
