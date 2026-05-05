@@ -15,9 +15,20 @@ macro_rules! binop_level {
     ($assoc:expr, $($tok:expr => $op:expr),+ $(,)?) => {
         infix(
             $assoc,
-            choice(($(just($tok).to($op),)+)),
+            choice(($($tok.to($op),)+)),
             |lhs, op: BinOp, rhs, e: &mut OMapExtra<'_, '_, I>| {
                 e.push_expr(ExprKind::Binary { op, lhs, rhs })
+            },
+        )
+    };
+}
+macro_rules! assign_level {
+    ($($tok:expr => $op:expr),+ $(,)?) => {
+        infix(
+            right(1),
+            choice(($($tok.to($op),)+)),
+            |lhs, op: AssignOp, rhs, e: &mut OMapExtra<'_, '_, I>| {
+                e.push_expr(ExprKind::Assign { op, lhs, rhs })
             },
         )
     };
@@ -26,7 +37,7 @@ macro_rules! prefix_level {
     ($prec:expr, $($tok:expr => $op:expr),+ $(,)?) => {
         prefix(
             $prec,
-            choice(($(just($tok).to($op),)+)),
+            choice(($($tok.to($op),)+)),
             |op: UnOp, rhs, e: &mut OMapExtra<'_, '_, I>| {
                 e.push_expr(ExprKind::Unary { op, expr: rhs })
             },
@@ -199,13 +210,13 @@ where
 
         let pratt_expr = with_postfix.pratt((
             prefix_level!(13,
-                TokenKind::Minus => UnOp::Neg,
-                TokenKind::Bang => UnOp::Not,
-                TokenKind::Tilde => UnOp::BitNot,
+                just(TokenKind::Minus) => UnOp::Neg,
+                just(TokenKind::Bang)=> UnOp::Not,
+                just(TokenKind::Tilde) => UnOp::BitNot,
                 // `*expr` — pointer deref. Position-disambiguated from
                 // binary `*` (Mul, level 11) by the Pratt builder.
                 // See spec/07_POINTER.md "Deref operator".
-                TokenKind::Star => UnOp::Deref,
+                just(TokenKind::Star) => UnOp::Deref,
             ),
             // `&expr` / `&mut expr` — same precedence as the other prefix
             // unary ops. `Amp` here is the prefix path; the infix `Amp`
@@ -235,13 +246,13 @@ where
                 },
             ),
             binop_level!(left(11),
-                TokenKind::Star => BinOp::Mul,
-                TokenKind::Slash => BinOp::Div,
-                TokenKind::Percent => BinOp::Rem,
+                just(TokenKind::Star) => BinOp::Mul,
+                just(TokenKind::Slash) => BinOp::Div,
+                just(TokenKind::Percent) => BinOp::Rem,
             ),
             binop_level!(left(10),
-                TokenKind::Plus => BinOp::Add,
-                TokenKind::Minus => BinOp::Sub,
+                just(TokenKind::Plus) => BinOp::Add,
+                just(TokenKind::Minus) => BinOp::Sub,
             ),
             // Level 9 — shift. `>>` is a multi-token sequence (`JointGt Gt`)
             // because the lexer always splits `>` per character; we recombine
@@ -249,21 +260,13 @@ where
             // 0.12 pratt.rs:611), so a partial `JointGt` consume that fails
             // on the second token cleanly falls through to lower levels —
             // important for `>=` (level 5) and `>>=` (level 1).
-            infix(
-                left(9),
-                choice((
-                    just(TokenKind::Shl).to(BinOp::Shl),
-                    just(TokenKind::JointGt)
-                        .then(just(TokenKind::Gt))
-                        .to(BinOp::Shr),
-                )),
-                |lhs, op: BinOp, rhs, e: &mut OMapExtra<'_, '_, I>| {
-                    e.push_expr(ExprKind::Binary { op, lhs, rhs })
-                },
+            binop_level!(left(9),
+                just(TokenKind::Shl) => BinOp::Shl,
+                just(TokenKind::JointGt).then(just(TokenKind::Gt)).to(BinOp::Shr) => BinOp::Shr,
             ),
-            binop_level!(left(8), TokenKind::Amp => BinOp::BitAnd),
-            binop_level!(left(7), TokenKind::Caret => BinOp::BitXor),
-            binop_level!(left(6), TokenKind::Pipe => BinOp::BitOr),
+            binop_level!(left(8), just(TokenKind::Amp) => BinOp::BitAnd),
+            binop_level!(left(7), just(TokenKind::Caret) => BinOp::BitXor),
+            binop_level!(left(6), just(TokenKind::Pipe) => BinOp::BitOr),
             // Level 5 — comparison. `>=` is the multi-token sequence
             // `JointGt Eq`. A plain `>` comparison accepts *either* `Gt`
             // (the source `>` was followed by whitespace) *or* `JointGt`
@@ -273,52 +276,38 @@ where
             // (primitive.rs:957), so the `Ge` branch consuming `JointGt`
             // and failing on a non-`Eq` next token cleanly falls through
             // to the `Gt`/`JointGt` branches.
-            infix(
-                left(5),
-                choice((
-                    just(TokenKind::Lt).to(BinOp::Lt),
-                    just(TokenKind::Le).to(BinOp::Le),
-                    just(TokenKind::JointGt)
-                        .then(just(TokenKind::Eq))
-                        .to(BinOp::Ge),
-                    just(TokenKind::Gt).to(BinOp::Gt),
-                    just(TokenKind::JointGt).to(BinOp::Gt),
-                )),
-                |lhs, op: BinOp, rhs, e: &mut OMapExtra<'_, '_, I>| {
-                    e.push_expr(ExprKind::Binary { op, lhs, rhs })
-                },
+            binop_level!(left(5),
+                just(TokenKind::Lt) => BinOp::Lt,
+                just(TokenKind::Le) => BinOp::Le,
+                just(TokenKind::JointGt).then(just(TokenKind::Eq)) => BinOp::Ge,
+                just(TokenKind::Gt) => BinOp::Gt,
+                just(TokenKind::JointGt) => BinOp::Gt,
             ),
             binop_level!(left(4),
-                TokenKind::EqEq => BinOp::Eq,
-                TokenKind::Ne => BinOp::Ne,
+                just(TokenKind::EqEq) => BinOp::Eq,
+                just(TokenKind::Ne) => BinOp::Ne,
             ),
-            binop_level!(left(3), TokenKind::AndAnd => BinOp::And),
-            binop_level!(left(2), TokenKind::OrOr => BinOp::Or),
+            binop_level!(left(3), just(TokenKind::AndAnd) => BinOp::And),
+            binop_level!(left(2), just(TokenKind::OrOr) => BinOp::Or),
             // Level 1 — assignment. `>>=` is `JointGt JointGt Eq`; pratt's
             // rewind covers a partial-match failure on the third token, so
             // earlier `JointGt`-prefixed levels (5, 9) don't strand the
             // cursor.
-            infix(
-                right(1),
-                choice((
-                    just(TokenKind::Eq).to(AssignOp::Eq),
-                    just(TokenKind::PlusEq).to(AssignOp::Add),
-                    just(TokenKind::MinusEq).to(AssignOp::Sub),
-                    just(TokenKind::StarEq).to(AssignOp::Mul),
-                    just(TokenKind::SlashEq).to(AssignOp::Div),
-                    just(TokenKind::PercentEq).to(AssignOp::Rem),
-                    just(TokenKind::AmpEq).to(AssignOp::BitAnd),
-                    just(TokenKind::PipeEq).to(AssignOp::BitOr),
-                    just(TokenKind::CaretEq).to(AssignOp::BitXor),
-                    just(TokenKind::ShlEq).to(AssignOp::Shl),
-                    just(TokenKind::JointGt)
-                        .then(just(TokenKind::JointGt))
-                        .then(just(TokenKind::Eq))
-                        .to(AssignOp::Shr),
-                )),
-                |lhs, op: AssignOp, rhs, e: &mut OMapExtra<'_, '_, I>| {
-                    e.push_expr(ExprKind::Assign { op, lhs, rhs })
-                },
+            assign_level!(
+                just(TokenKind::Eq) => AssignOp::Eq,
+                just(TokenKind::PlusEq) => AssignOp::Add,
+                just(TokenKind::MinusEq) => AssignOp::Sub,
+                just(TokenKind::StarEq) => AssignOp::Mul,
+                just(TokenKind::SlashEq) => AssignOp::Div,
+                just(TokenKind::PercentEq) => AssignOp::Rem,
+                just(TokenKind::AmpEq) => AssignOp::BitAnd,
+                just(TokenKind::PipeEq) => AssignOp::BitOr,
+                just(TokenKind::CaretEq) => AssignOp::BitXor,
+                just(TokenKind::ShlEq) => AssignOp::Shl,
+                just(TokenKind::JointGt)
+                    .then(just(TokenKind::JointGt))
+                    .then(just(TokenKind::Eq))
+                    => AssignOp::Shr,
             ),
         ));
 
@@ -898,7 +887,12 @@ where
     // the trailing comma was present at the closing paren.
     let nonempty_list = entry
         .clone()
-        .then(just(TokenKind::Comma).ignore_then(entry).repeated().collect::<Vec<_>>())
+        .then(
+            just(TokenKind::Comma)
+                .ignore_then(entry)
+                .repeated()
+                .collect::<Vec<_>>(),
+        )
         .then(just(TokenKind::Comma).or_not().map(|c| c.is_some()))
         .map(|((first, rest), trailing_comma)| {
             let mut entries: Vec<Entry> = Vec::with_capacity(1 + rest.len());
@@ -950,7 +944,10 @@ where
                             malformed = true;
                         } else if i != n - 1 {
                             // `fn f(a, ..., b)` — `...` not the last entry.
-                            emit(dots_span, "`...` must be the last entry in a parameter list");
+                            emit(
+                                dots_span,
+                                "`...` must be the last entry in a parameter list",
+                            );
                             malformed = true;
                         } else if trailing_comma {
                             // `fn f(a, ...,)` — trailing `,` after `...`.
