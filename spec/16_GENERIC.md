@@ -414,18 +414,15 @@ error[E0278]: monomorphization depth exceeded (limit: 256)
    = note: restructure to use a fixed type parameter or factor through a non-generic helper.
 ```
 
-## Out of scope (this round)
-
-- Generic structs / enums.
-- Trait bounds, `where` clauses.
-- `sizeof<T>()` / `alignof<T>()` as user expressions (see spec/17 for the internal helpers).
-- `unsafe { }` blocks.
-- Variance, lifetimes, const generics.
-
-## Out of scope (forever-ish)
+## Out of scope
 
 - Higher-kinded types.
 - Specialization.
+- Variance, lifetimes, const generics.
+- Trait bounds, `where` clauses.
+- `sizeof<T>()` / `alignof<T>()` as user expressions (see spec/17 for the internal helpers).
+- `unsafe { }` blocks.
+
 
 ## Worked examples
 
