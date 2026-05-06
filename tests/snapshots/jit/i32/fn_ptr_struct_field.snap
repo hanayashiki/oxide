@@ -1,0 +1,47 @@
+== ir ==
+; ModuleID = 'jit'
+source_filename = "jit"
+
+%Callbacks = type { ptr, ptr }
+
+define i32 @one() {
+allocas:
+  br label %body
+
+body:                                             ; preds = %allocas
+  ret i32 1
+}
+
+define i32 @dbl(i32 %x) {
+allocas:
+  %x.0.slot = alloca i32, align 4
+  br label %body
+
+body:                                             ; preds = %allocas
+  store i32 %x, ptr %x.0.slot, align 4
+  %load = load i32, ptr %x.0.slot, align 4
+  %load1 = load i32, ptr %x.0.slot, align 4
+  %add = add i32 %load, %load1
+  ret i32 %add
+}
+
+define i32 @main() {
+allocas:
+  %c.1.slot = alloca %Callbacks, align 8
+  %a.2.slot = alloca i32, align 4
+  br label %body
+
+body:                                             ; preds = %allocas
+  store %Callbacks { ptr @one, ptr @dbl }, ptr %c.1.slot, align 8
+  %fld.gep = getelementptr inbounds %Callbacks, ptr %c.1.slot, i32 0, i32 0
+  %fld.load = load ptr, ptr %fld.gep, align 8
+  %call = call i32 %fld.load()
+  store i32 %call, ptr %a.2.slot, align 4
+  %fld.gep1 = getelementptr inbounds %Callbacks, ptr %c.1.slot, i32 0, i32 1
+  %fld.load2 = load ptr, ptr %fld.gep1, align 8
+  %load = load i32, ptr %a.2.slot, align 4
+  %call3 = call i32 %fld.load2(i32 %load)
+  ret i32 %call3
+}
+== result ==
+2
