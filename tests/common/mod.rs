@@ -31,8 +31,7 @@ use inkwell::context::Context;
 use inkwell::execution_engine::JitFunction;
 
 use oxide::builder::{
-    Builder, Flow, NoopTapper, Phase, TapAst, TapCodegen, TapHir, TapLoad, TapMono, TapTypeck,
-    Tapper,
+    Builder, Flow, Phase, TapAst, TapCodegen, TapHir, TapLoad, TapMono, TapTypeck, Tapper,
 };
 use oxide::hir::pretty::pretty_print as hir_pretty_print;
 use oxide::loader::VfsHost;
@@ -504,13 +503,12 @@ pub fn render_codegen(file_name: &str, src: &str) -> String {
 pub unsafe fn jit_run_with_ir<R: Copy + 'static>(entry: &str, src: &str) -> (String, R) {
     let (host, root) = vfs_for_fixture(entry, src);
     let sess = Session::for_test(&host);
-    let mut tapper = NoopTapper;
+    let mut tapper = CodegenSnap::default();
     let ctx = Context::create();
     let module = {
         let mut b = Builder::from_root(sess, root, &mut tapper);
 
         let r = b.codegen(&ctx, "jit");
-        println!("codegen result: {r:?}");
         r.expect("codegen failed (compile clean expected)")
     };
 

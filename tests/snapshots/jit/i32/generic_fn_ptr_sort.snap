@@ -1,0 +1,194 @@
+== ir ==
+; ModuleID = 'jit'
+source_filename = "jit"
+
+define i32 @cmp(ptr %a, ptr %b) {
+allocas:
+  %a.0.slot = alloca ptr, align 8
+  %b.1.slot = alloca ptr, align 8
+  br label %body
+
+body:                                             ; preds = %allocas
+  store ptr %a, ptr %a.0.slot, align 8
+  store ptr %b, ptr %b.1.slot, align 8
+  %load = load ptr, ptr %a.0.slot, align 8
+  %load1 = load ptr, ptr %b.1.slot, align 8
+  %load2 = load i32, ptr %load, align 4
+  %load3 = load i32, ptr %load1, align 4
+  %sub = sub i32 %load2, %load3
+  ret i32 %sub
+}
+
+define i32 @main() {
+allocas:
+  %to_sort.9.slot = alloca [3 x i32], align 4
+  %lit.slot = alloca [3 x i32], align 4
+  %length.10.slot = alloca i64, align 8
+  br label %body
+
+body:                                             ; preds = %allocas
+  %lit.gep = getelementptr inbounds [3 x i32], ptr %lit.slot, i64 0, i64 0
+  store i32 3, ptr %lit.gep, align 4
+  %lit.gep1 = getelementptr inbounds [3 x i32], ptr %lit.slot, i64 0, i64 1
+  store i32 2, ptr %lit.gep1, align 4
+  %lit.gep2 = getelementptr inbounds [3 x i32], ptr %lit.slot, i64 0, i64 2
+  store i32 1, ptr %lit.gep2, align 4
+  call void @llvm.memcpy.p0.p0.i64(ptr align 1 %to_sort.9.slot, ptr align 1 %lit.slot, i64 ptrtoint (ptr getelementptr ([3 x i32], ptr null, i32 1) to i64), i1 false)
+  store i64 3, ptr %length.10.slot, align 4
+  %load = load i64, ptr %length.10.slot, align 4
+  call void @"sort__$i32"(ptr %to_sort.9.slot, i64 %load, ptr @cmp)
+  %load3 = load i64, ptr %length.10.slot, align 4
+  %sub = sub i64 %load3, 1
+  %bounds.cmp = icmp uge i64 %sub, 3
+  br i1 %bounds.cmp, label %bounds.trap, label %bounds.ok
+
+bounds.trap:                                      ; preds = %body
+  call void @llvm.trap()
+  unreachable
+
+bounds.ok:                                        ; preds = %body
+  %idx.gep = getelementptr inbounds [3 x i32], ptr %to_sort.9.slot, i64 0, i64 %sub
+  %idx.load = load i32, ptr %idx.gep, align 4
+  ret i32 %idx.load
+}
+
+declare ptr @malloc(i64)
+
+declare ptr @calloc(i64, i64)
+
+declare ptr @realloc(ptr, i64)
+
+declare void @free(ptr)
+
+declare ptr @aligned_alloc(i64, i64)
+
+declare void @exit(i32)
+
+declare void @_Exit(i32)
+
+declare void @quick_exit(i32)
+
+declare void @abort()
+
+declare i32 @atoi(ptr)
+
+declare i64 @atoll(ptr)
+
+declare i32 @abs(i32)
+
+declare i64 @llabs(i64)
+
+declare i32 @rand()
+
+declare void @srand(i32)
+
+declare ptr @getenv(ptr)
+
+declare i32 @system(ptr)
+
+define void @"sort__$i32"(ptr %arr, i64 %n, ptr %cmp) {
+allocas:
+  %arr.2.slot = alloca ptr, align 8
+  %n.3.slot = alloca i64, align 8
+  %cmp.4.slot = alloca ptr, align 8
+  %sorted.5.slot = alloca i1, align 1
+  %i.6.slot = alloca i64, align 8
+  %cmp_result.7.slot = alloca i32, align 4
+  %tmp.8.slot = alloca i32, align 4
+  br label %body
+
+body:                                             ; preds = %allocas
+  store ptr %arr, ptr %arr.2.slot, align 8
+  store i64 %n, ptr %n.3.slot, align 4
+  store ptr %cmp, ptr %cmp.4.slot, align 8
+  store i1 false, ptr %sorted.5.slot, align 1
+  br label %loop.cond
+
+loop.body:                                        ; preds = %loop.cond
+  store i1 true, ptr %sorted.5.slot, align 1
+  br label %loop.init
+
+loop.end:                                         ; preds = %loop.cond
+  ret void
+
+loop.cond:                                        ; preds = %loop.end2, %body
+  %load = load i1, ptr %sorted.5.slot, align 1
+  %not = xor i1 %load, true
+  br i1 %not, label %loop.body, label %loop.end
+
+loop.body1:                                       ; preds = %loop.cond3
+  %load6 = load ptr, ptr %cmp.4.slot, align 8
+  %load7 = load ptr, ptr %arr.2.slot, align 8
+  %load8 = load i64, ptr %i.6.slot, align 4
+  %idx.gep = getelementptr inbounds i32, ptr %load7, i64 %load8
+  %load9 = load ptr, ptr %arr.2.slot, align 8
+  %load10 = load i64, ptr %i.6.slot, align 4
+  %add = add i64 %load10, 1
+  %idx.gep11 = getelementptr inbounds i32, ptr %load9, i64 %add
+  %call = call i32 %load6(ptr %idx.gep, ptr %idx.gep11)
+  store i32 %call, ptr %cmp_result.7.slot, align 4
+  %load12 = load i32, ptr %cmp_result.7.slot, align 4
+  %gt = icmp sgt i32 %load12, 0
+  br i1 %gt, label %if.then, label %if.else
+
+loop.end2:                                        ; preds = %loop.cond3
+  br label %loop.cond
+
+loop.init:                                        ; preds = %loop.body
+  store i64 0, ptr %i.6.slot, align 4
+  br label %loop.cond3
+
+loop.cond3:                                       ; preds = %loop.update, %loop.init
+  %load4 = load i64, ptr %i.6.slot, align 4
+  %load5 = load i64, ptr %n.3.slot, align 4
+  %sub = sub i64 %load5, 1
+  %lt = icmp ult i64 %load4, %sub
+  br i1 %lt, label %loop.body1, label %loop.end2
+
+loop.update:                                      ; preds = %if.end
+  %asgn.cur = load i64, ptr %i.6.slot, align 4
+  %asgn.add = add i64 %asgn.cur, 1
+  store i64 %asgn.add, ptr %i.6.slot, align 4
+  br label %loop.cond3
+
+if.then:                                          ; preds = %loop.body1
+  %load13 = load ptr, ptr %arr.2.slot, align 8
+  %load14 = load i64, ptr %i.6.slot, align 4
+  %add15 = add i64 %load14, 1
+  %idx.gep16 = getelementptr inbounds i32, ptr %load13, i64 %add15
+  %idx.load = load i32, ptr %idx.gep16, align 4
+  store i32 %idx.load, ptr %tmp.8.slot, align 4
+  %load17 = load ptr, ptr %arr.2.slot, align 8
+  %load18 = load i64, ptr %i.6.slot, align 4
+  %idx.gep19 = getelementptr inbounds i32, ptr %load17, i64 %load18
+  %idx.load20 = load i32, ptr %idx.gep19, align 4
+  %load21 = load ptr, ptr %arr.2.slot, align 8
+  %load22 = load i64, ptr %i.6.slot, align 4
+  %add23 = add i64 %load22, 1
+  %idx.gep24 = getelementptr inbounds i32, ptr %load21, i64 %add23
+  store i32 %idx.load20, ptr %idx.gep24, align 4
+  %load25 = load i32, ptr %tmp.8.slot, align 4
+  %load26 = load ptr, ptr %arr.2.slot, align 8
+  %load27 = load i64, ptr %i.6.slot, align 4
+  %idx.gep28 = getelementptr inbounds i32, ptr %load26, i64 %load27
+  store i32 %load25, ptr %idx.gep28, align 4
+  store i1 false, ptr %sorted.5.slot, align 1
+  br label %if.end
+
+if.else:                                          ; preds = %loop.body1
+  br label %if.end
+
+if.end:                                           ; preds = %if.else, %if.then
+  br label %loop.update
+}
+
+; Function Attrs: nocallback nofree nounwind willreturn memory(argmem: readwrite)
+declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg) #0
+
+; Function Attrs: cold noreturn nounwind memory(inaccessiblemem: write)
+declare void @llvm.trap() #1
+
+attributes #0 = { nocallback nofree nounwind willreturn memory(argmem: readwrite) }
+attributes #1 = { cold noreturn nounwind memory(inaccessiblemem: write) }
+== result ==
+3
