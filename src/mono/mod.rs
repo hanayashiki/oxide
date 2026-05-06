@@ -76,15 +76,15 @@ pub struct MonoResults {
     pub instance_map: HashMap<(FnId, Vec<TyId>), InstId>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Instance {
     pub fid: FnId,
     pub type_args: Vec<TyId>,
-    /// Substituted at instantiation. Drives Phase 1 LLVM declaration.
-    pub params: Vec<TyId>,
+    /// Parameter types substituted at instantiation. Drives Phase 1 LLVM declaration.
+    pub param_tys: Vec<TyId>,
     /// Substituted at instantiation. Drives Phase 1 LLVM declaration
     /// and Phase 2 return-type emission.
-    pub ret: TyId,
+    pub ret_ty: TyId,
     pub mangled: String,
     pub depth: u32,
     pub origin: InstanceOrigin,
@@ -405,8 +405,8 @@ pub(crate) fn instantiate(
     let id = cx.instances.push(Instance {
         fid: fn_id,
         type_args: fn_type_args,
-        params,
-        ret,
+        param_tys: params,
+        ret_ty: ret,
         mangled,
         depth,
         origin,

@@ -3,8 +3,8 @@
    ╭─[ error_transmute_size_mismatch.ox:9:22 ]
    │
  9 │     let bad: i64 = ox_transmute::<i32, i64>(1);
-   │                      ─────────────┬─────────────  
-   │                                   ╰─────────────── transmute size mismatch
+   │                      ──────┬─────  
+   │                            ╰─────── transmute size mismatch
    │ 
    │ Note 1: source type: `i32` (4 bytes)
    │ 

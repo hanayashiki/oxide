@@ -1,0 +1,18 @@
+== diagnostics ==
+== types ==
+Fn[0] id<Param(0)>(x[Local(0)]: Param(0)) -> Param(0)
+  HExprId(0) : Param(0)
+Fn[1] main() -> i32
+  HExprId(1) : fn(i32) -> i32  fn_ref_type_args=[i32]
+  HExprId(2) : ()
+  HExprId(3) : fn(bool) -> bool  fn_ref_type_args=[bool]
+  HExprId(4) : ()
+  HExprId(5) : fn(i32) -> i32
+  HExprId(6) : i32
+  HExprId(7) : i32
+  HExprId(8) : ()
+  HExprId(9) : fn(bool) -> bool
+  HExprId(10) : bool
+  HExprId(11) : bool
+  HExprId(12) : ()
+  HExprId(13) : i32

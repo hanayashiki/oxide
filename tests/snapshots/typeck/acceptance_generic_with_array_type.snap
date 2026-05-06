@@ -3,6 +3,6 @@
 Fn[0] size_of<Param(0)>() -> usize
   HExprId(0) : usize
 Fn[1] main() -> ()
-  HExprId(1) : fn() -> usize
-  HExprId(2) : usize  call_type_args=[[i32; 4]]
+  HExprId(1) : fn() -> usize  fn_ref_type_args=[[i32; 4]]
+  HExprId(2) : usize
   HExprId(3) : ()

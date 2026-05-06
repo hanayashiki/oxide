@@ -3,8 +3,8 @@
    ╭─[ error_divergent_through_array.ox:2:5 ]
    │
  2 │     f::<[T; 2]>()
-   │     ──────┬──────  
-   │           ╰──────── diverges here
+   │     ┬  
+   │     ╰── diverges here
    │ 
    │ Help: instantiation chain (root → tip):
    │         main  (depth 0)

@@ -3,13 +3,13 @@
    ╭─[ error_generic_fn_unsized_typearg_turbofish.ox:2:13 ]
    │
  2 │ fn main() { marker::<[i32]>(); }
-   │             ────────┬────────  
-   │                     ╰────────── unsized type argument
+   │             ───┬──  
+   │                ╰──── unsized type argument
    │ 
    │ Help: generic functions assume T to be sized; pass a pointer (`*const [T]` / `*mut [T]`) or a sized array (`[T; N]`) instead.
 ───╯
 == types ==
 Fn[0] marker<Param(0)>() -> ()
 Fn[1] main() -> ()
-  HExprId(0) : fn()
-  HExprId(1) : ()  call_type_args=[[i32]]
+  HExprId(0) : fn()  fn_ref_type_args=[[i32]]
+  HExprId(1) : ()

@@ -602,6 +602,36 @@ fn ty_str(ty: &HirTy) -> String {
             None => format!("[{}]", ty_str(elem)),
             Some(c) => format!("[{}; {}]", ty_str(elem), const_str(c)),
         },
+        HirTyKind::Fn {
+            is_extern_c,
+            params,
+            is_variadic,
+            ret_ty,
+        } => {
+            let mut s = String::new();
+            if *is_extern_c {
+                s.push_str("extern \"C\" ");
+            }
+            s.push_str("fn(");
+            for (i, p) in params.iter().enumerate() {
+                if i > 0 {
+                    s.push_str(", ");
+                }
+                s.push_str(&ty_str(p));
+            }
+            if *is_variadic {
+                if !params.is_empty() {
+                    s.push_str(", ");
+                }
+                s.push_str("...");
+            }
+            s.push(')');
+            if let Some(rt) = ret_ty {
+                s.push_str(" -> ");
+                s.push_str(&ty_str(rt));
+            }
+            s
+        }
         HirTyKind::Error => "<err>".to_string(),
     }
 }

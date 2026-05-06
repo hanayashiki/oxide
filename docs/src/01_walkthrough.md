@@ -263,6 +263,84 @@ fn compare<T>(a: T, b: T) -> bool {
 }
 ```
 
+## Function pointers
+
+A function name used outside a call position evaluates to a pointer to
+that function. The type is spelled `fn(T1, T2) -> R`:
+
+```rust
+fn add(a: i32, b: i32) -> i32 { a + b }
+
+fn apply(f: fn(i32, i32) -> i32, x: i32, y: i32) -> i32 {
+    f(x, y)              // indirect call through the pointer
+}
+
+fn main() -> i32 {
+    apply(add, 1, 2)     // → 3
+}
+```
+
+The parameter spelling supports an optional name for documentation
+(`fn(name: i32) -> bool`); only the type identity reaches the type
+system, so `fn(i32) -> bool` and `fn(name: i32) -> bool` are
+interchangeable.
+
+`fn`-types are subtypes structurally — contravariant on parameters
+(more permissive args are accepted in stricter slots) and covariant
+on the return type. Other axes — arity, ABI, and `c_variadic` — must
+match exactly.
+
+### `extern "C"` fn pointers
+
+C ABIs are part of the type — `extern "C" fn(...) -> R` is a distinct
+type from the bare `fn(...) -> R`:
+
+```rust
+extern "C" {
+    fn qsort(
+        base: *mut u8,
+        nmemb: usize,
+        size: usize,
+        cmp: extern "C" fn(*const u8, *const u8) -> i32,
+    );
+}
+```
+
+Variadic fn pointers (`extern "C" fn(*const u8, ...) -> i32`) are
+parseable too, mirroring the C declaration.
+
+### Generic fns as values
+
+Referencing a generic fn as a value works as long as later use sites
+constrain the type parameters. Each binding gets its own
+instantiation; the compiler picks a single concrete instance per
+fn-ref site:
+
+```rust
+fn id<T>(x: T) -> T { x }
+
+fn main() -> i32 {
+    let f = id;          // ✅ ?T0 unbound here…
+    f(42)                // …pinned to i32 by this call
+}
+```
+
+If nothing later constrains the type, you'll get a `cannot infer a
+type` error — same as any other under-determined inference. Two
+distinct bindings yield two distinct instances:
+
+```rust
+let a = id;
+let b = id;
+let _ = a(1);            // a binds to id::<i32>
+let _ = b(true);         // b binds to id::<bool>
+```
+
+A single binding cannot be reused at conflicting types — Oxide has
+no let-polymorphism (matching Rust). Compiler intrinsics
+(`ox_size_of`, `ox_transmute`) are *not* allowed as values; call
+them directly.
+
 ## Building and emitting
 
 `oxide` is a single-file driver: pass the entry point, and it walks

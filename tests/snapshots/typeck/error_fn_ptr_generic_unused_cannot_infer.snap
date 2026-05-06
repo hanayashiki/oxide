@@ -1,0 +1,17 @@
+== diagnostics ==
+[E0256] Error: could not infer a type
+   ╭─[ error_fn_ptr_generic_unused_cannot_infer.ox:7:15 ]
+   │
+ 7 │     let _ = id;
+   │               ─┬  
+   │                ╰── ambiguous type
+   │ 
+   │ Help: add a type annotation to disambiguate
+───╯
+== types ==
+Fn[0] id<Param(0)>(x[Local(0)]: Param(0)) -> Param(0)
+  HExprId(0) : Param(0)
+Fn[1] main() -> i32
+  HExprId(1) : fn({error}) -> {error}  fn_ref_type_args=[{error}]
+  HExprId(2) : ()
+  HExprId(3) : i32

@@ -1,0 +1,26 @@
+== diagnostics ==
+[E0281] Error: cannot take the value of intrinsic fn `ox_size_of`
+   ╭─[ error_fn_ptr_intrinsic_as_value.ox:8:15 ]
+   │
+ 8 │     let _ = ox_size_of;
+   │               ─────┬────  
+   │                    ╰────── intrinsic used as a value
+   │ 
+   │ Help: `ox_size_of` is a compiler intrinsic, not a regular function; intrinsics cannot be referenced as values — call them directly
+───╯
+[E0256] Error: could not infer a type
+   ╭─[ error_fn_ptr_intrinsic_as_value.ox:8:11 ]
+   │
+ 8 │     let _ = ox_size_of;
+   │           ┬  
+   │           ╰── ambiguous type
+   │ 
+   │ Help: add a type annotation to disambiguate
+───╯
+== types ==
+Fn[0] main() -> i32
+  HExprId(0) : {error}
+  HExprId(1) : ()
+  HExprId(2) : i32
+Fn[1] ox_transmute<Param(0), Param(1)>(x[Local(1)]: Param(0)) -> Param(1)
+Fn[2] ox_size_of<Param(2)>() -> usize

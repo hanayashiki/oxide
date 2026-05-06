@@ -14,7 +14,7 @@ Fn[1] bad() -> ()
   HExprId(0) : i32
   HExprId(1) : Adt(0)
   HExprId(2) : ()
-  HExprId(3) : fn(*mut Adt(0))
+  HExprId(3) : extern "C" fn(*mut Adt(0))
   HExprId(4) : Adt(0)
   HExprId(5) : *mut Adt(0)
   HExprId(6) : ()

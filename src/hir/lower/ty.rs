@@ -93,6 +93,28 @@ pub(super) fn lower_ty(
             let len_const = len.map(|eid| extract_length_const(ast, eid));
             HirTyKind::Array(elem, len_const)
         }
+        ast::TypeKind::Fn {
+            is_extern_c,
+            params,
+            is_variadic,
+            ret_ty,
+        } => {
+            // Lower each param's type; the optional name is dropped here
+            // per spec/19_FN_PTR.md §7.1 — only the param TyId reaches
+            // typeck interning.
+            let lowered_params: Vec<HirTy> = params
+                .iter()
+                .map(|p| lower_ty(ast, scope, ty_params, errors, p.ty))
+                .collect();
+            let lowered_ret = ret_ty
+                .map(|tid| Box::new(lower_ty(ast, scope, ty_params, errors, tid)));
+            HirTyKind::Fn {
+                is_extern_c: *is_extern_c,
+                params: lowered_params,
+                is_variadic: *is_variadic,
+                ret_ty: lowered_ret,
+            }
+        }
     };
     HirTy { kind, span }
 }

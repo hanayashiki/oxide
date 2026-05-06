@@ -3,22 +3,22 @@
 Fn[0] slurp(path[Local(0)]: *const [u8], buf[Local(1)]: *mut u8, cap[Local(2)]: usize) -> usize
   HExprId(0) : *const [u8; 2]
   HExprId(1) : ()
-  HExprId(2) : fn(*const [u8], *const [u8]) -> *mut u8
+  HExprId(2) : extern "C" fn(*const [u8], *const [u8]) -> *mut u8
   HExprId(3) : *const [u8]
   HExprId(4) : *const [u8]
   HExprId(5) : *mut u8
   HExprId(6) : ()
-  HExprId(7) : fn(*const Param(4), *const Param(4)) -> bool
+  HExprId(7) : fn(*const u8, *const u8) -> bool  fn_ref_type_args=[u8]
   HExprId(8) : *mut u8
   HExprId(9) : *mut u8
-  HExprId(10) : bool  call_type_args=[u8]
+  HExprId(10) : bool
   HExprId(11) : usize
   HExprId(12) : i32
   HExprId(13) : usize
   HExprId(14) : usize
   HExprId(15) : !
   HExprId(16) : ()
-  HExprId(17) : fn(*mut u8, usize, usize, *mut u8) -> usize
+  HExprId(17) : extern "C" fn(*mut u8, usize, usize, *mut u8) -> usize
   HExprId(18) : *mut u8
   HExprId(19) : i32
   HExprId(20) : usize
@@ -26,64 +26,64 @@ Fn[0] slurp(path[Local(0)]: *const [u8], buf[Local(1)]: *mut u8, cap[Local(2)]: 
   HExprId(22) : *mut u8
   HExprId(23) : usize
   HExprId(24) : ()
-  HExprId(25) : fn(*mut u8) -> i32
+  HExprId(25) : extern "C" fn(*mut u8) -> i32
   HExprId(26) : *mut u8
   HExprId(27) : i32
   HExprId(28) : usize
 Fn[1] ox_alloc<Param(0)>() -> *mut Param(0)
-  HExprId(29) : fn(Param(7)) -> Param(8)
-  HExprId(30) : fn(usize) -> *mut u8
-  HExprId(31) : fn() -> usize
-  HExprId(32) : usize  call_type_args=[Param(0)]
+  HExprId(29) : fn(*mut u8) -> *mut Param(0)  fn_ref_type_args=[*mut u8, *mut Param(0)]
+  HExprId(30) : extern "C" fn(usize) -> *mut u8
+  HExprId(31) : fn() -> usize  fn_ref_type_args=[Param(0)]
+  HExprId(32) : usize
   HExprId(33) : *mut u8
-  HExprId(34) : *mut Param(0)  call_type_args=[*mut u8, *mut Param(0)]
+  HExprId(34) : *mut Param(0)
 Fn[2] ox_alloc_zeroed<Param(1)>() -> *mut Param(1)
-  HExprId(35) : fn(Param(7)) -> Param(8)
-  HExprId(36) : fn(usize, usize) -> *mut u8
+  HExprId(35) : fn(*mut u8) -> *mut Param(1)  fn_ref_type_args=[*mut u8, *mut Param(1)]
+  HExprId(36) : extern "C" fn(usize, usize) -> *mut u8
   HExprId(37) : usize
-  HExprId(38) : fn() -> usize
-  HExprId(39) : usize  call_type_args=[Param(1)]
+  HExprId(38) : fn() -> usize  fn_ref_type_args=[Param(1)]
+  HExprId(39) : usize
   HExprId(40) : *mut u8
-  HExprId(41) : *mut Param(1)  call_type_args=[*mut u8, *mut Param(1)]
+  HExprId(41) : *mut Param(1)
 Fn[3] ox_dealloc<Param(2)>(p[Local(6)]: *mut Param(2)) -> ()
-  HExprId(42) : fn(*mut u8)
-  HExprId(43) : fn(Param(7)) -> Param(8)
+  HExprId(42) : extern "C" fn(*mut u8)
+  HExprId(43) : fn(*mut Param(2)) -> *mut u8  fn_ref_type_args=[*mut Param(2), *mut u8]
   HExprId(44) : *mut Param(2)
-  HExprId(45) : *mut u8  call_type_args=[*mut Param(2), *mut u8]
+  HExprId(45) : *mut u8
   HExprId(46) : ()
 Fn[4] ox_realloc<Param(3)>(p[Local(7)]: *mut Param(3), n[Local(8)]: usize) -> *mut Param(3)
-  HExprId(47) : fn(Param(7)) -> Param(8)
-  HExprId(48) : fn(*mut u8, usize) -> *mut u8
-  HExprId(49) : fn(Param(7)) -> Param(8)
+  HExprId(47) : fn(*mut u8) -> *mut Param(3)  fn_ref_type_args=[*mut u8, *mut Param(3)]
+  HExprId(48) : extern "C" fn(*mut u8, usize) -> *mut u8
+  HExprId(49) : fn(*mut Param(3)) -> *mut u8  fn_ref_type_args=[*mut Param(3), *mut u8]
   HExprId(50) : *mut Param(3)
-  HExprId(51) : *mut u8  call_type_args=[*mut Param(3), *mut u8]
+  HExprId(51) : *mut u8
   HExprId(52) : usize
-  HExprId(53) : fn() -> usize
-  HExprId(54) : usize  call_type_args=[Param(3)]
+  HExprId(53) : fn() -> usize  fn_ref_type_args=[Param(3)]
+  HExprId(54) : usize
   HExprId(55) : usize
   HExprId(56) : *mut u8
-  HExprId(57) : *mut Param(3)  call_type_args=[*mut u8, *mut Param(3)]
+  HExprId(57) : *mut Param(3)
 Fn[5] ox_ptr_eq<Param(4)>(a[Local(9)]: *const Param(4), b[Local(10)]: *const Param(4)) -> bool
-  HExprId(58) : fn(Param(7)) -> Param(8)
+  HExprId(58) : fn(*const Param(4)) -> usize  fn_ref_type_args=[*const Param(4), usize]
   HExprId(59) : *const Param(4)
-  HExprId(60) : usize  call_type_args=[*const Param(4), usize]
+  HExprId(60) : usize
   HExprId(61) : ()
-  HExprId(62) : fn(Param(7)) -> Param(8)
+  HExprId(62) : fn(*const Param(4)) -> usize  fn_ref_type_args=[*const Param(4), usize]
   HExprId(63) : *const Param(4)
-  HExprId(64) : usize  call_type_args=[*const Param(4), usize]
+  HExprId(64) : usize
   HExprId(65) : ()
   HExprId(66) : usize
   HExprId(67) : usize
   HExprId(68) : bool
 Fn[6] ox_is_null<Param(5)>(p[Local(13)]: *const Param(5)) -> bool
-  HExprId(69) : fn(*const Param(4), *const Param(4)) -> bool
+  HExprId(69) : fn(*const Param(5), *const Param(5)) -> bool  fn_ref_type_args=[Param(5)]
   HExprId(70) : *const Param(5)
   HExprId(71) : *mut Param(5)
-  HExprId(72) : bool  call_type_args=[Param(5)]
+  HExprId(72) : bool
 Fn[7] ox_is_not_null<Param(6)>(p[Local(14)]: *const Param(6)) -> bool
-  HExprId(73) : fn(*const Param(5)) -> bool
+  HExprId(73) : fn(*const Param(6)) -> bool  fn_ref_type_args=[Param(6)]
   HExprId(74) : *const Param(6)
-  HExprId(75) : bool  call_type_args=[Param(6)]
+  HExprId(75) : bool
   HExprId(76) : bool
 Fn[8] ox_transmute<Param(7), Param(8)>(x[Local(15)]: Param(7)) -> Param(8)
 Fn[9] ox_size_of<Param(9)>() -> usize

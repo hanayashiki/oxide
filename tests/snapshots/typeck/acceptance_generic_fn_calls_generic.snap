@@ -1,8 +1,8 @@
 == diagnostics ==
 == types ==
 Fn[0] outer<Param(0)>(x[Local(0)]: Param(0)) -> Param(0)
-  HExprId(0) : fn(Param(1)) -> Param(1)
+  HExprId(0) : fn(Param(0)) -> Param(0)  fn_ref_type_args=[Param(0)]
   HExprId(1) : Param(0)
-  HExprId(2) : Param(0)  call_type_args=[Param(0)]
+  HExprId(2) : Param(0)
 Fn[1] inner<Param(1)>(x[Local(1)]: Param(1)) -> Param(1)
   HExprId(3) : Param(1)

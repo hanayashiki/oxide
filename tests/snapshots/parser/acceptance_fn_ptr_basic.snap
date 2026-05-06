@@ -1,0 +1,13 @@
+Module
+  Fn use_pred(p: fn(i32) -> bool) -> bool
+    Block
+      tail: Ident("p")(Int(0))
+  Fn use_thunk(t: fn() -> i32) -> i32
+    Block
+      tail: Ident("t")()
+  Fn use_void(t: fn())
+    Block
+      ExprStmt Ident("t")()
+  Fn use_named_param(p: fn(ok: i32) -> bool) -> bool
+    Block
+      tail: Ident("p")(Int(0))

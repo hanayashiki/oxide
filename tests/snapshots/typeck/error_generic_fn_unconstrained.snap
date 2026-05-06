@@ -3,13 +3,13 @@
    ╭─[ error_generic_fn_unconstrained.ox:2:13 ]
    │
  2 │ fn main() { marker(); }
-   │             ────┬───  
-   │                 ╰───── ambiguous type
+   │             ───┬──  
+   │                ╰──── ambiguous type
    │ 
    │ Help: add a type annotation to disambiguate
 ───╯
 == types ==
 Fn[0] marker<Param(0)>() -> ()
 Fn[1] main() -> ()
-  HExprId(0) : fn()
-  HExprId(1) : ()  call_type_args=[{error}]
+  HExprId(0) : fn()  fn_ref_type_args=[{error}]
+  HExprId(1) : ()

@@ -496,6 +496,16 @@ pub enum HirTyKind {
     /// value type at typeck (E0261 `UnsizedArrayAsValue`) and is only
     /// valid behind a pointer (`*const [T]` / `*mut [T]`).
     Array(Box<HirTy>, Option<HirConst>),
+    /// `[extern "C"]? fn(T1, T2[, ...]) -> R`. Param names from AST are
+    /// dropped at lower per spec/19_FN_PTR.md §7.1; only the param
+    /// types reach typeck interning. `ret_ty: None` means the source
+    /// omitted `-> R`, which lowers to `()` at typeck.
+    Fn {
+        is_extern_c: bool,
+        params: Vec<HirTy>,
+        is_variadic: bool,
+        ret_ty: Option<Box<HirTy>>,
+    },
     /// Recovery placeholder for malformed type positions.
     Error,
 }

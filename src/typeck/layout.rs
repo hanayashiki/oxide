@@ -40,7 +40,7 @@ pub fn size_of(typeck: &mut TypeckResults, t: TyId) -> Option<u64> {
         TyKind::Array(_, None)
         | TyKind::Param(_)
         | TyKind::Infer(_)
-        | TyKind::Fn(..)
+        | TyKind::Fn { .. }
         | TyKind::Error => None,
     }
 }
@@ -60,7 +60,7 @@ pub fn align_of(typeck: &mut TypeckResults, t: TyId) -> Option<u64> {
         TyKind::Array(_, None)
         | TyKind::Param(_)
         | TyKind::Infer(_)
-        | TyKind::Fn(..)
+        | TyKind::Fn { .. }
         | TyKind::Error => None,
     }
 }
@@ -145,7 +145,7 @@ mod tests {
             local_tys: IndexVec::new(),
             expr_tys: IndexVec::new(),
             const_tys: IndexVec::new(),
-            call_type_args: std::collections::HashMap::new(),
+            fn_ref_type_args: std::collections::HashMap::new(),
         }
     }
 
@@ -277,7 +277,12 @@ mod tests {
         let error = t.tys.error;
         assert_eq!(size_of(&mut t, error), None);
 
-        let fn_ty = t.tys.intern(TyKind::Fn(vec![i32], i32, false));
+        let fn_ty = t.tys.intern(TyKind::Fn {
+            params: vec![i32],
+            ret: i32,
+            is_extern_c: false,
+            c_variadic: false,
+        });
         assert_eq!(size_of(&mut t, fn_ty), None);
     }
 

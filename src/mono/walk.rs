@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 
 use crate::hir::{HBlockId, HElseArm, HExprId, HirArrayLit, HirExprKind};
-use crate::typeck::{ParamId, TyId, subst_from};
+use crate::typeck::{ParamId, TyId, TyKind, subst_from};
 
 use super::{InstanceOrigin, InstanceParent, MonoCtx, instantiate};
 
@@ -78,46 +78,61 @@ fn walk_expr(
     let kind = cx.hir.exprs[eid].kind.clone();
     match kind {
         HirExprKind::Call { callee, args, .. } => {
-            // Only direct Fn callees in v0. The Fn(callee_fid) discriminator
-            // decides whether we cascade.
-            if let HirExprKind::Fn(callee_fid) = cx.hir.exprs[callee].kind {
-                let has_generics = !cx.typeck.fn_sig(callee_fid).generic_params.is_empty();
-                if has_generics {
-                    debug_assert!(
-                        !cx.hir.fns[callee_fid].is_extern,
-                        "extern + generic rejected at typeck (per spec/16); \
-                         mono should never see a generic extern callee",
-                    );
-                    // Resolve the call's type-args through the caller's subst.
-                    // Clone the typeck-recorded args out first so the
-                    // `&mut typeck` for substitute_ty doesn't fight with
-                    // the `&Vec<TyId>` borrow into `call_type_args`.
-                    let typeck_args: Vec<TyId> = cx
-                        .typeck
-                        .call_type_args
-                        .get(&eid)
-                        .cloned()
-                        .unwrap_or_default();
-                    let resolved_args: Vec<TyId> = typeck_args
-                        .iter()
-                        .map(|&t| cx.typeck.substitute_ty(t, subst))
-                        .collect();
-                    let call_span = cx.hir.exprs[eid].span.clone();
-                    // Cascade. instance_map is populated as a side-effect
-                    // of instantiate. Overflow (None) pushes an error;
-                    // driver short-circuits on errors before codegen runs.
-                    let _ = instantiate(
-                        cx,
-                        callee_fid,
-                        resolved_args,
-                        InstanceOrigin { parent, call_span },
-                    );
-                }
-            }
+            // Plain structural recursion. Generic-call cascade is the
+            // job of the bare `HirExprKind::Fn(fid)` arm below — the
+            // callee recursion hits it for fn-typed direct callees and
+            // does the right thing whether the fn-ref is inside a Call
+            // or used as a value (`let f = id; f(42)` per spec/19 F1).
             walk_expr(cx, parent, callee, subst);
             for a in args {
                 walk_expr(cx, parent, a, subst);
             }
+        }
+        // Bare fn-ref cascade. Fires for every reference to a generic
+        // fn — call-position OR value-position. typeck stamped the
+        // type-args on `fn_ref_type_args[eid]` (per spec/19 §F1 lift),
+        // mono substitutes them through the caller's parent and
+        // instantiates. Non-generic fids are atom no-ops here.
+        HirExprKind::Fn(fid) => {
+            let has_generics = !cx.typeck.fn_sig(fid).generic_params.is_empty();
+            if !has_generics {
+                return;
+            }
+            debug_assert!(
+                !cx.hir.fns[fid].is_extern,
+                "extern + generic rejected at typeck (per spec/16); \
+                 mono should never see a generic extern fn-ref",
+            );
+            let typeck_args: Vec<TyId> = cx
+                .typeck
+                .fn_ref_type_args
+                .get(&eid)
+                .cloned()
+                .unwrap_or_default();
+            let resolved_args: Vec<TyId> = typeck_args
+                .iter()
+                .map(|&t| cx.typeck.substitute_ty(t, subst))
+                .collect();
+            // Soundness invariant: by mono time + post-subst through
+            // the caller's parent, no Infer should remain. Failing
+            // loud here pinpoints "finalize didn't flush" /
+            // "subst missing a Param" instead of letting
+            // `instance_map` silently mismatch.
+            for &arg in &resolved_args {
+                assert!(
+                    !matches!(cx.typeck.tys().kind(arg), TyKind::Infer(_)),
+                    "unresolved Infer leaked into mono instantiation: \
+                     fid={fid:?}, arg={}",
+                    cx.typeck.tys().render(arg),
+                );
+            }
+            let call_span = cx.hir.exprs[eid].span.clone();
+            let _ = instantiate(
+                cx,
+                fid,
+                resolved_args,
+                InstanceOrigin { parent, call_span },
+            );
         }
 
         // Structural recursion. Variant names match HirExprKind in
@@ -213,7 +228,6 @@ fn walk_expr(
         | HirExprKind::StrLit(_)
         | HirExprKind::Null
         | HirExprKind::Local(_)
-        | HirExprKind::Fn(_)
         | HirExprKind::Const(_)
         | HirExprKind::Unresolved(_)
         | HirExprKind::Continue

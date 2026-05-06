@@ -1,0 +1,21 @@
+== diagnostics ==
+[E0257] Error: pointer mutability mismatch: expected `*mut i32`, found `*const i32`
+    ╭─[ error_fn_ptr_as_cast_rejected.ox:9:16 ]
+    │
+  9 │ ╭─▶     let g = f as fn(*const i32) -> i32;
+ 10 │ ├─▶     0
+    │ │           
+    │ ╰─────────── incompatible pointer
+    │     
+    │     Help: only `*mut T` → `*const T` is allowed at the outer layer; inner positions must match exactly
+────╯
+== types ==
+Fn[0] writer(p[Local(0)]: *mut i32) -> i32
+  HExprId(0) : i32
+Fn[1] main() -> i32
+  HExprId(1) : fn(*mut i32) -> i32
+  HExprId(2) : ()
+  HExprId(3) : fn(*mut i32) -> i32
+  HExprId(4) : fn(*const i32) -> i32
+  HExprId(5) : ()
+  HExprId(6) : i32

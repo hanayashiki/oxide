@@ -3,8 +3,8 @@
    ╭─[ error_generic_fn_one_param_unconstrained.ox:6:5 ]
    │
  6 │     pair(42);
-   │     ────┬───  
-   │         ╰───── ambiguous type
+   │     ──┬─  
+   │       ╰─── ambiguous type
    │ 
    │ Help: add a type annotation to disambiguate
 ───╯
@@ -12,6 +12,6 @@
 Fn[0] pair<Param(0), Param(1)>(x[Local(0)]: Param(0)) -> Param(0)
   HExprId(0) : Param(0)
 Fn[1] main() -> ()
-  HExprId(1) : fn(Param(0)) -> Param(0)
+  HExprId(1) : fn(i32) -> i32  fn_ref_type_args=[i32, {error}]
   HExprId(2) : i32
-  HExprId(3) : i32  call_type_args=[i32, {error}]
+  HExprId(3) : i32

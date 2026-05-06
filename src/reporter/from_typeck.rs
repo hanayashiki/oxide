@@ -369,6 +369,25 @@ pub fn from_typeck_error(err: &TypeError, file: FileId, tys: &TyArena) -> Diagno
             .with_label(Label::primary(file, span.clone(), label))
             .with_help(help)
         }
+
+        // E0281 — intrinsic-as-value. Intrinsics (`ox_size_of`,
+        // `ox_transmute`, …) synthesize values rather than calling a
+        // function, so a pointer to one is meaningless. Ordinary
+        // generic fns are now allowed as values per spec/19's F1
+        // lift; only intrinsics are rejected.
+        TypeError::IntrinsicAsValue { name, span } => Diagnostic::error(
+            "E0281",
+            format!("cannot take the value of intrinsic fn `{name}`"),
+        )
+        .with_label(Label::primary(
+            file,
+            span.clone(),
+            "intrinsic used as a value",
+        ))
+        .with_help(format!(
+            "`{name}` is a compiler intrinsic, not a regular function; \
+             intrinsics cannot be referenced as values — call them directly"
+        )),
     }
 }
 

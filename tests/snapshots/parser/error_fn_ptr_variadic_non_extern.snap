@@ -1,0 +1,12 @@
+Module
+  Fn bad(p: fn(i32) -> i32) -> i32
+    Block
+      tail: Int(0)
+== diagnostics ==
+[E0107] Error: E0271: `...` only allowed in `extern "C"` declarations; help: variadic Oxide functions are not supported; use `extern "C"` to qualify the fn pointer type
+   ╭─[ error_fn_ptr_variadic_non_extern.ox:1:19 ]
+   │
+ 1 │ fn bad(p: fn(i32, ...) -> i32) -> i32 { 0 }
+   │                   ─┬─  
+   │                    ╰─── here
+───╯

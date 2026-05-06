@@ -15,7 +15,7 @@ Fn[1] main() -> i32
   HExprId(1) : i32
   HExprId(2) : Adt(0)
   HExprId(3) : ()
-  HExprId(4) : fn(*const [u8], ...) -> i32
+  HExprId(4) : extern "C" fn(*const [u8], ...) -> i32
   HExprId(5) : *const [u8; 7]
   HExprId(6) : Adt(0)
   HExprId(7) : i32

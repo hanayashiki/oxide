@@ -343,6 +343,7 @@ fn resolve_fn_sigs(cx: &mut Checker<'_>) {
             generic_params,
             partial: false,
             c_variadic: hir_fn.is_variadic,
+            is_extern_c: hir_fn.is_extern,
         };
     }
 }

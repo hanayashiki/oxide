@@ -129,7 +129,13 @@ pub fn lower_ty<'ctx>(
             "lower_ty called on Never — !-typed expressions terminate \
              the BB before any consumer asks for a slot"
         ),
-        TyKind::Fn(_, _, _) => panic!("lower_ty called on Fn — use lower_fn_type"),
+        // spec/19_FN_PTR.md §6: `Fn` always lowers to opaque `ptr` at
+        // value position. The `FunctionType` shape (used at call sites
+        // and at fn declarations) is built separately via
+        // `lower_fn_type`. LLVM `ptr` is type-agnostic, so this single
+        // arm covers all `[extern "C"]?` / variadic combinations —
+        // those are typeck-level invariants only.
+        TyKind::Fn { .. } => ctx.ptr_type(inkwell::AddressSpace::default()).into(),
         TyKind::Array(elem, Some(n)) => {
             let elem_ll = lower_ty(ctx, typeck, adt_ll, elem);
             elem_ll.array_type(n as u32).into()

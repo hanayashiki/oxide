@@ -86,7 +86,7 @@ fn mangle_ty(out: &mut String, tys: &TyArena, ty: TyId) {
                 mangle_ty(out, tys, arg);
             }
         }
-        TyKind::Param(_) | TyKind::Infer(_) | TyKind::Fn(_, _, _) => {
+        TyKind::Param(_) | TyKind::Infer(_) | TyKind::Fn { .. } => {
             unreachable!(
                 "mangle_inst::mangle_ty unreachable variant: {}",
                 tys.render(ty)

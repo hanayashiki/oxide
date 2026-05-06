@@ -1,0 +1,11 @@
+== diagnostics ==
+== types ==
+Fn[0] get_mut() -> *mut i32
+  HExprId(0) : i32
+  HExprId(1) : ()
+  HExprId(2) : i32
+  HExprId(3) : *mut i32
+Fn[1] main() -> i32
+  HExprId(4) : fn() -> *mut i32
+  HExprId(5) : ()
+  HExprId(6) : i32

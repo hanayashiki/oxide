@@ -142,7 +142,149 @@ where
             .delimited_by(just(TokenKind::LBracket), just(TokenKind::RBracket))
             .map_with(|(elem, len), e| e.push_type(TypeKind::Array { elem, len }));
 
-        choice((ptr, array, named)).labelled("type")
+        // `[extern "C"]? fn(p1: T1, p2: T2[, ...]) [-> R]`. See
+        // spec/19_FN_PTR.md §7. Param names are kept on the AST for
+        // pretty-print + future diagnostics; HIR drops them.
+        //
+        // Same param-list invariants as `params_parser` (a single linear
+        // pass enforces shape: `...` last, no trailing `,` after `...`,
+        // `...` requires a fixed param before it). The variadic-without-
+        // `extern "C"` rule is the fn-ptr-type analogue of E0271 and is
+        // emitted here directly (parser-level diagnostic, same as the
+        // E0271 emit in `fn_decl_parser`).
+        let fn_ptr_param = ident_parser()
+            .then_ignore(just(TokenKind::Colon))
+            .or_not()
+            .then(ty.clone())
+            .map_with(|(name, ty), e| FnPtrParam {
+                name,
+                ty,
+                span: e.lex_span(),
+            });
+
+        #[derive(Clone)]
+        enum FnPtrEntry {
+            Param(FnPtrParam),
+            Dots(SimpleSpan),
+        }
+
+        let fn_ptr_entry = choice((
+            fn_ptr_param.map(FnPtrEntry::Param),
+            just(TokenKind::DotDotDot).map_with(|_, e| FnPtrEntry::Dots(e.span())),
+        ));
+
+        let fn_ptr_nonempty = fn_ptr_entry
+            .clone()
+            .then(
+                just(TokenKind::Comma)
+                    .ignore_then(fn_ptr_entry)
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
+            .then(just(TokenKind::Comma).or_not().map(|c| c.is_some()))
+            .map(|((first, rest), trailing_comma)| {
+                let mut entries: Vec<FnPtrEntry> = Vec::with_capacity(1 + rest.len());
+                entries.push(first);
+                entries.extend(rest);
+                (entries, trailing_comma)
+            });
+        let fn_ptr_inside = choice((fn_ptr_nonempty, empty().map(|_| (Vec::new(), false))))
+            .delimited_by(just(TokenKind::LParen), just(TokenKind::RParen));
+
+        // `extern "C"` prefix. Only `"C"` is accepted; other ABI
+        // strings reject with the same shape `extern_block_parser`
+        // uses.
+        let abi = just(TokenKind::KwExtern)
+            .ignore_then(
+                any().try_map(|tok: TokenKind, span: SimpleSpan| match tok {
+                    TokenKind::Str(s) if s == "C" => Ok(()),
+                    TokenKind::Str(s) => Err(Rich::custom(
+                        span,
+                        format!("only \"C\" ABI is supported in fn pointer type, got \"{s}\""),
+                    )),
+                    other => Err(Rich::custom(
+                        span,
+                        format!("expected ABI string \"C\", got {other:?}"),
+                    )),
+                }),
+            )
+            .or_not()
+            .map(|opt| opt.is_some());
+
+        let fn_ptr = abi
+            .then_ignore(just(TokenKind::KwFn))
+            .then(fn_ptr_inside)
+            .then(
+                just(TokenKind::Arrow)
+                    .ignore_then(ty.clone())
+                    .or_not(),
+            )
+            .validate(
+                |((is_extern_c, (entries, trailing_comma)), ret_ty), _e, emitter| {
+                    let mut params: Vec<FnPtrParam> = Vec::with_capacity(entries.len());
+                    let mut variadic: Option<SimpleSpan> = None;
+                    let mut malformed = false;
+                    let mut emit = |span: SimpleSpan, msg: &str| {
+                        emitter.emit(Rich::custom(span, msg.to_string()));
+                    };
+                    let n = entries.len();
+                    for (i, ent) in entries.into_iter().enumerate() {
+                        match ent {
+                            FnPtrEntry::Param(p) => params.push(p),
+                            FnPtrEntry::Dots(dots_span) => {
+                                if variadic.is_some() {
+                                    emit(
+                                        dots_span,
+                                        "`...` may appear only once in a parameter list",
+                                    );
+                                    malformed = true;
+                                } else if i == 0 {
+                                    emit(
+                                        dots_span,
+                                        "`...` requires at least one fixed parameter before it",
+                                    );
+                                    malformed = true;
+                                } else if i != n - 1 {
+                                    emit(
+                                        dots_span,
+                                        "`...` must be the last entry in a parameter list",
+                                    );
+                                    malformed = true;
+                                } else if trailing_comma {
+                                    emit(dots_span, "no trailing `,` after `...`");
+                                    malformed = true;
+                                }
+                                variadic = Some(dots_span);
+                            }
+                        }
+                    }
+                    let mut is_variadic = !malformed && variadic.is_some();
+                    if is_variadic && !is_extern_c {
+                        // E0271 — variadic only legal under `extern "C"`.
+                        // Same wording / error code as `fn_decl_parser`'s
+                        // E0271 emit (spec/15_VARIADIC.md).
+                        if let Some(dots_span) = variadic {
+                            emitter.emit(Rich::custom(
+                                dots_span,
+                                "E0271: `...` only allowed in `extern \"C\"` declarations; \
+                                 help: variadic Oxide functions are not supported; \
+                                 use `extern \"C\"` to qualify the fn pointer type"
+                                    .to_string(),
+                            ));
+                        }
+                        is_variadic = false;
+                    }
+                    TypeKind::Fn {
+                        is_extern_c,
+                        params,
+                        is_variadic,
+                        ret_ty,
+                    }
+                },
+            )
+            .map_with(|kind, e| e.push_type(kind));
+
+        choice((fn_ptr, ptr, array, named)).labelled("type")
     })
 }
 

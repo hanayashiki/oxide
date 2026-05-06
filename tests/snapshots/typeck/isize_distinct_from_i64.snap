@@ -9,7 +9,7 @@
 == types ==
 Fn[0] make_offset() -> isize
 Fn[1] f() -> i32
-  HExprId(0) : fn() -> isize
+  HExprId(0) : extern "C" fn() -> isize
   HExprId(1) : isize
   HExprId(2) : ()
   HExprId(3) : i32

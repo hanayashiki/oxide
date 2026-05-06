@@ -3,8 +3,8 @@
    ╭─[ error_generic_fn_pointer_chain_unsized.ox:6:25 ]
    │
  6 │     let p: *mut [i32] = wrapper();
-   │                         ────┬────  
-   │                             ╰────── unsized type argument
+   │                         ───┬───  
+   │                            ╰───── unsized type argument
    │ 
    │ Help: generic functions assume T to be sized; pass a pointer (`*const [T]` / `*mut [T]`) or a sized array (`[T; N]`) instead.
 ───╯
@@ -12,6 +12,6 @@
 Fn[0] wrapper<Param(0)>() -> *mut Param(0)
   HExprId(0) : *mut Param(0)
 Fn[1] main() -> ()
-  HExprId(1) : fn() -> *mut Param(0)
-  HExprId(2) : *mut [i32]  call_type_args=[[i32]]
+  HExprId(1) : fn() -> *mut [i32]  fn_ref_type_args=[[i32]]
+  HExprId(2) : *mut [i32]
   HExprId(3) : ()

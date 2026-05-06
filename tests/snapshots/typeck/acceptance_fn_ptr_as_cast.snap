@@ -1,0 +1,11 @@
+== diagnostics ==
+== types ==
+Fn[0] read_only(p[Local(0)]: *const i32) -> i32
+  HExprId(0) : i32
+Fn[1] main() -> i32
+  HExprId(1) : fn(*const i32) -> i32
+  HExprId(2) : ()
+  HExprId(3) : fn(*const i32) -> i32
+  HExprId(4) : fn(*mut i32) -> i32
+  HExprId(5) : ()
+  HExprId(6) : i32

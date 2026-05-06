@@ -232,6 +232,14 @@ pub enum TypeError {
         found: TyId,
         span: Span,
     },
+
+    /// `HirExprKind::Fn(fid)` for a *compiler intrinsic* used outside
+    /// Call-callee position — e.g. `let p = ox_size_of;`. Intrinsics
+    /// synthesize values rather than calling a function, so a pointer
+    /// to one is meaningless. Ordinary generic fns CAN be referenced
+    /// as values now (the F1 lift in spec/19's follow-up plan); only
+    /// intrinsics are rejected. E0281.
+    IntrinsicAsValue { name: String, span: Span },
 }
 
 /// Discriminator on `ArrayByValueAtExternC` so the diagnostic can
@@ -301,7 +309,8 @@ impl TypeError {
             | Self::GenericArityMismatch { span, .. }
             | Self::InvalidCast { span, .. }
             | Self::PointerComparison { span, .. }
-            | Self::NonIntegerOperand { span, .. } => span,
+            | Self::NonIntegerOperand { span, .. }
+            | Self::IntrinsicAsValue { span, .. } => span,
             Self::StructLitMissingField { lit_span, .. } => lit_span,
             Self::StructLitDuplicateField { dup, .. } => dup,
         }

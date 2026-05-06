@@ -1,0 +1,8 @@
+HirProgram
+  Module acceptance_fn_ptr_param_names_dropped.ox (root)
+    Fn[0] use_named(p[Local(0)]: fn(i32, i32) -> bool) -> bool
+      Block
+        tail: Call(Local(0, "p", place), Int(0), Int(1))
+    Fn[1] use_unnamed(p[Local(1)]: fn(i32, i32) -> bool) -> bool
+      Block
+        tail: Call(Local(1, "p", place), Int(0), Int(1))

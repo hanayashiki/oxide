@@ -1,4 +1,13 @@
 == diagnostics ==
+[E0269] Error: unsized array `[T]` cannot appear as a generic type argument
+   ╭─[ error_generic_fn_unsized_typearg_from_deref.ox:3:13 ]
+   │
+ 3 │ fn main() { id(*(unsized_p())); }
+   │             ─┬  
+   │              ╰── unsized type argument
+   │ 
+   │ Help: generic functions assume T to be sized; pass a pointer (`*const [T]` / `*mut [T]`) or a sized array (`[T; N]`) instead.
+───╯
 [E0269] Error: cannot dereference pointer to unsized array `[T]`
    ╭─[ error_generic_fn_unsized_typearg_from_deref.ox:3:18 ]
    │
@@ -8,23 +17,14 @@
    │ 
    │ Help: dereferencing `*const [T]` / `*mut [T]` would materialize an unsized value; use `p[i]` to index through the pointer instead
 ───╯
-[E0269] Error: unsized array `[T]` cannot appear as a generic type argument
-   ╭─[ error_generic_fn_unsized_typearg_from_deref.ox:3:13 ]
-   │
- 3 │ fn main() { id(*(unsized_p())); }
-   │             ─────────┬────────  
-   │                      ╰────────── unsized type argument
-   │ 
-   │ Help: generic functions assume T to be sized; pass a pointer (`*const [T]` / `*mut [T]`) or a sized array (`[T; N]`) instead.
-───╯
 == types ==
 Fn[0] id<Param(0)>(x[Local(0)]: Param(0)) -> Param(0)
   HExprId(0) : Param(0)
 Fn[1] unsized_p() -> *const [i32]
   HExprId(1) : *mut [i32]
 Fn[2] main() -> ()
-  HExprId(2) : fn(Param(0)) -> Param(0)
+  HExprId(2) : fn([i32]) -> [i32]  fn_ref_type_args=[[i32]]
   HExprId(3) : fn() -> *const [i32]
   HExprId(4) : *const [i32]
   HExprId(5) : [i32]
-  HExprId(6) : [i32]  call_type_args=[[i32]]
+  HExprId(6) : [i32]

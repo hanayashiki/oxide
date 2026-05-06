@@ -409,6 +409,33 @@ pub enum TypeKind {
         elem: TypeId,
         len: Option<ExprId>,
     },
+    /// `[extern "C"]? fn(p1: T1, p2: T2[, ...]) [-> R]`. Bare `fn(...)`
+    /// without an `extern "C"` qualifier is the default-ABI form.
+    /// Param names are stored for diagnostics/pretty-print only —
+    /// HIR lowering discards them, so they never reach type interning.
+    /// See spec/19_FN_PTR.md §7.1.
+    Fn {
+        is_extern_c: bool,
+        params: Vec<FnPtrParam>,
+        /// `, ...` trailing marker. Parser enforces `is_variadic ⇒
+        /// is_extern_c` (spec/15 stable-only posture); else E0271.
+        is_variadic: bool,
+        /// `None` ⇒ unit (mirrors `FnDecl::ret_ty`).
+        ret_ty: Option<TypeId>,
+    },
+}
+
+/// A parameter in a function-pointer type position. Names are kept on
+/// the AST for source-fidelity (pretty-print, future diagnostics) but
+/// dropped at HIR lowering; only the param `TyId` reaches interning.
+/// See spec/19_FN_PTR.md §7.1.
+#[derive(Clone, Debug)]
+pub struct FnPtrParam {
+    /// Optional source name (`fn(ok: i32)` keeps `Some("ok")`,
+    /// `fn(i32)` keeps `None`).
+    pub name: Option<Ident>,
+    pub ty: TypeId,
+    pub span: Span,
 }
 
 #[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, Hash)]

@@ -567,6 +567,38 @@ impl<'a> Printer<'a> {
                 }
                 self.write("]");
             }
+            TypeKind::Fn {
+                is_extern_c,
+                params,
+                is_variadic,
+                ret_ty,
+            } => {
+                if *is_extern_c {
+                    self.write("extern \"C\" ");
+                }
+                self.write("fn(");
+                for (i, p) in params.iter().enumerate() {
+                    if i > 0 {
+                        self.write(", ");
+                    }
+                    if let Some(name) = &p.name {
+                        self.write(&name.name);
+                        self.write(": ");
+                    }
+                    self.write_type(p.ty);
+                }
+                if *is_variadic {
+                    if !params.is_empty() {
+                        self.write(", ");
+                    }
+                    self.write("...");
+                }
+                self.write(")");
+                if let Some(rt) = ret_ty {
+                    self.write(" -> ");
+                    self.write_type(*rt);
+                }
+            }
         }
     }
 }

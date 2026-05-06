@@ -389,7 +389,7 @@ impl Tapper for MonoSnap {
         self.out.push_str("== sig ==\n");
         for (iid, inst) in t.mono.instances.iter_enumerated() {
             let params: Vec<String> = inst
-                .params
+                .param_tys
                 .iter()
                 .map(|&ty| t.results.tys.render(ty))
                 .collect();
@@ -398,7 +398,7 @@ impl Tapper for MonoSnap {
                 "Inst[{}] params=[{}] ret={}",
                 iid.raw(),
                 params.join(", "),
-                t.results.tys.render(inst.ret),
+                t.results.tys.render(inst.ret_ty),
             )
             .unwrap();
         }
@@ -598,7 +598,7 @@ fn write_typeck_signatures(
         .unwrap();
         // Per-fn expr_tys: walk this fn's body to collect the HExprIds
         // it owns, then emit them in numerical order alongside any
-        // call_type_args entry. Per spec/16_GENERIC.md §Typeck rules,
+        // fn_ref_type_args entry. Per spec/16_GENERIC.md §Typeck rules,
         // generic-fn bodies legitimately carry `Param(_)` in
         // expr_tys; those render via TyArena.render's Param arm.
         let mut owned: std::collections::BTreeSet<oxide::hir::HExprId> =
@@ -608,12 +608,12 @@ fn write_typeck_signatures(
         }
         for eid in owned {
             let ty = results.expr_tys[eid];
-            // Append call_type_args inline if this expr is a generic
-            // call site that recorded its resolved args at finalize.
-            let cta_str = match results.call_type_args.get(&eid) {
+            // Append fn_ref_type_args inline if this expr is a generic
+            // fn-ref site that recorded its resolved args at finalize.
+            let cta_str = match results.fn_ref_type_args.get(&eid) {
                 Some(args) => {
                     let parts: Vec<_> = args.iter().map(|&t| results.tys.render(t)).collect();
-                    format!("  call_type_args=[{}]", parts.join(", "))
+                    format!("  fn_ref_type_args=[{}]", parts.join(", "))
                 }
                 None => String::new(),
             };

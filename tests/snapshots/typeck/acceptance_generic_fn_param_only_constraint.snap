@@ -3,6 +3,6 @@
 Fn[0] apply<Param(0)>(t[Local(0)]: Param(0)) -> Param(0)
   HExprId(0) : Param(0)
 Fn[1] main() -> ()
-  HExprId(1) : fn(Param(0)) -> Param(0)
+  HExprId(1) : fn(i32) -> i32  fn_ref_type_args=[i32]
   HExprId(2) : i32
-  HExprId(3) : i32  call_type_args=[i32]
+  HExprId(3) : i32

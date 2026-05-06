@@ -41,10 +41,25 @@ pub enum TyKind {
     Unit,
     /// `!` — bottom type. Subtype of every type during unification.
     Never,
-    /// Function signature. Third tuple element is the C-ABI variadic
-    /// flag (`true` only for `extern "C" fn(..., ...)`); see
-    /// spec/15_VARIADIC.md.
-    Fn(Vec<TyId>, TyId, bool),
+    /// `[extern "C"]? fn(params) -> ret`. The two booleans are
+    /// independent in v0 (spec/19_FN_PTR.md §3.2 invariance + spec/15
+    /// calling-side only): the parser enforces
+    /// `c_variadic ⇒ is_extern_c`. `c_variadic` keeps the spec/15
+    /// name (disambiguates from possible future Rust-style variadic
+    /// generics; the rename from HIR's `is_variadic` happens at this
+    /// boundary).
+    ///
+    /// Struct variant — mirrors `ast::TypeKind::Fn` and
+    /// `hir::HirTyKind::Fn` so each match site is self-documenting at
+    /// the destructure point. Hash-cons works as for tuple variants:
+    /// `derive(Hash, Eq, PartialEq)` traverses fields, equal shapes
+    /// share a `TyId`.
+    Fn {
+        params: Vec<TyId>,
+        ret: TyId,
+        is_extern_c: bool,
+        c_variadic: bool,
+    },
     /// `*const T` / `*mut T`. Mutability is interned alongside the pointee
     /// so the arena distinguishes the two variants. Unify treats them
     /// equivalently (shape only); the coercion check at use sites enforces
@@ -154,6 +169,12 @@ pub struct FnSig {
     /// Rust-style variadic generics; the simpler `is_variadic` name
     /// only lives at the HIR layer.
     pub c_variadic: bool,
+    /// `true` for fns declared inside an `extern "C"` block. Mirrors
+    /// `HirFn.is_extern`. Propagates into `TyKind::Fn`'s third tuple
+    /// element when this fn-item's TyKind is constructed at a
+    /// reference site (`infer_expr`'s `HirExprKind::Fn(fid)` arm).
+    /// See spec/19_FN_PTR.md §3.2.
+    pub is_extern_c: bool,
 }
 
 /// Typed ADT definition. Built up across phases 0 and 0.5 in
@@ -372,13 +393,23 @@ impl TyArena {
             }),
 
             // Recursive structural cases.
-            TyKind::Fn(params, ret, c_variadic) => {
+            TyKind::Fn {
+                params,
+                ret,
+                is_extern_c,
+                c_variadic,
+            } => {
                 let params: Vec<_> = params
                     .iter()
                     .map(|&p| self.substitute_ty(p, subst))
                     .collect();
                 let ret = self.substitute_ty(ret, subst);
-                self.intern(TyKind::Fn(params, ret, c_variadic))
+                self.intern(TyKind::Fn {
+                    params,
+                    ret,
+                    is_extern_c,
+                    c_variadic,
+                })
             }
             TyKind::Ptr(inner, m) => {
                 let inner = self.substitute_ty(inner, subst);
@@ -439,8 +470,17 @@ impl TyArena {
             TyKind::Prim(p) => p.name().to_string(),
             TyKind::Unit => "()".to_string(),
             TyKind::Never => "!".to_string(),
-            TyKind::Fn(params, ret, c_variadic) => {
-                let mut s = String::from("fn(");
+            TyKind::Fn {
+                params,
+                ret,
+                is_extern_c,
+                c_variadic,
+            } => {
+                let mut s = String::new();
+                if *is_extern_c {
+                    s.push_str("extern \"C\" ");
+                }
+                s.push_str("fn(");
                 for (i, p) in params.iter().enumerate() {
                     if i > 0 {
                         s.push_str(", ");

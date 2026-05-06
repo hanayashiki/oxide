@@ -231,8 +231,24 @@ fn relate_with_ctx(
         }
         (TyKind::Prim(p), TyKind::Prim(q)) if p == q => {}
         (TyKind::Unit, TyKind::Unit) => {}
-        (TyKind::Fn(params_f, ret_f, var_f), TyKind::Fn(params_e, ret_e, var_e)) => {
-            if params_f.len() != params_e.len() || var_f != var_e {
+        (
+            TyKind::Fn {
+                params: params_f,
+                ret: ret_f,
+                is_extern_c: extern_f,
+                c_variadic: var_f,
+            },
+            TyKind::Fn {
+                params: params_e,
+                ret: ret_e,
+                is_extern_c: extern_e,
+                c_variadic: var_e,
+            },
+        ) => {
+            if params_f.len() != params_e.len()
+                || extern_f != extern_e
+                || var_f != var_e
+            {
                 // Equate mode emits eagerly; Subtype mode defers to
                 // `discharge_subtype` so the same diagnostic doesn't
                 // fire twice. See spec/05_TYPE_CHECKER.md §Obligations.
@@ -242,6 +258,10 @@ fn relate_with_ctx(
                 }
                 return;
             }
+            // Eager body keeps walking symmetrically — Infer-binding is
+            // direction-agnostic. The directional variance check (params
+            // contravariant, return covariant) lives in
+            // `discharge_subtype_inner` per spec/19_FN_PTR.md §3.1.
             for (pf, pe) in params_f.iter().zip(&params_e) {
                 relate_with_ctx(cx, inf, *pf, *pe, span.clone(), ctx);
             }
@@ -416,7 +436,7 @@ fn occurs_in(cx: &Checker, inf: &Inferer, id: InferId, ty: TyId) -> bool {
         TyKind::Infer(other) => other == id,
         TyKind::Ptr(pointee, _) => occurs_in(cx, inf, id, pointee),
         TyKind::Array(elem, _) => occurs_in(cx, inf, id, elem),
-        TyKind::Fn(params, ret, _) => {
+        TyKind::Fn { params, ret, .. } => {
             params.iter().any(|p| occurs_in(cx, inf, id, *p)) || occurs_in(cx, inf, id, ret)
         }
         // Adt is nominal-leaf (identity-only); Prim/Unit/Never/Error
@@ -505,8 +525,26 @@ fn discharge_subtype_inner(
             // Subtype-only relaxation, gated to under-Ptr position."
             discharge_subtype_inner(cx, a_elem, e_elem, span, false);
         }
-        (TyKind::Fn(a_params, a_ret, a_var), TyKind::Fn(e_params, e_ret, e_var)) => {
-            if a_params.len() != e_params.len() || a_var != e_var {
+        (
+            TyKind::Fn {
+                params: a_params,
+                ret: a_ret,
+                is_extern_c: a_extern,
+                c_variadic: a_var,
+            },
+            TyKind::Fn {
+                params: e_params,
+                ret: e_ret,
+                is_extern_c: e_extern,
+                c_variadic: e_var,
+            },
+        ) => {
+            // Invariant on arity, is_extern_c, c_variadic
+            // (spec/19_FN_PTR.md §3.2/3.3).
+            if a_params.len() != e_params.len()
+                || a_extern != e_extern
+                || a_var != e_var
+            {
                 cx.errors.push(TypeError::TypeMismatch {
                     expected,
                     found: actual,
@@ -514,10 +552,16 @@ fn discharge_subtype_inner(
                 });
                 return;
             }
+            // Contravariant on parameters: actual `Fn(A) -> _` is
+            // acceptable as expected `Fn(B) -> _` iff B <: A. Note the
+            // swapped order: subtype(expected_param, actual_param).
+            // Reset pointee=false — under-Fn is *not* under-Ptr; the
+            // length-erasure / mut-relax rules don't compose through Fn.
             for (ap, ep) in a_params.iter().zip(&e_params) {
-                discharge_eq(cx, *ap, *ep, span.clone());
+                discharge_subtype_inner(cx, *ep, *ap, span.clone(), false);
             }
-            discharge_eq(cx, a_ret, e_ret, span);
+            // Covariant on return.
+            discharge_subtype_inner(cx, a_ret, e_ret, span, false);
         }
         (TyKind::Adt(a_aid, a_args), TyKind::Adt(e_aid, e_args)) => {
             if a_aid != e_aid {
@@ -578,7 +622,18 @@ fn discharge_eq(cx: &mut Checker, a: TyId, b: TyId, span: Span) {
         (TyKind::Array(a_elem, _), TyKind::Array(b_elem, _)) => {
             discharge_eq(cx, a_elem, b_elem, span);
         }
-        (TyKind::Fn(a_params, a_ret, _), TyKind::Fn(b_params, b_ret, _)) => {
+        (
+            TyKind::Fn {
+                params: a_params,
+                ret: a_ret,
+                ..
+            },
+            TyKind::Fn {
+                params: b_params,
+                ret: b_ret,
+                ..
+            },
+        ) => {
             if a_params.len() == b_params.len() {
                 for (ap, bp) in a_params.iter().zip(&b_params) {
                     discharge_eq(cx, *ap, *bp, span.clone());
@@ -618,6 +673,19 @@ pub(super) fn discharge_sized(cx: &mut Checker, ty: TyId, pos: SizedPos, span: S
             if let TyKind::Array(elem, Some(_)) = cx.tys.kind(pointee).clone() {
                 discharge_sized(cx, elem, pos, span);
             }
+        }
+        TyKind::Fn { params, ret, .. } => {
+            // spec/19_FN_PTR.md §4: a fn pointer's parameters and
+            // return type must themselves be sized — same obligation
+            // as the corresponding `fn_decl`. The outer Sized
+            // obligation (Param / Return / Field / LetBinding /
+            // Deref / TypeArg) covers the fn-pointer slot itself
+            // (which is always pointer-sized); recurse to validate
+            // inner positions.
+            for p in params {
+                discharge_sized(cx, p, pos, span.clone());
+            }
+            discharge_sized(cx, ret, pos, span);
         }
         // Everything else is sized in v0.
         _ => {}

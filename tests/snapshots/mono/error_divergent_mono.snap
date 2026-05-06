@@ -3,8 +3,8 @@
    ╭─[ error_divergent_mono.ox:2:5 ]
    │
  2 │     f::<*mut T>()
-   │     ──────┬──────  
-   │           ╰──────── diverges here
+   │     ┬  
+   │     ╰── diverges here
    │ 
    │ Help: instantiation chain (root → tip):
    │         main  (depth 0)
