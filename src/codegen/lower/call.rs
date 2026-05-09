@@ -18,7 +18,7 @@ use inkwell::values::{
 };
 
 use crate::codegen::lower::{Codegen, FnCodegenContext, Operand, intrinsics::IntrinsicEmitter};
-use crate::codegen::ty::{is_void_ret, lower_fn_type};
+use crate::codegen::ty::is_void_ret;
 use crate::hir::{HExprId, HirExprKind};
 use crate::mono::{Instance, InstanceOperation};
 use crate::typeck::{PrimTy, TyId, TyKind};
@@ -160,14 +160,7 @@ impl<'ctx> CallLike<'ctx> {
                 // FunctionType for build_indirect_call. is_extern_c is
                 // a typeck-only concept; LLVM CC is the default for
                 // both forms in v0.
-                let fn_ty = lower_fn_type(
-                    codegen.ctx,
-                    codegen.typeck_results,
-                    &mut codegen.adt_ll,
-                    &params_vec,
-                    ret_ty,
-                    c_variadic,
-                );
+                let fn_ty = codegen.lower_fn_type(&params_vec, ret_ty, c_variadic);
 
                 // Evaluate the callee. Invariant: every emit_expr arm
                 // that produces a Fn-typed value returns

@@ -7,9 +7,7 @@
 use inkwell::values::{BasicValue, BasicValueEnum};
 
 use crate::codegen::lower::{Codegen, FnCodegenContext, Operand};
-use crate::codegen::ty::{
-    is_ptr_width_int, lower_prim, lower_ty, prim_bit_width,
-};
+use crate::codegen::ty::{is_ptr_width_int, lower_prim, prim_bit_width};
 use crate::hir::HExprId;
 use crate::mono::InstanceOperation;
 use crate::typeck::{TyId, TyKind, layout};
@@ -139,8 +137,8 @@ fn emit_transmute<'a, 'ctx>(
     }
 
     // Fallback: alloca + store + load.
-    let src_ll = lower_ty(codegen.ctx, codegen.typeck_results, &mut codegen.adt_ll, src_ty);
-    let dst_ll = lower_ty(codegen.ctx, codegen.typeck_results, &mut codegen.adt_ll, dst_ty);
+    let src_ll = codegen.lower_ty(src_ty);
+    let dst_ll = codegen.lower_ty(dst_ty);
     let max_align = layout::align_of(codegen.typeck_results, src_ty)
         .unwrap_or(1)
         .max(layout::align_of(codegen.typeck_results, dst_ty).unwrap_or(1))

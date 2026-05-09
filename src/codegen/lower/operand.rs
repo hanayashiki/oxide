@@ -1,6 +1,6 @@
 use inkwell::values::{BasicValueEnum, PointerValue};
 
-use crate::{codegen::ty::lower_ty, typeck::TyId};
+use crate::typeck::TyId;
 
 /// The form a value-producing expression takes after lowering. This is the
 /// central place-vs-value abstraction in codegen — every `emit_expr` site
@@ -20,7 +20,7 @@ use crate::{codegen::ty::lower_ty, typeck::TyId};
 /// place-vs-value choice is the whole point of this abstraction. Every
 /// constructor site spells the variant explicitly.
 #[derive(Copy, Clone, Debug)]
-pub(super) enum Operand<'ctx> {
+pub(in crate::codegen) enum Operand<'ctx> {
     Value(BasicValueEnum<'ctx>),
     Place(PointerValue<'ctx>),
     Unit,
@@ -40,7 +40,7 @@ impl<'ctx> Operand<'ctx> {
     ///
     /// Shared by `emit_let`, `emit_assign`, `emit_if`, `emit_loop`,
     /// `emit_break`, anywhere a value flows into memory.
-    pub(super) fn store_into<'a>(
+    pub(in crate::codegen) fn store_into<'a>(
         self,
         codegen: &mut super::Codegen<'a, 'ctx>,
         dst: PointerValue<'ctx>,
@@ -59,7 +59,7 @@ impl<'ctx> Operand<'ctx> {
     /// operand is a Place; passes through Value; materializes `{} undef`
     /// for Unit. `name` is the LLVM SSA name suffix for the generated
     /// `load` (consumed only when the operand is a Place).
-    pub(super) fn load_value<'a>(
+    pub(in crate::codegen) fn load_value<'a>(
         self,
         codegen: &mut super::Codegen<'a, 'ctx>,
         ty: TyId,
@@ -68,7 +68,7 @@ impl<'ctx> Operand<'ctx> {
         match self {
             Operand::Value(v) => v,
             Operand::Place(p) => {
-                let llty = lower_ty(codegen.ctx, codegen.typeck_results, &mut codegen.adt_ll, ty);
+                let llty = codegen.lower_ty(ty);
                 codegen.builder.build_load(llty, p, name).unwrap()
             }
             Operand::Unit => codegen.ctx.struct_type(&[], false).get_undef().into(),
